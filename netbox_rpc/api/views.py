@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import jsonschema
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
@@ -59,6 +61,26 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
             raise PermissionDenied("execute_rpcprocedure permission is required.")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+
+        procedure = serializer.validated_data["procedure"]
+        if not procedure.enabled:
+            raise drf_serializers.ValidationError(
+                {"procedure_id": "This procedure is disabled."}
+            )
+        if procedure.approval_required:
+            if not request.user.has_perm("netbox_rpc.approve_rpcprocedure"):
+                raise PermissionDenied(
+                    "This procedure requires approval (approve_rpcprocedure permission)."
+                )
+        params = serializer.validated_data.get("params") or {}
+        if procedure.params_schema:
+            try:
+                jsonschema.validate(params, procedure.params_schema)
+            except jsonschema.ValidationError as exc:
+                raise drf_serializers.ValidationError(
+                    {"params": exc.message}
+                ) from exc
+
         execution = serializer.save(requested_by=request.user)
         job = RPCExecutionJob.enqueue(
             instance=execution,
