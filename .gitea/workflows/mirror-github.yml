@@ -1,6 +1,7 @@
 name: Mirror selected branches to GitHub
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
