@@ -67,6 +67,21 @@ clients must not submit arbitrary SSH command text.
 - Treat stdout and stderr as audit data. Store full output only where policy
   allows; otherwise store redacted summaries or hashes in future extensions.
 
+## API Validation
+
+`RPCExecutionViewSet.create()` enforces three guards before an execution
+record is created and the RQ job is enqueued:
+
+1. **Enabled** — disabled procedures are rejected (HTTP 400).
+2. **Approval** — procedures with `approval_required=True` require the caller
+   to hold `netbox_rpc.approve_rpcprocedure`.
+3. **Params schema** — when a procedure defines `params_schema`, submitted
+   `params` are validated against the JSON Schema before proceeding.
+
+These guards run at the API layer, not the model layer, because the serializer
+receives the procedure as a foreign-key ID and the schema/enabled/approval
+checks require the resolved object.
+
 ## Testing
 
 Default tests are static or mocked:

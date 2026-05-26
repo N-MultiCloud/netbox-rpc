@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 import requests
+from django.db import IntegrityError
 from django.utils import timezone
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
@@ -185,7 +186,12 @@ def _call_backend(backend, execution: RPCExecution) -> dict[str, Any]:
             code="RPC_BACKEND_BAD_RESPONSE",
         ) from exc
     if resp.status_code >= 400:
-        detail = data.get("detail") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise RPCExecutionError(
+                f"nms-backend returned HTTP {resp.status_code}",
+                code="RPC_BACKEND_ERROR",
+            )
+        detail = data.get("detail")
         message = detail if isinstance(detail, str) else data.get("error", f"HTTP {resp.status_code}")
         raise RPCExecutionError(str(message), code=str(data.get("code") or "RPC_BACKEND_ERROR"))
     return data
@@ -220,11 +226,26 @@ def _event(
     message: str,
     data: dict[str, Any] | None = None,
 ) -> None:
-    last = execution.events.order_by("-sequence").first()
-    sequence = 1 if last is None else last.sequence + 1
+    from django.db.models import Max
+    from django.db.models.functions import Coalesce
+
+    max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
+    for attempt in range(3):
+        try:
+            RPCExecutionEvent.objects.create(
+                execution=execution,
+                sequence=max_seq + 1 + attempt,
+                level=level,
+                event=event,
+                message=message,
+                data=data or {},
+            )
+            return
+        except IntegrityError:
+            max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
     RPCExecutionEvent.objects.create(
         execution=execution,
-        sequence=sequence,
+        sequence=max_seq + 1,
         level=level,
         event=event,
         message=message,

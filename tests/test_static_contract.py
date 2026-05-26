@@ -39,3 +39,25 @@ def test_api_routes_are_registered() -> None:
     assert 'router.register("linux-service-allowlist"' in urls
     assert 'router.register("executions"' in urls
     assert 'router.register("execution-events"' in urls
+
+
+def test_create_guards_enabled_and_approval_and_params_schema() -> None:
+    views = read("netbox_rpc/api/views.py")
+    assert "procedure.enabled" in views
+    assert "procedure.approval_required" in views
+    assert "jsonschema.validate" in views
+
+
+def test_migration_does_not_import_live_constants() -> None:
+    migration = read("netbox_rpc/migrations/0002_seed_initial_procedures.py")
+    assert "from netbox_rpc" not in migration
+
+
+def test_event_creation_handles_integrity_error() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "IntegrityError" in jobs
+
+
+def test_call_backend_handles_non_dict_json() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "not isinstance(data, dict)" in jobs

@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ("contenttypes", "0002_remove_content_type_name"),
-        ("netbox_nms", "0019_dre_financial_items"),
+        ("netbox_nms", "0015_pfsense_service_type"),
     ]
 
     operations = [
