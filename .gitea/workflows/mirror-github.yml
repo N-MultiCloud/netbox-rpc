@@ -90,14 +90,11 @@ jobs:
           cat > "${gitea_askpass}" <<'EOF'
           #!/usr/bin/env bash
           case "$1" in
-            *Username*) printf '%s
-' x-access-token ;;
-            *Password*) printf '%s
-' "${GITEA_SOURCE_TOKEN}" ;;
-            *) printf '
-' ;;
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "${GITEA_SOURCE_TOKEN}" ;;
+            *) printf '\n' ;;
           esac
-EOF
+          EOF
           chmod 700 "${gitea_askpass}"
 
           git init "${worktree}"
