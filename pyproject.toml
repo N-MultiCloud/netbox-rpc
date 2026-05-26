@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-rpc"
+version = "0.1.0"
+requires-python = ">=3.12.0"
+dependencies = [
+    "requests>=2.32",
+    "netbox-nms>=0.1.2,<0.2.0",
+]
+authors = [
+    {name = "Emerson Felipe", email = "emerson.felipe@nmultifibra.com.br"},
+]
+description = "NetBox plugin for audited RPC procedure execution through nms-backend"
+readme = { file = "README.md", content-type = "text/markdown" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["netbox_rpc*"]
