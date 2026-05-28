@@ -108,6 +108,46 @@ def test_journal_tail_normalizes_lines(
     assert normalized["lines"] == expected_lines
 
 
+def test_linux_service_normalization_includes_ssh_credential_override_pk(
+    jobs_module,
+) -> None:
+    allow = SimpleNamespace(
+        systemd_unit="nginx.service",
+        target_models=["dcim.device"],
+        ssh_credential_override_id=42,
+    )
+    _mock_allowlist(jobs_module, allow)
+    execution = _execution(
+        "os.linux.ubuntu.24.status_service",
+        "os.linux_ubuntu_24.status_service",
+        {"service_slug": "nginx"},
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["rpc_ssh_credential_pk"] == 42
+
+
+def test_linux_service_normalization_omits_ssh_credential_override_pk_when_unset(
+    jobs_module,
+) -> None:
+    allow = SimpleNamespace(
+        systemd_unit="nginx.service",
+        target_models=["dcim.device"],
+        ssh_credential_override_id=None,
+    )
+    _mock_allowlist(jobs_module, allow)
+    execution = _execution(
+        "os.linux.ubuntu.24.status_service",
+        "os.linux_ubuntu_24.status_service",
+        {"service_slug": "nginx"},
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert "rpc_ssh_credential_pk" not in normalized
+
+
 def _execution(procedure_name: str, handler_id: str, params: dict[str, object]):
     return SimpleNamespace(
         procedure=SimpleNamespace(name=procedure_name, handler_id=handler_id),
@@ -118,6 +158,8 @@ def _execution(procedure_name: str, handler_id: str, params: dict[str, object]):
 
 
 def _mock_allowlist(jobs_module, allow):
+    if allow is not None and not hasattr(allow, "ssh_credential_override_id"):
+        allow.ssh_credential_override_id = None
     query = SimpleNamespace(first=MagicMock(return_value=allow))
     filter_mock = MagicMock(return_value=query)
     jobs_module.RPCLinuxServiceAllowlist.objects = SimpleNamespace(filter=filter_mock)

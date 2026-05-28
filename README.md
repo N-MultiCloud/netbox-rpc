@@ -42,6 +42,10 @@ libraries. It must execute only known handler IDs such as
 `service_type="ssh"`. Those rows provide the management host, port, linked
 `DeviceCredential`, `ssh_known_hosts_entry`, and
 `ssh_strict_host_key_checking` values consumed by `nms-backend`.
+Per-service Linux allowlist entries may set `ssh_credential_override` to a
+`netbox-nms.DeviceCredential`; when present, the normalized execution params
+include `rpc_ssh_credential_pk` so `nms-backend` fetches that credential by PK
+instead of resolving SSH credentials by device name.
 
 ## Procedure Naming
 

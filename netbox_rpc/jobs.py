@@ -177,7 +177,7 @@ def _normalize_linux_service_execution(
             code="RPC_LINUX_SERVICE_TARGET_DENIED",
         )
     unit = allow.systemd_unit
-    return {
+    result = {
         "target": target,
         "service_slug": slug,
         "systemd_unit": unit,
@@ -186,6 +186,9 @@ def _normalize_linux_service_execution(
             "systemd_unit": unit,
         },
     }
+    if allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
 
 
 def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | None) -> int:
