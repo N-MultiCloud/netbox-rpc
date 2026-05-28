@@ -63,6 +63,18 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
     )
     description = models.CharField(max_length=255, blank=True)
     comments = models.TextField(blank=True)
+    ssh_credential_override = models.ForeignKey(
+        "netbox_nms.DeviceCredential",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rpc_allowlist_entries",
+        help_text=(
+            "Override the device-level DeviceService SSH credential for RPC jobs "
+            "targeting this service. Leave blank to use the target device's default "
+            "SSH DeviceService credential resolved by device name."
+        ),
+    )
 
     class Meta:
         app_label = "netbox_rpc"

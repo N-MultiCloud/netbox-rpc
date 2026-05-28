@@ -59,6 +59,7 @@ class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):
             "target_models",
             "description",
             "comments",
+            "ssh_credential_override",
             "tags",
             "custom_fields",
             "created",

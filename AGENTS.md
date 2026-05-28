@@ -6,6 +6,10 @@ accept arbitrary SSH command text from API clients.
 - Procedure records map canonical names to backend `handler_id` values.
 - NetBox RQ jobs normalize params and delegate execution to `nms-backend`.
 - SSH credentials and host-key pinning live in `netbox-nms.DeviceService`.
+  `RPCLinuxServiceAllowlist.ssh_credential_override` can point at a
+  `netbox-nms.DeviceCredential` for per-service SSH key overrides; when set,
+  `rpc_ssh_credential_pk` in `normalized_params` tells `nms-backend` to fetch
+  that credential by PK instead of resolving credentials by target device name.
 - Keep procedure names in the documented canonical dotted forms:
   `os.<family>.<distro>.<version>.<action>` and
   `network.device.<manufacturer>.<device-family>.<model>.<version>.<action>`.
