@@ -12,7 +12,18 @@ from netbox.jobs import JobRunner
 
 from netbox_nms.backend import get_backend
 
-from .constants import HUAWEI_MA5800_R024_START_ONT, UBUNTU_24_RESTART_SERVICE
+from .constants import (
+    HUAWEI_MA5800_R024_START_ONT,
+    UBUNTU_24_DAEMON_RELOAD,
+    UBUNTU_24_DISABLE_SERVICE,
+    UBUNTU_24_ENABLE_SERVICE,
+    UBUNTU_24_JOURNAL_TAIL,
+    UBUNTU_24_RELOAD_SERVICE,
+    UBUNTU_24_RESTART_SERVICE,
+    UBUNTU_24_START_SERVICE,
+    UBUNTU_24_STATUS_SERVICE,
+    UBUNTU_24_STOP_SERVICE,
+)
 from .models import RPCLinuxServiceAllowlist, RPCExecution, RPCExecutionEvent
 
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
@@ -101,28 +112,27 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     target = execution.target_display
 
     if procedure_name == UBUNTU_24_RESTART_SERVICE:
-        slug = str((execution.params or {}).get("service_slug") or "").strip()
-        allow = RPCLinuxServiceAllowlist.objects.filter(slug=slug, enabled=True).first()
-        if allow is None:
-            raise RPCExecutionError(
-                f"Linux service {slug!r} is not allowlisted.",
-                code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
-            )
-        target_models = set(allow.target_models or [])
-        if target_models and execution.target_model_label not in target_models:
-            raise RPCExecutionError(
-                f"Linux service {slug!r} is not allowed for {execution.target_model_label}.",
-                code="RPC_LINUX_SERVICE_TARGET_DENIED",
-            )
-        unit = allow.systemd_unit
+        return _normalize_linux_service_execution(execution, target)
+
+    if procedure_name in {
+        UBUNTU_24_STATUS_SERVICE,
+        UBUNTU_24_START_SERVICE,
+        UBUNTU_24_STOP_SERVICE,
+        UBUNTU_24_RELOAD_SERVICE,
+        UBUNTU_24_ENABLE_SERVICE,
+        UBUNTU_24_DISABLE_SERVICE,
+        UBUNTU_24_JOURNAL_TAIL,
+    }:
+        normalized = _normalize_linux_service_execution(execution, target)
+        if procedure_name == UBUNTU_24_JOURNAL_TAIL:
+            lines = int((execution.params or {}).get("lines", 100))
+            normalized["lines"] = lines
+        return normalized
+
+    if procedure_name == UBUNTU_24_DAEMON_RELOAD:
         return {
             "target": target,
-            "service_slug": slug,
-            "systemd_unit": unit,
-            "command_fingerprint": {
-                "handler_id": execution.procedure.handler_id,
-                "systemd_unit": unit,
-            },
+            "command_fingerprint": {"handler_id": execution.procedure.handler_id},
         }
 
     if procedure_name == HUAWEI_MA5800_R024_START_ONT:
@@ -147,6 +157,35 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_linux_service_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    slug = str((execution.params or {}).get("service_slug") or "").strip()
+    allow = RPCLinuxServiceAllowlist.objects.filter(slug=slug, enabled=True).first()
+    if allow is None:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowlisted.",
+            code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
+        )
+    target_models = set(allow.target_models or [])
+    if target_models and execution.target_model_label not in target_models:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowed for {execution.target_model_label}.",
+            code="RPC_LINUX_SERVICE_TARGET_DENIED",
+        )
+    unit = allow.systemd_unit
+    return {
+        "target": target,
+        "service_slug": slug,
+        "systemd_unit": unit,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "systemd_unit": unit,
+        },
+    }
 
 
 def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | None) -> int:

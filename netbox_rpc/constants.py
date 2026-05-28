@@ -4,6 +4,30 @@ HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont
 UBUNTU_24_RESTART_SERVICE = "os.linux.ubuntu.24.restart_service"
 UBUNTU_24_RESTART_SERVICE_HANDLER = "os.linux_ubuntu_24.restart_service"
 
+UBUNTU_24_STATUS_SERVICE = "os.linux.ubuntu.24.status_service"
+UBUNTU_24_STATUS_SERVICE_HANDLER = "os.linux_ubuntu_24.status_service"
+
+UBUNTU_24_START_SERVICE = "os.linux.ubuntu.24.start_service"
+UBUNTU_24_START_SERVICE_HANDLER = "os.linux_ubuntu_24.start_service"
+
+UBUNTU_24_STOP_SERVICE = "os.linux.ubuntu.24.stop_service"
+UBUNTU_24_STOP_SERVICE_HANDLER = "os.linux_ubuntu_24.stop_service"
+
+UBUNTU_24_RELOAD_SERVICE = "os.linux.ubuntu.24.reload_service"
+UBUNTU_24_RELOAD_SERVICE_HANDLER = "os.linux_ubuntu_24.reload_service"
+
+UBUNTU_24_ENABLE_SERVICE = "os.linux.ubuntu.24.enable_service"
+UBUNTU_24_ENABLE_SERVICE_HANDLER = "os.linux_ubuntu_24.enable_service"
+
+UBUNTU_24_DISABLE_SERVICE = "os.linux.ubuntu.24.disable_service"
+UBUNTU_24_DISABLE_SERVICE_HANDLER = "os.linux_ubuntu_24.disable_service"
+
+UBUNTU_24_DAEMON_RELOAD = "os.linux.ubuntu.24.daemon_reload"
+UBUNTU_24_DAEMON_RELOAD_HANDLER = "os.linux_ubuntu_24.daemon_reload"
+
+UBUNTU_24_JOURNAL_TAIL = "os.linux.ubuntu.24.journal_tail"
+UBUNTU_24_JOURNAL_TAIL_HANDLER = "os.linux_ubuntu_24.journal_tail"
+
 INITIAL_PROCEDURES = (
     {
         "name": HUAWEI_MA5800_R024_START_ONT,
@@ -60,5 +84,171 @@ INITIAL_PROCEDURES = (
                 "active_state": {"type": "string"},
             },
         },
+    },
+)
+
+_SYSTEMD_SERVICE_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["service_slug"],
+    "additionalProperties": False,
+    "properties": {
+        "service_slug": {"type": "string", "minLength": 1, "maxLength": 100},
+    },
+}
+
+_SYSTEMD_JOURNAL_TAIL_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["service_slug"],
+    "additionalProperties": False,
+    "properties": {
+        "service_slug": {"type": "string", "minLength": 1, "maxLength": 100},
+        "lines": {"type": "integer", "minimum": 1, "maximum": 500},
+    },
+}
+
+_SYSTEMD_DAEMON_RELOAD_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {},
+}
+
+_SYSTEMD_SERVICE_STATE_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target", "service", "active_state"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "service": {"type": "string"},
+        "active_state": {"type": "string"},
+        "sub_state": {"type": "string"},
+        "unit_file_state": {"type": "string"},
+    },
+}
+
+_SYSTEMD_SERVICE_ENABLEMENT_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target", "service"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "service": {"type": "string"},
+        "unit_file_state": {"type": "string"},
+    },
+}
+
+_SYSTEMD_DAEMON_RELOAD_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "exit_code": {"type": "integer"},
+    },
+}
+
+_SYSTEMD_JOURNAL_TAIL_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target", "service"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "service": {"type": "string"},
+        "lines": {"type": "integer"},
+        "output": {"type": "string"},
+    },
+}
+
+SYSTEMD_PROCEDURES = (
+    {
+        "name": UBUNTU_24_STATUS_SERVICE,
+        "handler_id": UBUNTU_24_STATUS_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Read status for an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_STATE_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_START_SERVICE,
+        "handler_id": UBUNTU_24_START_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Start an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_STATE_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_STOP_SERVICE,
+        "handler_id": UBUNTU_24_STOP_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Stop an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_STATE_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_RELOAD_SERVICE,
+        "handler_id": UBUNTU_24_RELOAD_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Reload an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_STATE_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_ENABLE_SERVICE,
+        "handler_id": UBUNTU_24_ENABLE_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Enable an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_ENABLEMENT_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_DISABLE_SERVICE,
+        "handler_id": UBUNTU_24_DISABLE_SERVICE_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Disable an allowlisted systemd service",
+        "params_schema": _SYSTEMD_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_SERVICE_ENABLEMENT_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_DAEMON_RELOAD,
+        "handler_id": UBUNTU_24_DAEMON_RELOAD_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Reload the systemd manager configuration",
+        "params_schema": _SYSTEMD_DAEMON_RELOAD_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_DAEMON_RELOAD_RESULT_SCHEMA,
+    },
+    {
+        "name": UBUNTU_24_JOURNAL_TAIL,
+        "handler_id": UBUNTU_24_JOURNAL_TAIL_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Read recent journal output for an allowlisted systemd service",
+        "params_schema": _SYSTEMD_JOURNAL_TAIL_PARAMS_SCHEMA,
+        "result_schema": _SYSTEMD_JOURNAL_TAIL_RESULT_SCHEMA,
     },
 )
