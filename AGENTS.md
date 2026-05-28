@@ -9,6 +9,12 @@ accept arbitrary SSH command text from API clients.
 - Keep procedure names in the documented canonical dotted forms:
   `os.<family>.<distro>.<version>.<action>` and
   `network.device.<manufacturer>.<device-family>.<model>.<version>.<action>`.
+- Ubuntu 24 systemd procedures currently include read procedures
+  `os.linux.ubuntu.24.status_service` and `os.linux.ubuntu.24.journal_tail`,
+  plus write procedures `os.linux.ubuntu.24.start_service`,
+  `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
+  `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
+  and `os.linux.ubuntu.24.daemon_reload`.
 - Keep `README.md` updated when procedure policy, handler IDs, execution
   routing, audit behavior, or security constraints change.
 - Tests must use mocks and fixtures only; do not connect to real Linux hosts,

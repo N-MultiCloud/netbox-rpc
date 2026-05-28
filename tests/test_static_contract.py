@@ -25,6 +25,22 @@ def test_procedure_catalog_stores_handler_ids_not_commands() -> None:
     assert "os.linux_ubuntu_24.restart_service" in constants
 
 
+def test_systemd_procedure_catalog_names_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    assert "SYSTEMD_PROCEDURES" in constants
+    for name in (
+        "os.linux.ubuntu.24.status_service",
+        "os.linux.ubuntu.24.start_service",
+        "os.linux.ubuntu.24.stop_service",
+        "os.linux.ubuntu.24.reload_service",
+        "os.linux.ubuntu.24.enable_service",
+        "os.linux.ubuntu.24.disable_service",
+        "os.linux.ubuntu.24.daemon_reload",
+        "os.linux.ubuntu.24.journal_tail",
+    ):
+        assert name in constants
+
+
 def test_execution_job_delegates_to_nms_backend() -> None:
     jobs = read("netbox_rpc/jobs.py")
     assert "get_backend" in jobs
@@ -50,6 +66,11 @@ def test_create_guards_enabled_and_approval_and_params_schema() -> None:
 
 def test_migration_does_not_import_live_constants() -> None:
     migration = read("netbox_rpc/migrations/0002_seed_initial_procedures.py")
+    assert "from netbox_rpc" not in migration
+
+
+def test_systemd_migration_does_not_import_live_constants() -> None:
+    migration = read("netbox_rpc/migrations/0004_seed_systemd_management_procedures.py")
     assert "from netbox_rpc" not in migration
 
 
