@@ -1,6 +1,18 @@
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
 
+NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
+NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
+NGINX_1_RELOAD = "service.nginx.1.reload"
+NGINX_1_ROLLBACK = "service.nginx.1.rollback"
+
+NGINX_PROCEDURES = frozenset({
+    NGINX_1_CONFIG_TEST,
+    NGINX_1_CONFIG_DEPLOY,
+    NGINX_1_RELOAD,
+    NGINX_1_ROLLBACK,
+})
+
 UBUNTU_24_RESTART_SERVICE = "os.linux.ubuntu.24.restart_service"
 UBUNTU_24_RESTART_SERVICE_HANDLER = "os.linux_ubuntu_24.restart_service"
 

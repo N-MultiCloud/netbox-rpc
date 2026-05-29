@@ -27,16 +27,16 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"], url_path="available")
     def available(self, request):
+        from django.db.models import Q
+
         target_type = (request.query_params.get("target_type") or "").strip().lower()
-        qs = self.queryset.filter(enabled=True)
-        items = []
-        for procedure in qs:
-            allowed = {str(item).lower() for item in procedure.target_models or []}
-            if target_type and allowed and target_type not in allowed:
-                continue
-            items.append(procedure)
-        page = self.paginate_queryset(items)
-        serializer = self.get_serializer(page if page is not None else items, many=True)
+        qs = models.RPCProcedure.objects.filter(enabled=True).prefetch_related("tags")
+        if target_type:
+            # Include procedures with no target restriction (empty list) or those
+            # that explicitly allow the requested target type.
+            qs = qs.filter(Q(target_models=[]) | Q(target_models__contains=[target_type]))
+        page = self.paginate_queryset(qs)
+        serializer = self.get_serializer(page if page is not None else qs, many=True)
         if page is not None:
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
@@ -82,12 +82,24 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
                 ) from exc
 
         execution = serializer.save(requested_by=request.user)
-        job = RPCExecutionJob.enqueue(
-            instance=execution,
-            user=request.user,
-            name=f"RPC Execution: {execution.procedure.name}",
-            backend_pk=execution.backend_id,
-        )
+        try:
+            job = RPCExecutionJob.enqueue(
+                instance=execution,
+                user=request.user,
+                name=f"RPC Execution: {execution.procedure.name}",
+                backend_pk=execution.backend_id,
+            )
+        except Exception:
+            # Enqueue failed (e.g. Redis unavailable). Mark the execution failed so
+            # it doesn't sit permanently in STATUS_QUEUED with no associated job.
+            execution.status = models.RPCExecution.STATUS_FAILED
+            execution.error_code = "RPC_ENQUEUE_FAILED"
+            execution.error_message = (
+                "Failed to enqueue RPC job. Check RQ/Redis connectivity."
+            )
+            execution.save(update_fields=["status", "error_code", "error_message"])
+            raise
+
         execution.job_id = job.pk
         execution.save(update_fields=["job_id"])
         output = self.get_serializer(execution)

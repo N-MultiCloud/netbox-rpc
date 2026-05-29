@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 import requests
@@ -14,6 +15,10 @@ from netbox_nms.backend import get_backend
 
 from .constants import (
     HUAWEI_MA5800_R024_START_ONT,
+    NGINX_1_CONFIG_DEPLOY,
+    NGINX_1_CONFIG_TEST,
+    NGINX_1_RELOAD,
+    NGINX_1_ROLLBACK,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -25,6 +30,8 @@ from .constants import (
     UBUNTU_24_STOP_SERVICE,
 )
 from .models import RPCLinuxServiceAllowlist, RPCExecution, RPCExecutionEvent
+
+logger = logging.getLogger(__name__)
 
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
@@ -45,12 +52,18 @@ class RPCExecutionJob(JobRunner):
         backend_pk = kwargs.pop("backend_pk", None)
         kwargs.setdefault("queue_name", RPC_QUEUE_NAME)
         kwargs.setdefault("job_timeout", RPC_JOB_TIMEOUT)
-        job = super().enqueue(*args, **kwargs)
-        data = job.data or {}
+        # Embed backend_pk in job data before enqueueing so workers can read it
+        # without a race between super().enqueue() and a subsequent job.save().
         if backend_pk:
+            data = dict(kwargs.get("data") or {})
             data["backend_pk"] = backend_pk
-        job.data = data
-        job.save(update_fields=["data"])
+            kwargs["data"] = data
+        job = super().enqueue(*args, **kwargs)
+        # Persist as a safety fallback in case super().enqueue() ignored the data kwarg.
+        if backend_pk and not (job.data or {}).get("backend_pk"):
+            job.data = dict(job.data or {})
+            job.data["backend_pk"] = backend_pk
+            job.save(update_fields=["data"])
         return job
 
     def run(self, *args: object, **kwargs: object) -> None:
@@ -111,10 +124,8 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     procedure_name = execution.procedure.name
     target = execution.target_display
 
-    if procedure_name == UBUNTU_24_RESTART_SERVICE:
-        return _normalize_linux_service_execution(execution, target)
-
     if procedure_name in {
+        UBUNTU_24_RESTART_SERVICE,
         UBUNTU_24_STATUS_SERVICE,
         UBUNTU_24_START_SERVICE,
         UBUNTU_24_STOP_SERVICE,
@@ -153,10 +164,61 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         }
         return normalized
 
+    if procedure_name == NGINX_1_CONFIG_TEST:
+        return _normalize_nginx_node_execution(execution, target, extra_params={})
+
+    if procedure_name == NGINX_1_CONFIG_DEPLOY:
+        params = execution.params or {}
+        config_content = str(params.get("config_content") or "").strip()
+        if not config_content:
+            raise RPCExecutionError("config_content must be a non-empty string.", code="RPC_PARAM_INVALID")
+        deployment_id = _int_range(params, "deployment_id", 1, None)
+        extra: dict[str, Any] = {
+            "config_content": config_content,
+            "deployment_id": deployment_id,
+        }
+        config_path = str(params.get("config_path") or "").strip()
+        if config_path:
+            extra["config_path"] = config_path
+        return _normalize_nginx_node_execution(execution, target, extra_params=extra)
+
+    if procedure_name == NGINX_1_RELOAD:
+        return _normalize_nginx_node_execution(execution, target, extra_params={})
+
+    if procedure_name == NGINX_1_ROLLBACK:
+        params = execution.params or {}
+        deployment_id = _int_range(params, "deployment_id", 1, None)
+        previous_config = str(params.get("previous_config") or "").strip()
+        if not previous_config:
+            raise RPCExecutionError(
+                "previous_config must be a non-empty string.", code="RPC_PARAM_INVALID"
+            )
+        extra = {"deployment_id": deployment_id, "previous_config": previous_config}
+        return _normalize_nginx_node_execution(execution, target, extra_params=extra)
+
     raise RPCExecutionError(
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_nginx_node_execution(
+    execution: RPCExecution,
+    target: str,
+    extra_params: dict[str, Any],
+) -> dict[str, Any]:
+    params = execution.params or {}
+    node_id = _int_range(params, "node_id", 1, None)
+    result: dict[str, Any] = {
+        "target": target,
+        "node_id": node_id,
+        **extra_params,
+    }
+    result["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "node_id": node_id,
+    }
+    return result
 
 
 def _normalize_linux_service_execution(
@@ -272,11 +334,14 @@ def _event(
     from django.db.models.functions import Coalesce
 
     max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
-    for attempt in range(3):
+    # Retry up to 3 times on sequence collisions from concurrent RQ workers.
+    # Always attempt max_seq+1 after re-reading — never add the loop counter,
+    # which would skip valid sequence numbers on re-reads.
+    for _ in range(3):
         try:
             RPCExecutionEvent.objects.create(
                 execution=execution,
-                sequence=max_seq + 1 + attempt,
+                sequence=max_seq + 1,
                 level=level,
                 event=event,
                 message=message,
@@ -285,14 +350,24 @@ def _event(
             return
         except IntegrityError:
             max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
-    RPCExecutionEvent.objects.create(
-        execution=execution,
-        sequence=max_seq + 1,
-        level=level,
-        event=event,
-        message=message,
-        data=data or {},
-    )
+    # Final attempt after exhausting retries; log instead of propagating if this
+    # also collides, so an event loss under extreme concurrency doesn't abort the job.
+    try:
+        RPCExecutionEvent.objects.create(
+            execution=execution,
+            sequence=max_seq + 1,
+            level=level,
+            event=event,
+            message=message,
+            data=data or {},
+        )
+    except IntegrityError:
+        logger.warning(
+            "RPCExecutionEvent sequence collision exhausted retries for execution %s "
+            "(event=%r). Event dropped.",
+            execution.pk,
+            event,
+        )
 
 
 def _hash_json(value: object) -> str:

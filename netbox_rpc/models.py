@@ -9,7 +9,21 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from netbox.models import NetBoxModel
 
-SYSTEMD_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]+(?:\\.service)?$")
+# Matches a valid systemd service unit name with an optional .service suffix.
+# Rules enforced:
+#   - no double dots anywhere (nginx..service rejected)
+#   - no double .service suffix (nginx.service.service rejected)
+#   - must start with alphanumeric/underscore/dash/@ (no leading dot)
+#   - must end with alphanumeric/underscore/dash/@ before the optional .service suffix
+# Valid: "nginx", "nginx.service", "user@1000.service", "org.example.service"
+# Invalid: "nginx..service", "nginx.service.service", ".nginx", "nginx."
+SYSTEMD_UNIT_RE = re.compile(
+    r"^(?!.*\.\.)"
+    r"(?!.*\.service\.service)"
+    r"[A-Za-z0-9_@-]"
+    r"(?:[A-Za-z0-9_.@-]*[A-Za-z0-9_@-])?"
+    r"(?:\.service)?$"
+)
 
 
 class RPCProcedure(NetBoxModel):

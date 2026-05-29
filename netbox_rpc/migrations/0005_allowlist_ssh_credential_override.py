@@ -5,7 +5,11 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
     dependencies = [
         ("netbox_rpc", "0004_seed_systemd_management_procedures"),
-        ("netbox_nms", "0026_cursor_review"),
+        # DeviceCredential was added in an early netbox-nms migration.
+        # Pin to 0027 (the latest at the time this migration was written).
+        # When netbox-nms squashes its migrations, update this name to match
+        # the squash replacement before running migrate.
+        ("netbox_nms", "0027_device_credential_ssh_key_auth"),
     ]
 
     operations = [
