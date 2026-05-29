@@ -1,0 +1,57 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-6">
+    <div class="card">
+      <h5 class="card-header">Linux Service Allowlist Entry</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Slug</th>
+            <td>{{ object.slug }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Systemd Unit</th>
+            <td><code>{{ object.systemd_unit }}</code></td>
+          </tr>
+          <tr>
+            <th scope="row">Enabled</th>
+            <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-muted">No</span>{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">SSH Credential Override</th>
+            <td>
+              {% if object.ssh_credential_override %}
+                <a href="{{ object.ssh_credential_override.get_absolute_url }}">{{ object.ssh_credential_override }}</a>
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Target Models</th>
+            <td>
+              {% if object.target_models %}
+                {% for label in object.target_models %}<code>{{ label }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Description</th>
+            <td>{{ object.description|placeholder }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/tags.html' %}
+  </div>
+  <div class="col col-md-6">
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+{% endblock content %}

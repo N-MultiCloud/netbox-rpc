@@ -1,0 +1,95 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-6">
+    <div class="card">
+      <h5 class="card-header">RPC Execution</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Procedure</th>
+            <td><a href="{{ object.procedure.get_absolute_url }}">{{ object.procedure }}</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Target</th>
+            <td>
+              {% if object.assigned_object %}
+                <a href="{{ object.assigned_object.get_absolute_url }}">{{ object.assigned_object }}</a>
+              {% else %}
+                <span class="text-muted">{{ object.target_model_label }}:{{ object.assigned_object_id }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Status</th>
+            <td>{{ object.get_status_display }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Requested By</th>
+            <td>{{ object.requested_by|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Backend</th>
+            <td>
+              {% if object.backend %}
+                <a href="{{ object.backend.get_absolute_url }}">{{ object.backend }}</a>
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Started At</th>
+            <td>{{ object.started_at|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Finished At</th>
+            <td>{{ object.finished_at|placeholder }}</td>
+          </tr>
+          {% if object.error_code %}
+          <tr>
+            <th scope="row">Error Code</th>
+            <td><code class="text-danger">{{ object.error_code }}</code></td>
+          </tr>
+          {% endif %}
+          {% if object.error_message %}
+          <tr>
+            <th scope="row">Error</th>
+            <td class="text-danger"><pre>{{ object.error_message }}</pre></td>
+          </tr>
+          {% endif %}
+          <tr>
+            <th scope="row">Request ID</th>
+            <td>{{ object.request_id|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Trace ID</th>
+            <td>{{ object.trace_id|placeholder }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/tags.html' %}
+  </div>
+  <div class="col col-md-6">
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+
+{% if events_table.rows %}
+<div class="row mb-3">
+  <div class="col">
+    <div class="card">
+      <h5 class="card-header">Execution Events</h5>
+      <div class="card-body">
+        {% render_table events_table %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock content %}

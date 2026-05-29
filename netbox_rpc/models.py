@@ -51,6 +51,10 @@ class RPCProcedure(NetBoxModel):
     def __str__(self) -> str:
         return self.name
 
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+        return reverse("plugins:netbox_rpc:rpcprocedure", args=[self.pk])
+
 
 class RPCLinuxServiceAllowlist(NetBoxModel):
     slug = models.SlugField(max_length=100, unique=True)
@@ -83,6 +87,10 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
 
     def __str__(self) -> str:
         return self.slug
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+        return reverse("plugins:netbox_rpc:rpclinuxserviceallowlist", args=[self.pk])
 
     def clean(self) -> None:
         super().clean()
@@ -166,6 +174,10 @@ class RPCExecution(NetBoxModel):
 
     def __str__(self) -> str:
         return f"{self.procedure.name} #{self.pk}"
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+        return reverse("plugins:netbox_rpc:rpcexecution", args=[self.pk])
 
     @property
     def target_model_label(self) -> str:
