@@ -19,8 +19,11 @@ accept arbitrary SSH command text from API clients.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
-- Nginx proxy procedures (`service.nginx.1.*`) are seeded by `netbox-proxy`
-  migration `0002` and normalized by the `NGINX_1_*` branch in
+- Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
+  migration `0003_seed_nginx_procedures` (canonical source) and also by
+  `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
+  Both seeds produce identical data; the `0003` entry is the authoritative one.
+  Normalizers live in the `NGINX_1_*` branches of
   `normalize_execution_params()` in `jobs.py`.
 - Keep `README.md` updated when procedure policy, handler IDs, execution
   routing, audit behavior, or security constraints change.
