@@ -1,0 +1,79 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-6">
+    <div class="card">
+      <h5 class="card-header">RPC Procedure</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Name</th>
+            <td>{{ object.name }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Handler ID</th>
+            <td><code>{{ object.handler_id }}</code></td>
+          </tr>
+          <tr>
+            <th scope="row">Version</th>
+            <td>{{ object.version }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Enabled</th>
+            <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-muted">No</span>{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">Effect</th>
+            <td>{{ object.get_effect_display }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Timeout</th>
+            <td>{{ object.timeout_seconds }}s</td>
+          </tr>
+          <tr>
+            <th scope="row">Approval Required</th>
+            <td>{% if object.approval_required %}<span class="text-warning">Yes</span>{% else %}No{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">Target Models</th>
+            <td>
+              {% if object.target_models %}
+                {% for label in object.target_models %}<code>{{ label }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Description</th>
+            <td>{{ object.description|placeholder }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    {% if object.params_schema %}
+    <div class="card">
+      <h5 class="card-header">Params Schema</h5>
+      <div class="card-body">
+        <pre>{{ object.params_schema }}</pre>
+      </div>
+    </div>
+    {% endif %}
+    {% if object.result_schema %}
+    <div class="card">
+      <h5 class="card-header">Result Schema</h5>
+      <div class="card-body">
+        <pre>{{ object.result_schema }}</pre>
+      </div>
+    </div>
+    {% endif %}
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/tags.html' %}
+  </div>
+  <div class="col col-md-6">
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+{% endblock content %}

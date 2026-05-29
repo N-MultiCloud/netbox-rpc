@@ -1,13 +1,25 @@
-from django.urls import path
-from django.http import HttpResponse
+from django.urls import include, path
+from utilities.urls import get_model_urls
 
-app_name = "netbox_rpc"
+from . import views  # noqa: F401 — imports @register_model_view decorators
 
+_MODEL_ROUTES = (
+    ("rpcprocedure", "procedures"),
+    ("rpclinuxserviceallowlist", "linux-service-allowlist"),
+    ("rpcexecution", "executions"),
+    ("rpcexecutionevent", "execution-events"),
+)
 
-def home(request):
-    return HttpResponse("NetBox RPC")
+urlpatterns = []
 
-
-urlpatterns = [
-    path("", home, name="home"),
-]
+for _model_name, _slug in _MODEL_ROUTES:
+    urlpatterns += [
+        path(
+            f"{_slug}/",
+            include(get_model_urls("netbox_rpc", _model_name, detail=False)),
+        ),
+        path(
+            f"{_slug}/<int:pk>/",
+            include(get_model_urls("netbox_rpc", _model_name)),
+        ),
+    ]
