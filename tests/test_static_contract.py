@@ -82,3 +82,42 @@ def test_event_creation_handles_integrity_error() -> None:
 def test_call_backend_handles_non_dict_json() -> None:
     jobs = read("netbox_rpc/jobs.py")
     assert "not isinstance(data, dict)" in jobs
+
+
+def test_install_ssh_key_procedure_is_defined_in_constants() -> None:
+    constants = read("netbox_rpc/constants.py")
+    assert "LINUX_INSTALL_SSH_KEY" in constants
+    assert "os.linux.ubuntu.24.install_ssh_key" in constants
+    assert "os.linux_ubuntu_24.install_ssh_key" in constants
+
+
+def test_install_ssh_key_has_normalizer_branch_in_jobs() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "LINUX_INSTALL_SSH_KEY" in jobs
+    assert "_normalize_ssh_install_key_execution" in jobs
+
+
+def test_install_ssh_key_normalizer_strips_comment_before_forwarding() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    # Comment is stripped by splitting on whitespace and rejoining first two fields
+    assert "split(None, 2)" in jobs
+    assert 'key_parts[:2]' in jobs
+
+
+def test_install_ssh_key_normalizer_validates_username_with_posix_regex() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "_POSIX_USERNAME_RE" in jobs
+    assert "fullmatch" in jobs
+
+
+def test_install_ssh_key_migration_depends_on_netbox_nms_user_ssh_key() -> None:
+    migration = read("netbox_rpc/migrations/0006_seed_ssh_install_procedure.py")
+    assert "netbox_nms" in migration
+    assert "0029_user_ssh_key" in migration
+    assert "from netbox_rpc" not in migration
+
+
+def test_ssh_key_procedure_seeded_targets_device_and_vm() -> None:
+    migration = read("netbox_rpc/migrations/0006_seed_ssh_install_procedure.py")
+    assert '"dcim.device"' in migration
+    assert '"virtualization.virtualmachine"' in migration

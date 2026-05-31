@@ -41,6 +41,18 @@ accept arbitrary SSH command text from API clients.
 - Tests must use mocks and fixtures only; do not connect to real Linux hosts,
   containers, VMs, or Huawei OLTs.
 
+## CI
+
+`.gitea/workflows/ci.yml` runs on every push and pull request via the
+`mirror-host` self-hosted runner. It installs pytest (no other deps needed
+because tests stub out Django/NetBox via `monkeypatch`), runs `py_compile` on
+all Python files, and executes `pytest tests/ -q`. This is the pre-merge gate.
+
+Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs.
+Use `monkeypatch` and `SimpleNamespace` stubs as demonstrated in
+`tests/test_jobs_systemd_normalization.py` and
+`tests/test_jobs_ssh_normalization.py`.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in

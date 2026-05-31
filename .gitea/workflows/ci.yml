@@ -1,0 +1,58 @@
+name: CI
+
+# Run the netbox-rpc test suite on every push and pull request.
+# Tests mock out Django and NetBox imports so no live NetBox instance is required.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Syntax check and tests
+    runs-on: mirror-host
+    env:
+      HOME: ${{ github.workspace }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv and Python 3.12
+        shell: bash
+        run: |
+          set -eo pipefail
+          export HOME="${GITHUB_WORKSPACE:-$PWD}"
+          export PATH="$HOME/.local/bin:$PATH"
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create venv and install pytest
+        shell: bash
+        run: |
+          set -eo pipefail
+          export HOME="${GITHUB_WORKSPACE:-$PWD}"
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --python 3.12 .ci-venv
+          uv pip install --python .ci-venv pytest pytest-asyncio requests
+
+      - name: Syntax check (py_compile)
+        shell: bash
+        run: |
+          set -eo pipefail
+          . .ci-venv/bin/activate
+          find netbox_rpc -name "*.py" -exec python -m py_compile {} +
+          find tests -name "*.py" -exec python -m py_compile {} +
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -eo pipefail
+          . .ci-venv/bin/activate
+          pytest tests/ -q --tb=short

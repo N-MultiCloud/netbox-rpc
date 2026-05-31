@@ -241,6 +241,12 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
+    # Stub requests so jobs.py can be imported without the package installed
+    requests_mod = types.ModuleType("requests")
+    requests_mod.post = MagicMock()
+    requests_mod.get = MagicMock()
+
+    monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
     monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)
