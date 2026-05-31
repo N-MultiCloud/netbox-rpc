@@ -15,6 +15,7 @@ from netbox_nms.backend import get_backend
 
 from .constants import (
     HUAWEI_MA5800_R024_START_ONT,
+    LINUX_INSTALL_SSH_KEY,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
@@ -164,6 +165,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         }
         return normalized
 
+    if procedure_name == LINUX_INSTALL_SSH_KEY:
+        return _normalize_ssh_install_key_execution(execution, target)
+
     if procedure_name == NGINX_1_CONFIG_TEST:
         return _normalize_nginx_node_execution(execution, target, extra_params={})
 
@@ -250,6 +254,52 @@ def _normalize_linux_service_execution(
     }
     if allow.ssh_credential_override_id is not None:
         result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
+
+
+def _normalize_ssh_install_key_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize params for os.linux.ubuntu.24.install_ssh_key.
+
+    Validates that public_key is a single-line OpenSSH key (no newlines),
+    extracts the optional username, and builds the normalized dict for
+    nms-backend to execute the authorized_keys append via SSH.
+    """
+    params = execution.params or {}
+    public_key = str(params.get("public_key") or "").strip()
+    if not public_key:
+        raise RPCExecutionError("public_key is required.", code="RPC_PARAM_INVALID")
+    if "\n" in public_key or "\r" in public_key:
+        raise RPCExecutionError(
+            "public_key must be a single line without newlines.",
+            code="RPC_PARAM_INVALID",
+        )
+    if not any(
+        public_key.startswith(prefix)
+        for prefix in ("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-")
+    ):
+        raise RPCExecutionError(
+            "public_key must start with a supported key type prefix.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    result: dict[str, Any] = {
+        "target": target,
+        "public_key": public_key,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "public_key_prefix": public_key[:64],
+        },
+    }
+
+    username = str(params.get("username") or "").strip()
+    if username:
+        if len(username) > 64 or any(c in username for c in (" ", "\n", "\r", ";")):
+            raise RPCExecutionError("username contains invalid characters.", code="RPC_PARAM_INVALID")
+        result["username"] = username
+
     return result
 
 
