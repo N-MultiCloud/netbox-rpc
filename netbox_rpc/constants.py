@@ -47,14 +47,18 @@ _SSH_INSTALL_KEY_PARAMS_SCHEMA = {
             "type": "string",
             "minLength": 1,
             "maxLength": 16384,
-            "pattern": "^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+) [A-Za-z0-9+/]+=*( .*)?$",
-            "description": "Full OpenSSH public key (single line, key-type + base64 blob).",
+            # Restrict comment to safe charset (alphanumeric + common identifier chars).
+            # The normalizer strips the comment before forwarding to nms-backend, so this
+            # pattern is primarily a defense against malformed input at the API boundary.
+            "pattern": "^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+) [A-Za-z0-9+/]+=*( [A-Za-z0-9_.@:+/=-]{1,255})?$",
+            "description": "OpenSSH public key (key-type base64-blob [optional-comment]).",
         },
         "username": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 64,
-            "description": "Target user on the device; defaults to the DeviceService SSH username.",
+            "maxLength": 32,
+            "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+            "description": "POSIX username on the device; defaults to the DeviceService SSH username.",
         },
     },
 }

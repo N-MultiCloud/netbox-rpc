@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
+
+_POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 
 import requests
 from django.db import IntegrityError
@@ -284,6 +287,10 @@ def _normalize_ssh_install_key_execution(
             "public_key must start with a supported key type prefix.",
             code="RPC_PARAM_INVALID",
         )
+    # Strip any comment field — only key-type + base64-blob is forwarded to nms-backend.
+    # This eliminates comment-field characters from the authorized_keys append path.
+    key_parts = public_key.split(None, 2)
+    public_key = " ".join(key_parts[:2]) if len(key_parts) >= 2 else public_key
 
     result: dict[str, Any] = {
         "target": target,
@@ -296,8 +303,12 @@ def _normalize_ssh_install_key_execution(
 
     username = str(params.get("username") or "").strip()
     if username:
-        if len(username) > 64 or any(c in username for c in (" ", "\n", "\r", ";")):
-            raise RPCExecutionError("username contains invalid characters.", code="RPC_PARAM_INVALID")
+        if not _POSIX_USERNAME_RE.fullmatch(username):
+            raise RPCExecutionError(
+                "username must be a valid POSIX username "
+                "(lowercase letters, digits, _ or -; starts with letter or _; max 32 chars).",
+                code="RPC_PARAM_INVALID",
+            )
         result["username"] = username
 
     return result
