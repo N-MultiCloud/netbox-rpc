@@ -1,6 +1,11 @@
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
 
+# SSH key installation — appends a public key to authorized_keys on a target host
+# using the device's existing privileged SSH DeviceService credential.
+LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
+LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
+
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
 NGINX_1_RELOAD = "service.nginx.1.reload"
@@ -32,6 +37,60 @@ UBUNTU_24_DAEMON_RELOAD_HANDLER = "os.linux_ubuntu_24.daemon_reload"
 
 UBUNTU_24_JOURNAL_TAIL = "os.linux.ubuntu.24.journal_tail"
 UBUNTU_24_JOURNAL_TAIL_HANDLER = "os.linux_ubuntu_24.journal_tail"
+
+_SSH_INSTALL_KEY_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["public_key"],
+    "additionalProperties": False,
+    "properties": {
+        "public_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384,
+            "pattern": "^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+) [A-Za-z0-9+/]+=*( .*)?$",
+            "description": "Full OpenSSH public key (single line, key-type + base64 blob).",
+        },
+        "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Target user on the device; defaults to the DeviceService SSH username.",
+        },
+    },
+}
+
+_SSH_INSTALL_KEY_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "username": {"type": "string"},
+        "fingerprint": {"type": "string"},
+    },
+}
+
+LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
+LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
+
+SSH_KEY_PROCEDURES = (
+    {
+        "name": LINUX_INSTALL_SSH_KEY,
+        "handler_id": LINUX_INSTALL_SSH_KEY_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": (
+            "Append an SSH public key to the target user's authorized_keys file "
+            "on the device, using the existing DeviceService SSH credential. "
+            "Called automatically by nms-backend when registering a new NMS CLI key."
+        ),
+        "params_schema": _SSH_INSTALL_KEY_PARAMS_SCHEMA,
+        "result_schema": _SSH_INSTALL_KEY_RESULT_SCHEMA,
+    },
+)
 
 INITIAL_PROCEDURES = (
     {

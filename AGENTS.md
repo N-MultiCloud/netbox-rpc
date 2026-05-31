@@ -19,6 +19,17 @@ accept arbitrary SSH command text from API clients.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
+- SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
+  required). Appends a user's SSH public key to the target device's
+  `authorized_keys` using the DeviceService SSH credential.
+- `os.linux.ubuntu.24.install_ssh_key` is seeded by migration `0006`. It
+  accepts `{public_key, username?}` and instructs nms-backend to append the
+  public key to the target user's `authorized_keys` via the device's
+  DeviceService SSH credential. Handler ID: `os.linux_ubuntu_24.install_ssh_key`.
+  Approval not required; the procedure is initiated automatically during NMS CLI
+  key registration. Target models: `dcim.device` and
+  `virtualization.virtualmachine`. Migration `0006` depends on
+  `netbox_nms.0029_user_ssh_key`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
@@ -63,6 +74,7 @@ permanently in `STATUS_QUEUED`.
 - The initial migration depends on `netbox_nms` migration `0015` — verify this
   if `netbox-nms` adds new migrations.
 - Migration `0005` depends on `netbox_nms.0027_device_credential_ssh_key_auth`.
+  Migration `0006` depends on `netbox_nms.0029_user_ssh_key`.
   When `netbox-nms` squashes its migrations, update both dependency names before
   running `migrate`.
 
