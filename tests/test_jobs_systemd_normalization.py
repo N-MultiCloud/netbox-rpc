@@ -148,6 +148,34 @@ def test_linux_service_normalization_omits_ssh_credential_override_pk_when_unset
     assert "rpc_ssh_credential_pk" not in normalized
 
 
+def test_call_backend_wraps_request_errors_as_backend_unreachable(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = SimpleNamespace(
+        backend_url="http://nms-backend.example",
+        get_auth_headers=MagicMock(return_value={"Authorization": "Token test"}),
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(pk=123, procedure=SimpleNamespace(timeout_seconds=20))
+    post_mock = MagicMock(
+        side_effect=jobs_module.requests.exceptions.ConnectionError("connection refused")
+    )
+    monkeypatch.setattr(jobs_module.requests, "post", post_mock)
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module._call_backend(backend, execution)
+
+    assert exc_info.value.code == "RPC_BACKEND_UNREACHABLE"
+    post_mock.assert_called_once_with(
+        "http://nms-backend.example/rpc/executions/123/run",
+        headers={"Authorization": "Token test"},
+        json={},
+        verify=True,
+        timeout=(10, 30),
+    )
+
+
 def _execution(procedure_name: str, handler_id: str, params: dict[str, object]):
     return SimpleNamespace(
         procedure=SimpleNamespace(name=procedure_name, handler_id=handler_id),

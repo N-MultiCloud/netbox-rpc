@@ -67,6 +67,12 @@ If the RQ/Redis enqueue call fails, `create()` marks the execution
 `STATUS_FAILED` with `error_code="RPC_ENQUEUE_FAILED"` instead of leaving it
 permanently in `STATUS_QUEUED`.
 
+When the RQ worker dispatches an execution, `jobs._call_backend()` wraps the
+`requests.post()` to `nms-backend` in `try/except requests.exceptions.RequestException`
+and raises `RPCExecutionError(code="RPC_BACKEND_UNREACHABLE")` on any network
+failure (connection refused, timeout, DNS) — so a backend-unreachable condition
+surfaces as a structured, alertable error code instead of an opaque traceback.
+
 ## Migration Safety
 
 - Seed data migrations inline their data directly; they must not import live

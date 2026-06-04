@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import jsonschema
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
@@ -8,6 +10,7 @@ from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import models
@@ -26,7 +29,7 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"], url_path="available")
-    def available(self, request):
+    def available(self, request: Request) -> Response:
         from django.db.models import Q
 
         target_type = (request.query_params.get("target_type") or "").strip().lower()
@@ -56,7 +59,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
     ).prefetch_related("tags")
     serializer_class = RPCExecutionSerializer
 
-    def create(self, request, *args, **kwargs):
+    def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         if not request.user.has_perm("netbox_rpc.execute_rpcprocedure"):
             raise PermissionDenied("execute_rpcprocedure permission is required.")
         serializer = self.get_serializer(data=request.data)
@@ -107,7 +110,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
 
     @extend_schema(responses={200: RPCExecutionEventSerializer(many=True)})
     @action(detail=True, methods=["get"], url_path="events")
-    def events(self, request, pk=None):
+    def events(self, request: Request, pk: str | None = None) -> Response:
         execution = self.get_object()
         qs = execution.events.all()
         page = self.paginate_queryset(qs)

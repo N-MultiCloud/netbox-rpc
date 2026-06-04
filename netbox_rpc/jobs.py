@@ -4,9 +4,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import Any
-
-_POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
+from typing import TYPE_CHECKING, Any
 
 import requests
 from django.db import IntegrityError
@@ -35,10 +33,15 @@ from .constants import (
 )
 from .models import RPCLinuxServiceAllowlist, RPCExecution, RPCExecutionEvent
 
+if TYPE_CHECKING:
+    from netbox_nms.models import NMSBackend
+    from rq.job import Job
+
 logger = logging.getLogger(__name__)
 
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
+_POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 
 
 class RPCExecutionError(RuntimeError):
@@ -52,7 +55,7 @@ class RPCExecutionJob(JobRunner):
         name = "RPC Execution"
 
     @classmethod
-    def enqueue(cls, *args, **kwargs):
+    def enqueue(cls, *args: Any, **kwargs: Any) -> Job:
         backend_pk = kwargs.pop("backend_pk", None)
         kwargs.setdefault("queue_name", RPC_QUEUE_NAME)
         kwargs.setdefault("job_timeout", RPC_JOB_TIMEOUT)
@@ -328,16 +331,22 @@ def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | No
     return value
 
 
-def _call_backend(backend, execution: RPCExecution) -> dict[str, Any]:
+def _call_backend(backend: NMSBackend, execution: RPCExecution) -> dict[str, Any]:
     url = f"{backend.backend_url.rstrip('/')}/rpc/executions/{execution.pk}/run"
     timeout = (10, max(execution.procedure.timeout_seconds + 10, 30))
-    resp = requests.post(
-        url,
-        headers=backend.get_auth_headers(),
-        json={},
-        verify=backend.verify_ssl,
-        timeout=timeout,
-    )
+    try:
+        resp = requests.post(
+            url,
+            headers=backend.get_auth_headers(),
+            json={},
+            verify=backend.verify_ssl,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise RPCExecutionError(
+            f"nms-backend is unreachable: {exc}",
+            code="RPC_BACKEND_UNREACHABLE",
+        ) from exc
     if resp.status_code == 401:
         raise RPCExecutionError(
             "nms-backend returned 401 Unauthorized.",

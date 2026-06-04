@@ -75,9 +75,6 @@ _SSH_INSTALL_KEY_RESULT_SCHEMA = {
     },
 }
 
-LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
-LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
-
 SSH_KEY_PROCEDURES = (
     {
         "name": LINUX_INSTALL_SSH_KEY,
