@@ -380,12 +380,11 @@ MELLANOX_PROCEDURES = (
         "effect": "destructive",
         "timeout_seconds": 1800,
         "approval_required": True,
+        # RPCProcedure.description is a CharField(max_length=255); keep this short.
         "description": (
             "Convert Mellanox ConnectX-3 (mlx4) NIC ports from InfiniBand to "
-            "Ethernet on a Proxmox host: auto-discover NICs and port mode, switch "
-            "ports to Ethernet, persist via modprobe + a generalized "
-            "mlx4-force-eth systemd service, optionally normalize "
-            "/etc/network/interfaces, and optionally reboot."
+            "Ethernet on a Proxmox host, persisting via modprobe and a "
+            "mlx4-force-eth systemd unit, with optional network config and reboot."
         ),
         "params_schema": _MELLANOX_CONVERT_PARAMS_SCHEMA,
         "result_schema": _MELLANOX_CONVERT_RESULT_SCHEMA,
