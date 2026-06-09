@@ -10,8 +10,24 @@ The initial procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
 - `os.linux.ubuntu.24.restart_service`
+- `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 
 Operators call named procedures, not arbitrary SSH commands.
+
+### `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+
+Converts Mellanox ConnectX-3 (`mlx4`) NIC ports from InfiniBand to Ethernet on a
+Proxmox host. Unlike the Ubuntu procedures, this one targets a **netbox-proxbox
+`ProxmoxEndpoint`** (`target_models = ["netbox_proxbox.proxmoxendpoint"]`). SSH
+connection details are resolved at execution time through the **netbox-nms
+`ProxmoxEndpointSSHBinding`** via `netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh()`
+(a function-local import — `netbox-rpc` never imports `netbox-proxbox`). The
+normalizer emits the `rpc_ssh_host` / `rpc_ssh_port` / `rpc_ssh_credential_pk` /
+`rpc_ssh_known_hosts_entry` / `rpc_ssh_strict_host_key_checking` host-override
+keys that `nms-backend` consumes, plus the behaviour flags `reboot`,
+`apply_network`, `interfaces_content`, and `dry_run`. `effect="destructive"` and
+`approval_required=True`. Seeded by migration `0008`; handler
+`os.linux_proxmox.convert_mellanox_nic_to_ethernet` lives in `nms-backend`.
 
 ## Architecture
 
