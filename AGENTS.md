@@ -79,6 +79,12 @@ If the RQ/Redis enqueue call fails, `create()` marks the execution
 `STATUS_FAILED` with `error_code="RPC_ENQUEUE_FAILED"` instead of leaving it
 permanently in `STATUS_QUEUED`.
 
+RPC execution jobs must not be enqueued with `instance=execution`. NetBox 4.6
+validates attached job objects against the `jobs` feature, and `RPCExecution` is
+not job-capable. Pass `execution_pk=execution.pk` to `RPCExecutionJob.enqueue()`;
+the job runner mirrors that value into job `data` and falls back to the legacy
+`job.object_id` only for older queued jobs.
+
 When the RQ worker dispatches an execution, `jobs._call_backend()` wraps the
 `requests.post()` to `nms-backend` in `try/except requests.exceptions.RequestException`
 and raises `RPCExecutionError(code="RPC_BACKEND_UNREACHABLE")` on any network

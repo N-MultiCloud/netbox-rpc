@@ -87,10 +87,10 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         execution = serializer.save(requested_by=request.user)
         try:
             job = RPCExecutionJob.enqueue(
-                instance=execution,
                 user=request.user,
                 name=f"RPC Execution: {execution.procedure.name}",
                 backend_pk=execution.backend_id,
+                execution_pk=execution.pk,
             )
         except Exception:
             # Enqueue failed (e.g. Redis unavailable). Mark the execution failed so

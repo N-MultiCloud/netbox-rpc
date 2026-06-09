@@ -3,10 +3,15 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 SERVICE_PROCEDURES = (
     ("os.linux.ubuntu.24.status_service", "os.linux_ubuntu_24.status_service"),
@@ -243,8 +248,14 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     # Stub requests so jobs.py can be imported without the package installed
     requests_mod = types.ModuleType("requests")
+    request_exception = type("RequestException", (Exception,), {})
+    connection_error = type("ConnectionError", (request_exception,), {})
     requests_mod.post = MagicMock()
     requests_mod.get = MagicMock()
+    requests_mod.exceptions = SimpleNamespace(
+        RequestException=request_exception,
+        ConnectionError=connection_error,
+    )
 
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
