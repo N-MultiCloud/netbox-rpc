@@ -60,6 +60,48 @@ def test_bootstrap_configure_user_requires_credential(jobs_module) -> None:
     assert "restconf_credential_pk" in str(exc_info.value)
 
 
+def test_bootstrap_certificate_name_with_internal_space_is_rejected(jobs_module) -> None:
+    execution = _execution(
+        "network.device.dell_os10.s5232f_on.bootstrap_restconf",
+        "network.dell_os10_s5232f_on.bootstrap_restconf",
+        {"certificate_name": "my cert"},
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+    assert "whitespace" in str(exc_info.value).lower()
+
+
+def test_bootstrap_cipher_suite_with_internal_space_is_rejected(jobs_module) -> None:
+    execution = _execution(
+        "network.device.dell_os10.s5232f_on.bootstrap_restconf",
+        "network.dell_os10_s5232f_on.bootstrap_restconf",
+        {"cipher_suites": ["ecdhe-rsa-with-aes-256-gcm-SHA384", "bad suite"]},
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+    assert "whitespace" in str(exc_info.value).lower()
+
+
+def test_bootstrap_cipher_suite_with_tab_is_rejected(jobs_module) -> None:
+    execution = _execution(
+        "network.device.dell_os10.s5232f_on.bootstrap_restconf",
+        "network.dell_os10_s5232f_on.bootstrap_restconf",
+        {"cipher_suites": ["ecdhe-rsa-with-aes-256-gcm-SHA384", "bad\tsuite"]},
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+    assert "whitespace" in str(exc_info.value).lower()
+
+
 def test_interface_description_hashes_description_in_fingerprint(jobs_module) -> None:
     execution = _execution(
         "network.device.dell_os10.s5232f_on.set_interface_description",
