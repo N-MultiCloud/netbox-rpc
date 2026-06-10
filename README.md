@@ -102,6 +102,12 @@ These guards run at the API layer, not the model layer, because the serializer
 receives the procedure as a foreign-key ID and the schema/enabled/approval
 checks require the resolved object.
 
+RPC execution jobs are queued without using NetBox's attached-object job fields.
+NetBox 4.6 validates attached job object types against the `jobs` feature, and
+`RPCExecution` is audit metadata rather than a job-capable operational object.
+The worker receives the execution primary key through `execution_pk` and
+persists it in the job `data` JSON for retry/debug recovery.
+
 ## Testing
 
 Default tests are static or mocked:

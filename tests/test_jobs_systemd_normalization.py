@@ -3,10 +3,15 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 SERVICE_PROCEDURES = (
     ("os.linux.ubuntu.24.status_service", "os.linux_ubuntu_24.status_service"),
