@@ -30,6 +30,20 @@ accept arbitrary SSH command text from API clients.
   key registration. Target models: `dcim.device` and
   `virtualization.virtualmachine`. Migration `0006` depends on
   `netbox_nms.0029_user_ssh_key`.
+- Mellanox NIC conversion: `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+  (write/`destructive`, approval required) is seeded by migration `0008`. It
+  targets a **netbox-proxbox `ProxmoxEndpoint`**
+  (`target_models = ["netbox_proxbox.proxmoxendpoint"]`), not a `dcim.device`.
+  Its normalizer (`_normalize_convert_mellanox_nic_execution` in `jobs.py`)
+  resolves SSH details via a **function-local** import of
+  `netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh` (netbox-rpc must never
+  import netbox-proxbox; netbox-nms owns the soft `ProxmoxEndpoint` reference)
+  and emits the `rpc_ssh_host`/`rpc_ssh_port`/`rpc_ssh_credential_pk`/
+  `rpc_ssh_known_hosts_entry`/`rpc_ssh_strict_host_key_checking` host-override
+  keys plus `reboot`/`apply_network`/`interfaces_content`/`dry_run`. Handler ID:
+  `os.linux_proxmox.convert_mellanox_nic_to_ethernet` (in nms-backend). Keep the
+  resolver import function-local so NetBox still boots when the installed
+  netbox-nms predates `ProxmoxEndpointSSHBinding`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

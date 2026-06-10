@@ -32,3 +32,11 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["netbox_rpc*"]
+
+[tool.pytest.ini_options]
+# Put the repository root on sys.path so `pytest tests/` (the console-script
+# invocation used by CI) can import the in-tree `netbox_rpc` package without an
+# editable install. Without this, CI collection fails with
+# "ModuleNotFoundError: No module named 'netbox_rpc'".
+pythonpath = ["."]
+testpaths = ["tests"]

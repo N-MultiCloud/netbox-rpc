@@ -246,18 +246,28 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
-    # Stub requests so jobs.py can be imported without the package installed
+    # Stub requests so jobs.py can be imported without the package installed.
+    # Include a requests.exceptions namespace so _call_backend's
+    # `except requests.exceptions.RequestException` path is exercisable even when
+    # the real requests package is installed (CI installs requests, which would
+    # otherwise be shadowed by this bare stub and lack .exceptions).
     requests_mod = types.ModuleType("requests")
-    request_exception = type("RequestException", (Exception,), {})
-    connection_error = type("ConnectionError", (request_exception,), {})
     requests_mod.post = MagicMock()
     requests_mod.get = MagicMock()
-    requests_mod.exceptions = SimpleNamespace(
-        RequestException=request_exception,
-        ConnectionError=connection_error,
-    )
+    requests_exceptions = types.ModuleType("requests.exceptions")
+
+    class _RequestException(Exception):
+        pass
+
+    class _ConnectionError(_RequestException):
+        pass
+
+    requests_exceptions.RequestException = _RequestException
+    requests_exceptions.ConnectionError = _ConnectionError
+    requests_mod.exceptions = requests_exceptions
 
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
+    monkeypatch.setitem(sys.modules, "requests.exceptions", requests_exceptions)
     monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
     monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)
