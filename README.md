@@ -9,6 +9,11 @@ The plugin does not open SSH sessions directly; execution is delegated to
 The initial procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
+- `network.device.dell_os10.s5232f_on.bootstrap_restconf`
+- `network.device.dell_os10.s5232f_on.show_version`
+- `network.device.dell_os10.s5232f_on.set_interface_description`
+- `network.device.dell_os10.s5232f_on.set_vlan_description`
+- `network.device.dell_os10.s5232f_on.write_memory`
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 
@@ -52,6 +57,7 @@ owns:
 `nms-backend` owns the hard-coded handler implementations and transport
 libraries. It must execute only known handler IDs such as
 `network.huawei_olt_ma5800_r024.start_ont` and
+`network.dell_os10_s5232f_on.bootstrap_restconf` and
 `os.linux_ubuntu_24.restart_service`.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with
@@ -78,6 +84,10 @@ clients must not submit arbitrary SSH command text.
 ## Security Rules
 
 - Never add a procedure that stores user-provided shell commands.
+- Dell OS10 procedures are fixed command templates used only as RESTCONF
+  fallback/bootstrap paths. The RESTCONF automation user password is resolved
+  in `nms-backend` from `restconf_credential_pk`; it must not be stored in
+  `normalized_params` or `command_fingerprint`.
 - Prefer enum or allowlist parameters for command fragments such as service
   names, board/slot identifiers, or ONT IDs.
 - Keep SSH credentials in `netbox-nms`; this plugin stores execution metadata,
