@@ -30,7 +30,12 @@ connection details are resolved at execution time through the **netbox-nms
 normalizer emits the `rpc_ssh_host` / `rpc_ssh_port` / `rpc_ssh_credential_pk` /
 `rpc_ssh_known_hosts_entry` / `rpc_ssh_strict_host_key_checking` host-override
 keys that `nms-backend` consumes, plus the behaviour flags `reboot`,
-`apply_network`, `interfaces_content`, and `dry_run`. `effect="destructive"` and
+`apply_network`, `interfaces_content`, and `dry_run`, and the operator bond
+parameters `bond_name` (default `bond1`), `bond_vlans` (optional comma-separated
+VLAN IDs/ranges 1-4094, emitted as `bridge-vids`; empty default declares no VLAN
+filtering), and `bond_mtu` (default jumbo `9216`, allowed 576-9216) — accepted by
+the `params_schema` since migration `0010` and re-validated strictly by
+`nms-backend` before any shell embedding. `effect="destructive"` and
 `approval_required=True`. Seeded by migration `0008`; handler
 `os.linux_proxmox.convert_mellanox_nic_to_ethernet` lives in `nms-backend`.
 
