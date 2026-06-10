@@ -40,7 +40,10 @@ accept arbitrary SSH command text from API clients.
   import netbox-proxbox; netbox-nms owns the soft `ProxmoxEndpoint` reference)
   and emits the `rpc_ssh_host`/`rpc_ssh_port`/`rpc_ssh_credential_pk`/
   `rpc_ssh_known_hosts_entry`/`rpc_ssh_strict_host_key_checking` host-override
-  keys plus `reboot`/`apply_network`/`interfaces_content`/`dry_run`. Handler ID:
+  keys plus `reboot`/`apply_network`/`interfaces_content`/`dry_run` and the operator bond
+  parameters `bond_name` (default `bond1`), `bond_vlans` (optional comma-separated VLAN
+  IDs/ranges), and `bond_mtu` (default 9216) — accepted by the params_schema since
+  migration `0010` and re-validated strictly by nms-backend. Handler ID:
   `os.linux_proxmox.convert_mellanox_nic_to_ethernet` (in nms-backend). Keep the
   resolver import function-local so NetBox still boots when the installed
   netbox-nms predates `ProxmoxEndpointSSHBinding`.

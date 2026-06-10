@@ -78,6 +78,47 @@ def test_mellanox_defaults_and_interfaces_hash(jobs_module) -> None:
     assert normalized["dry_run"] is False
     assert normalized["interfaces_content"] == "auto lo\n"
     assert normalized["command_fingerprint"]["interfaces_content_sha"]  # non-empty hash
+    # Bond defaults: bond1, no VLAN filtering, jumbo MTU.
+    assert normalized["bond_name"] == "bond1"
+    assert normalized["bond_vlans"] == ""
+    assert normalized["bond_mtu"] == 9216
+    assert normalized["command_fingerprint"]["bond_name"] == "bond1"
+    assert normalized["command_fingerprint"]["bond_vlans"] == ""
+    assert normalized["command_fingerprint"]["bond_mtu"] == 9216
+
+
+def test_mellanox_forwards_custom_bond_params(jobs_module) -> None:
+    _set_resolver(
+        jobs_module,
+        {"host": "host.example", "port": 22, "credential_pk": 1},
+    )
+    execution = _execution(
+        proxmox_endpoint_id=5,
+        bond_name="bond7",
+        bond_vlans="100, 200,300-310",
+        bond_mtu=1500,
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["bond_name"] == "bond7"
+    assert normalized["bond_vlans"] == "100,200,300-310"
+    assert normalized["bond_mtu"] == 1500
+    fp = normalized["command_fingerprint"]
+    assert fp["bond_name"] == "bond7"
+    assert fp["bond_vlans"] == "100,200,300-310"
+    assert fp["bond_mtu"] == 1500
+
+
+def test_mellanox_bond_mtu_out_of_range_raises(jobs_module) -> None:
+    _set_resolver(
+        jobs_module,
+        {"host": "host.example", "port": 22, "credential_pk": 1},
+    )
+    execution = _execution(proxmox_endpoint_id=5, bond_mtu=10000)
+
+    with pytest.raises(jobs_module.RPCExecutionError):
+        jobs_module.normalize_execution_params(execution)
 
 
 # ---------------------------------------------------------------------------
@@ -130,12 +171,14 @@ def _execution(
     apply_network: bool = False,
     interfaces_content: str = "",
     dry_run: bool = False,
+    **extra_params,
 ):
     params: dict = {
         "reboot": reboot,
         "apply_network": apply_network,
         "interfaces_content": interfaces_content,
         "dry_run": dry_run,
+        **extra_params,
     }
     if proxmox_endpoint_id is not None:
         params["proxmox_endpoint_id"] = proxmox_endpoint_id
