@@ -6,6 +6,12 @@ HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
 LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
 
+# Mellanox ConnectX-3 (mlx4) InfiniBand -> Ethernet conversion on a Proxmox host.
+# Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
+# through the netbox-nms ProxmoxEndpointSSHBinding (see jobs.py normalizer).
+LINUX_PROXMOX_CONVERT_MELLANOX_NIC = "os.linux.proxmox.convert_mellanox_nic_to_ethernet"
+LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = "os.linux_proxmox.convert_mellanox_nic_to_ethernet"
+
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
 NGINX_1_RELOAD = "service.nginx.1.reload"
@@ -315,5 +321,72 @@ SYSTEMD_PROCEDURES = (
         "description": "Read recent journal output for an allowlisted systemd service",
         "params_schema": _SYSTEMD_JOURNAL_TAIL_PARAMS_SCHEMA,
         "result_schema": _SYSTEMD_JOURNAL_TAIL_RESULT_SCHEMA,
+    },
+)
+
+_MELLANOX_CONVERT_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["proxmox_endpoint_id"],
+    "additionalProperties": False,
+    "properties": {
+        "proxmox_endpoint_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "netbox-proxbox ProxmoxEndpoint id; SSH details come from its netbox-nms binding.",
+        },
+        "reboot": {
+            "type": "boolean",
+            "description": "Reboot the host automatically after conversion (default false).",
+        },
+        "apply_network": {
+            "type": "boolean",
+            "description": "Run `ifreload -a` after touching /etc/network/interfaces (default false).",
+        },
+        "interfaces_content": {
+            "type": "string",
+            "maxLength": 65536,
+            "description": "Optional full /etc/network/interfaces override; empty keeps existing config and only ensures Mellanox interfaces are declared.",
+        },
+        "dry_run": {
+            "type": "boolean",
+            "description": "Discover only; make no changes (default false).",
+        },
+    },
+}
+
+_MELLANOX_CONVERT_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "dry_run": {"type": "boolean"},
+        "nothing_to_do": {"type": "boolean"},
+        "already_ethernet": {"type": "boolean"},
+        "service_enabled": {"type": "boolean"},
+        "reboot_required": {"type": "boolean"},
+        "rebooting": {"type": "boolean"},
+    },
+}
+
+# Mellanox ConnectX-3 InfiniBand -> Ethernet conversion. Seeded by migration 0008.
+# Normalizer branch lives in jobs.py (_normalize_convert_mellanox_nic_execution).
+MELLANOX_PROCEDURES = (
+    {
+        "name": LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
+        "handler_id": LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER,
+        "target_models": ["netbox_proxbox.proxmoxendpoint"],
+        "effect": "destructive",
+        "timeout_seconds": 1800,
+        "approval_required": True,
+        # RPCProcedure.description is a CharField(max_length=255); keep this short.
+        "description": (
+            "Convert Mellanox ConnectX-3 (mlx4) NIC ports from InfiniBand to "
+            "Ethernet on a Proxmox host, persisting via modprobe and a "
+            "mlx4-force-eth systemd unit, with optional network config and reboot."
+        ),
+        "params_schema": _MELLANOX_CONVERT_PARAMS_SCHEMA,
+        "result_schema": _MELLANOX_CONVERT_RESULT_SCHEMA,
     },
 )

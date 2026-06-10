@@ -17,6 +17,7 @@ from netbox_nms.backend import get_backend
 from .constants import (
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_INSTALL_SSH_KEY,
+    LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
@@ -202,6 +203,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     if procedure_name == LINUX_INSTALL_SSH_KEY:
         return _normalize_ssh_install_key_execution(execution, target)
 
+    if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
+        return _normalize_convert_mellanox_nic_execution(execution, target)
+
     if procedure_name == NGINX_1_CONFIG_TEST:
         return _normalize_nginx_node_execution(execution, target, extra_params={})
 
@@ -343,6 +347,88 @@ def _normalize_ssh_install_key_execution(
         result["username"] = username
 
     return result
+
+
+def _normalize_convert_mellanox_nic_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize params for os.linux.proxmox.convert_mellanox_nic_to_ethernet.
+
+    Resolves SSH connection details for the selected ProxmoxEndpoint through the
+    netbox-nms ``resolve_proxmox_endpoint_ssh`` helper and emits the
+    ``rpc_ssh_*`` host-override keys that nms-backend consumes. The import is
+    function-local so importing this module never requires the (possibly older)
+    installed netbox-nms to expose ``proxmox_ssh`` — only an actual Mellanox
+    execution does.
+    """
+    try:
+        from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh
+    except ImportError as exc:
+        raise RPCExecutionError(
+            "netbox-nms does not expose the Proxmox SSH resolver; "
+            "upgrade netbox-nms to a version with ProxmoxEndpointSSHBinding.",
+            code="RPC_PROXMOX_SSH_RESOLVER_MISSING",
+        ) from exc
+
+    params = execution.params or {}
+    endpoint_id = _int_range(params, "proxmox_endpoint_id", 1, None)
+
+    resolved = resolve_proxmox_endpoint_ssh(endpoint_id)
+    if not resolved:
+        raise RPCExecutionError(
+            f"No Proxmox Endpoint SSH binding is configured for endpoint "
+            f"{endpoint_id}. Create one in NetBox NMS "
+            "(Proxmox Endpoint SSH Bindings) before running this procedure.",
+            code="RPC_PROXMOX_SSH_BINDING_NOT_FOUND",
+        )
+
+    host = str(resolved.get("host") or "").strip()
+    if not host:
+        raise RPCExecutionError(
+            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
+            "resolvable host. Set an SSH host override or an endpoint IP/domain.",
+            code="RPC_PROXMOX_SSH_HOST_UNRESOLVED",
+        )
+
+    credential_pk = resolved.get("credential_pk")
+    if credential_pk is None:
+        raise RPCExecutionError(
+            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
+            "linked SSH credential.",
+            code="RPC_PROXMOX_SSH_CREDENTIAL_MISSING",
+        )
+
+    reboot = bool(params.get("reboot", False))
+    apply_network = bool(params.get("apply_network", False))
+    dry_run = bool(params.get("dry_run", False))
+    interfaces_content = str(params.get("interfaces_content") or "")
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "rpc_ssh_host": host,
+        "rpc_ssh_port": int(resolved.get("port") or 22),
+        "rpc_ssh_credential_pk": int(credential_pk),
+        "rpc_ssh_known_hosts_entry": str(resolved.get("known_hosts_entry") or ""),
+        "rpc_ssh_strict_host_key_checking": bool(
+            resolved.get("strict_host_key_checking", True)
+        ),
+        "reboot": reboot,
+        "apply_network": apply_network,
+        "interfaces_content": interfaces_content,
+        "dry_run": dry_run,
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "proxmox_endpoint_id": endpoint_id,
+        "reboot": reboot,
+        "apply_network": apply_network,
+        "dry_run": dry_run,
+        # Hash (not the body) of any custom interfaces content keeps the
+        # fingerprint stable-sized while still reflecting content changes.
+        "interfaces_content_sha": _hash_json(interfaces_content) if interfaces_content else "",
+    }
+    return normalized
 
 
 def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | None) -> int:
