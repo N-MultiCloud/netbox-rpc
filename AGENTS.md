@@ -44,6 +44,13 @@ accept arbitrary SSH command text from API clients.
   `os.linux_proxmox.convert_mellanox_nic_to_ethernet` (in nms-backend). Keep the
   resolver import function-local so NetBox still boots when the installed
   netbox-nms predates `ProxmoxEndpointSSHBinding`.
+- Dell SmartFabric OS10 S5232F-ON procedures are seeded by migration `0009`.
+  They are fixed SSH fallback/bootstrap procedures for a RESTCONF-first driver:
+  `network.device.dell_os10.s5232f_on.bootstrap_restconf`,
+  `show_version`, `set_interface_description`, `set_vlan_description`, and
+  `write_memory`. Bootstrap accepts `restconf_credential_pk` by reference; the
+  RESTCONF password is resolved by `nms-backend` and must never appear in
+  `normalized_params` or `command_fingerprint`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

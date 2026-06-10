@@ -15,6 +15,11 @@ from netbox.jobs import JobRunner
 from netbox_nms.backend import get_backend
 
 from .constants import (
+    DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
+    DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION,
+    DELL_OS10_S5232F_SET_VLAN_DESCRIPTION,
+    DELL_OS10_S5232F_SHOW_VERSION,
+    DELL_OS10_S5232F_WRITE_MEMORY,
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
@@ -43,6 +48,7 @@ logger = logging.getLogger(__name__)
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
 _POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
+_DELL_OS10_INTERFACE_RE = re.compile(r"[A-Za-z][A-Za-z0-9/._:-]{0,63}$")
 
 
 class RPCExecutionError(RuntimeError):
@@ -205,6 +211,60 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
         return _normalize_convert_mellanox_nic_execution(execution, target)
+
+    if procedure_name == DELL_OS10_S5232F_BOOTSTRAP_RESTCONF:
+        return _normalize_dell_os10_bootstrap_execution(execution, target)
+
+    if procedure_name in {
+        DELL_OS10_S5232F_SHOW_VERSION,
+        DELL_OS10_S5232F_WRITE_MEMORY,
+    }:
+        return _normalize_dell_os10_simple_execution(execution, target)
+
+    if procedure_name == DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION:
+        params = execution.params or {}
+        interface_name = str(params.get("interface_name") or "").strip()
+        if not _DELL_OS10_INTERFACE_RE.fullmatch(interface_name):
+            raise RPCExecutionError(
+                "interface_name must be a valid OS10 interface identifier.",
+                code="RPC_PARAM_INVALID",
+            )
+        description = _dell_os10_description(params)
+        write_memory = _bool_param(params, "write_memory", False)
+        normalized = {
+            "target": target,
+            "interface_name": interface_name,
+            "description": description,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "interface_name": interface_name,
+                "description_sha256": _hash_text(description),
+                "write_memory": write_memory,
+            },
+        }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_SET_VLAN_DESCRIPTION:
+        params = execution.params or {}
+        vlan_id = _int_range(params, "vlan_id", 1, 4094)
+        description = _dell_os10_description(params)
+        write_memory = _bool_param(params, "write_memory", False)
+        normalized = {
+            "target": target,
+            "vlan_id": vlan_id,
+            "description": description,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "vlan_id": vlan_id,
+                "description_sha256": _hash_text(description),
+                "write_memory": write_memory,
+            },
+        }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
 
     if procedure_name == NGINX_1_CONFIG_TEST:
         return _normalize_nginx_node_execution(execution, target, extra_params={})
@@ -429,6 +489,146 @@ def _normalize_convert_mellanox_nic_execution(
         "interfaces_content_sha": _hash_json(interfaces_content) if interfaces_content else "",
     }
     return normalized
+
+
+def _normalize_dell_os10_simple_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    result: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {"handler_id": execution.procedure.handler_id},
+    }
+    _copy_optional_credential_override(params, result)
+    return result
+
+
+def _normalize_dell_os10_bootstrap_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    configure_user = _bool_param(params, "configure_user", False)
+    restconf_credential_pk = _optional_int_range(
+        params,
+        "restconf_credential_pk",
+        1,
+        None,
+    )
+    if configure_user and restconf_credential_pk is None:
+        raise RPCExecutionError(
+            "restconf_credential_pk is required when configure_user is true.",
+            code="RPC_PARAM_INVALID",
+        )
+    session_timeout = _optional_int_range(params, "session_timeout", 1, 1440)
+    cipher_suites = params.get("cipher_suites") or []
+    if not isinstance(cipher_suites, list):
+        raise RPCExecutionError(
+            "cipher_suites must be a list of OS10 cipher suite names.",
+            code="RPC_PARAM_INVALID",
+        )
+    cipher_suites = [str(item).strip() for item in cipher_suites if str(item).strip()]
+    if len(cipher_suites) > 12:
+        raise RPCExecutionError(
+            "cipher_suites may contain at most 12 entries.",
+            code="RPC_PARAM_INVALID",
+        )
+    certificate_name = str(params.get("certificate_name") or "").strip()
+    if any(("\n" in item or "\r" in item) for item in [certificate_name, *cipher_suites]):
+        raise RPCExecutionError(
+            "Dell OS10 RESTCONF bootstrap parameters must not contain newlines.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "configure_user": configure_user,
+        "enable_ssh": _bool_param(params, "enable_ssh", True),
+        "enable_restconf": _bool_param(params, "enable_restconf", True),
+        "write_memory": _bool_param(params, "write_memory", True),
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "configure_user": configure_user,
+            "enable_ssh": _bool_param(params, "enable_ssh", True),
+            "enable_restconf": _bool_param(params, "enable_restconf", True),
+            "write_memory": _bool_param(params, "write_memory", True),
+        },
+    }
+    if restconf_credential_pk is not None:
+        normalized["restconf_credential_pk"] = restconf_credential_pk
+        normalized["command_fingerprint"]["restconf_credential_pk"] = (
+            restconf_credential_pk
+        )
+    if certificate_name:
+        normalized["certificate_name"] = certificate_name
+        normalized["command_fingerprint"]["certificate_name"] = certificate_name
+    if session_timeout is not None:
+        normalized["session_timeout"] = session_timeout
+        normalized["command_fingerprint"]["session_timeout"] = session_timeout
+    if cipher_suites:
+        normalized["cipher_suites"] = cipher_suites
+        normalized["command_fingerprint"]["cipher_suites"] = cipher_suites
+    _copy_optional_credential_override(params, normalized)
+    return normalized
+
+
+def _copy_optional_credential_override(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    credential_pk = _optional_int_range(params, "rpc_ssh_credential_pk", 1, None)
+    if credential_pk is not None:
+        normalized["rpc_ssh_credential_pk"] = credential_pk
+        normalized["command_fingerprint"]["rpc_ssh_credential_pk"] = credential_pk
+
+
+def _dell_os10_description(params: dict[str, Any]) -> str:
+    description = str(params.get("description") or "")
+    if len(description) > 240:
+        raise RPCExecutionError(
+            "description may contain at most 240 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(ord(ch) < 32 and ch not in ("\t",) for ch in description):
+        raise RPCExecutionError(
+            "description must not contain control characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return description
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _optional_int_range(
+    params: dict[str, Any],
+    key: str,
+    minimum: int,
+    maximum: int | None,
+) -> int | None:
+    if key not in params or params.get(key) in (None, ""):
+        return None
+    return _int_range(params, key, minimum, maximum)
+
+
+def _bool_param(params: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in params or params.get(key) is None:
+        return default
+    value = params.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    raise RPCExecutionError(
+        f"{key} must be a boolean.",
+        code="RPC_PARAM_INVALID",
+    )
 
 
 def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | None) -> int:
