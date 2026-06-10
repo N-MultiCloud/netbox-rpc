@@ -463,6 +463,12 @@ def _normalize_convert_mellanox_nic_execution(
     apply_network = bool(params.get("apply_network", False))
     dry_run = bool(params.get("dry_run", False))
     interfaces_content = str(params.get("interfaces_content") or "")
+    # Operator bond parameters. The params_schema (migration 0010) gates the
+    # accepted shapes at execution creation, and nms-backend re-validates them
+    # strictly in Pydantic before any shell embedding.
+    bond_name = str(params.get("bond_name") or "bond1").strip() or "bond1"
+    bond_vlans = str(params.get("bond_vlans") or "").strip().replace(" ", "")
+    bond_mtu = _int_range({"bond_mtu": params.get("bond_mtu", 9216)}, "bond_mtu", 576, 9216)
 
     normalized: dict[str, Any] = {
         "target": target,
@@ -477,6 +483,9 @@ def _normalize_convert_mellanox_nic_execution(
         "apply_network": apply_network,
         "interfaces_content": interfaces_content,
         "dry_run": dry_run,
+        "bond_name": bond_name,
+        "bond_vlans": bond_vlans,
+        "bond_mtu": bond_mtu,
     }
     normalized["command_fingerprint"] = {
         "handler_id": execution.procedure.handler_id,
@@ -484,6 +493,9 @@ def _normalize_convert_mellanox_nic_execution(
         "reboot": reboot,
         "apply_network": apply_network,
         "dry_run": dry_run,
+        "bond_name": bond_name,
+        "bond_vlans": bond_vlans,
+        "bond_mtu": bond_mtu,
         # Hash (not the body) of any custom interfaces content keeps the
         # fingerprint stable-sized while still reflecting content changes.
         "interfaces_content_sha": _hash_json(interfaces_content) if interfaces_content else "",
