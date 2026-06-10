@@ -57,26 +57,43 @@ class RPCExecutionJob(JobRunner):
     @classmethod
     def enqueue(cls, *args: Any, **kwargs: Any) -> Job:
         backend_pk = kwargs.pop("backend_pk", None)
+        execution_pk = kwargs.get("execution_pk")
         kwargs.setdefault("queue_name", RPC_QUEUE_NAME)
         kwargs.setdefault("job_timeout", RPC_JOB_TIMEOUT)
-        # Embed backend_pk in job data before enqueueing so workers can read it
-        # without a race between super().enqueue() and a subsequent job.save().
-        if backend_pk:
+        # Embed identifiers in job data before enqueueing so workers can read
+        # them without a race between super().enqueue() and a subsequent save.
+        if backend_pk is not None or execution_pk is not None:
             data = dict(kwargs.get("data") or {})
-            data["backend_pk"] = backend_pk
+            if backend_pk is not None:
+                data["backend_pk"] = backend_pk
+            if execution_pk is not None:
+                data["execution_pk"] = execution_pk
             kwargs["data"] = data
         job = super().enqueue(*args, **kwargs)
         # Persist as a safety fallback in case super().enqueue() ignored the data kwarg.
-        if backend_pk and not (job.data or {}).get("backend_pk"):
-            job.data = dict(job.data or {})
+        needs_data_save = False
+        job.data = dict(job.data or {})
+        if backend_pk is not None and job.data.get("backend_pk") != backend_pk:
             job.data["backend_pk"] = backend_pk
+            needs_data_save = True
+        if execution_pk is not None and job.data.get("execution_pk") != execution_pk:
+            job.data["execution_pk"] = execution_pk
+            needs_data_save = True
+        if needs_data_save:
             job.save(update_fields=["data"])
         return job
 
     def run(self, *args: object, **kwargs: object) -> None:
-        execution = self._get_execution()
+        runtime_data = kwargs.get("data") if isinstance(kwargs.get("data"), dict) else {}
+        execution = self._get_execution(
+            execution_pk=kwargs.get("execution_pk") or runtime_data.get("execution_pk")
+        )
         self._mark_running(execution)
-        backend_pk = (self.job.data or {}).get("backend_pk") or execution.backend_id
+        backend_pk = (
+            runtime_data.get("backend_pk")
+            or (self.job.data or {}).get("backend_pk")
+            or execution.backend_id
+        )
         backend = get_backend(backend_pk)
         if backend is None:
             self._mark_failed(
@@ -103,14 +120,25 @@ class RPCExecutionJob(JobRunner):
             self._mark_failed(execution, str(exc), code)
             raise
 
-    def _get_execution(self) -> RPCExecution:
-        if not self.job.object_id:
-            raise RuntimeError("RPCExecutionJob requires an RPCExecution instance.")
+    def _get_execution(self, execution_pk: object | None = None) -> RPCExecution:
+        raw_pk = execution_pk
+        if raw_pk is None:
+            raw_pk = (self.job.data or {}).get("execution_pk")
+        if raw_pk is None:
+            # Legacy fallback for jobs queued before RPC executions stopped
+            # using NetBox's attached-object fields.
+            raw_pk = self.job.object_id
+        if raw_pk is None:
+            raise RuntimeError("RPCExecutionJob requires an RPCExecution primary key.")
+        try:
+            pk = int(raw_pk)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("RPCExecutionJob received an invalid RPCExecution primary key.") from exc
         return RPCExecution.objects.select_related(
             "procedure",
             "assigned_object_type",
             "backend",
-        ).get(pk=self.job.object_id)
+        ).get(pk=pk)
 
     def _mark_running(self, execution: RPCExecution) -> None:
         execution.status = RPCExecution.STATUS_RUNNING

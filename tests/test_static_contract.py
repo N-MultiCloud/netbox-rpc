@@ -49,6 +49,17 @@ def test_execution_job_delegates_to_nms_backend() -> None:
     assert "RPCLinuxServiceAllowlist" in jobs
 
 
+def test_execution_jobs_use_explicit_execution_pk_not_attached_object() -> None:
+    views = read("netbox_rpc/api/views.py")
+    jobs = read("netbox_rpc/jobs.py")
+    assert "instance=execution" not in views
+    assert "execution_pk=execution.pk" in views
+    assert 'data["execution_pk"]' in jobs
+    assert "def _get_execution(self, execution_pk:" in jobs
+    assert "self.job.object_id" in jobs
+    assert "Legacy fallback" in jobs
+
+
 def test_api_routes_are_registered() -> None:
     urls = read("netbox_rpc/api/urls.py")
     assert 'router.register("procedures"' in urls
