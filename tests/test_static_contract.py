@@ -41,6 +41,25 @@ def test_systemd_procedure_catalog_names_are_seeded() -> None:
         assert name in constants
 
 
+def test_dell_os10_procedure_catalog_names_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0009_seed_dell_os10_procedures.py")
+
+    assert "DELL_OS10_S5232F_PROCEDURES" in constants
+    for name in (
+        "network.device.dell_os10.s5232f_on.bootstrap_restconf",
+        "network.device.dell_os10.s5232f_on.show_version",
+        "network.device.dell_os10.s5232f_on.set_interface_description",
+        "network.device.dell_os10.s5232f_on.set_vlan_description",
+        "network.device.dell_os10.s5232f_on.write_memory",
+    ):
+        assert name in constants
+        assert name in migration
+    assert "network.dell_os10_s5232f_on.bootstrap_restconf" in constants
+    assert "from netbox_rpc" not in migration
+    assert "commands" not in migration
+
+
 def test_execution_job_delegates_to_nms_backend() -> None:
     jobs = read("netbox_rpc/jobs.py")
     assert "get_backend" in jobs
@@ -119,6 +138,15 @@ def test_install_ssh_key_normalizer_validates_username_with_posix_regex() -> Non
     jobs = read("netbox_rpc/jobs.py")
     assert "_POSIX_USERNAME_RE" in jobs
     assert "fullmatch" in jobs
+
+
+def test_dell_os10_normalizer_branches_are_registered() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "DELL_OS10_S5232F_BOOTSTRAP_RESTCONF" in jobs
+    assert "_normalize_dell_os10_bootstrap_execution" in jobs
+    assert "_normalize_dell_os10_simple_execution" in jobs
+    assert "_DELL_OS10_INTERFACE_RE" in jobs
+    assert "description_sha256" in jobs
 
 
 def test_install_ssh_key_migration_depends_on_netbox_nms_user_ssh_key() -> None:

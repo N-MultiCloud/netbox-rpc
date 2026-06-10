@@ -1,6 +1,29 @@
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
 
+DELL_OS10_S5232F_BOOTSTRAP_RESTCONF = (
+    "network.device.dell_os10.s5232f_on.bootstrap_restconf"
+)
+DELL_OS10_S5232F_BOOTSTRAP_RESTCONF_HANDLER = (
+    "network.dell_os10_s5232f_on.bootstrap_restconf"
+)
+DELL_OS10_S5232F_SHOW_VERSION = "network.device.dell_os10.s5232f_on.show_version"
+DELL_OS10_S5232F_SHOW_VERSION_HANDLER = "network.dell_os10_s5232f_on.show_version"
+DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION = (
+    "network.device.dell_os10.s5232f_on.set_interface_description"
+)
+DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION_HANDLER = (
+    "network.dell_os10_s5232f_on.set_interface_description"
+)
+DELL_OS10_S5232F_SET_VLAN_DESCRIPTION = (
+    "network.device.dell_os10.s5232f_on.set_vlan_description"
+)
+DELL_OS10_S5232F_SET_VLAN_DESCRIPTION_HANDLER = (
+    "network.dell_os10_s5232f_on.set_vlan_description"
+)
+DELL_OS10_S5232F_WRITE_MEMORY = "network.device.dell_os10.s5232f_on.write_memory"
+DELL_OS10_S5232F_WRITE_MEMORY_HANDLER = "network.dell_os10_s5232f_on.write_memory"
+
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
@@ -96,6 +119,157 @@ SSH_KEY_PROCEDURES = (
         ),
         "params_schema": _SSH_INSTALL_KEY_PARAMS_SCHEMA,
         "result_schema": _SSH_INSTALL_KEY_RESULT_SCHEMA,
+    },
+)
+
+_DELL_OS10_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "DeviceCredential primary key; nms-backend decrypts it at execution time.",
+}
+
+_DELL_OS10_BOOTSTRAP_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "configure_user": {
+            "type": "boolean",
+            "default": False,
+            "description": "Create or update the RESTCONF automation user before enabling RESTCONF.",
+        },
+        "restconf_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+        "certificate_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Optional OS10 REST HTTPS server-certificate name.",
+        },
+        "session_timeout": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 60,
+            "description": "Optional REST HTTPS session timeout in minutes.",
+        },
+        "cipher_suites": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {"type": "string", "minLength": 1, "maxLength": 80},
+            "description": "Optional TLS cipher suite names passed to rest https cipher-suite.",
+        },
+        "enable_ssh": {"type": "boolean", "default": True},
+        "enable_restconf": {"type": "boolean", "default": True},
+        "write_memory": {"type": "boolean", "default": True},
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_EMPTY_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_INTERFACE_DESCRIPTION_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["interface_name", "description"],
+    "additionalProperties": False,
+    "properties": {
+        "interface_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z][A-Za-z0-9/._:-]{0,63}$",
+        },
+        "description": {"type": "string", "minLength": 0, "maxLength": 240},
+        "write_memory": {"type": "boolean", "default": False},
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_VLAN_DESCRIPTION_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["vlan_id", "description"],
+    "additionalProperties": False,
+    "properties": {
+        "vlan_id": {"type": "integer", "minimum": 1, "maximum": 4094},
+        "description": {"type": "string", "minLength": 0, "maxLength": 240},
+        "write_memory": {"type": "boolean", "default": False},
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "command_log": {"type": "array", "items": {"type": "string"}},
+        "output": {"type": "string"},
+        "fallback": {"type": "boolean"},
+    },
+}
+
+DELL_OS10_S5232F_PROCEDURES = (
+    {
+        "name": DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
+        "handler_id": DELL_OS10_S5232F_BOOTSTRAP_RESTCONF_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 90,
+        "approval_required": True,
+        "description": "Enable Dell SmartFabric OS10 RESTCONF over HTTPS with audited SSH CLI fallback.",
+        "params_schema": _DELL_OS10_BOOTSTRAP_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_SHOW_VERSION,
+        "handler_id": DELL_OS10_S5232F_SHOW_VERSION_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Run show version on Dell SmartFabric OS10.",
+        "params_schema": _DELL_OS10_EMPTY_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION,
+        "handler_id": DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 45,
+        "approval_required": True,
+        "description": "Set an OS10 interface description through an audited fixed SSH procedure.",
+        "params_schema": _DELL_OS10_INTERFACE_DESCRIPTION_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_SET_VLAN_DESCRIPTION,
+        "handler_id": DELL_OS10_S5232F_SET_VLAN_DESCRIPTION_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 45,
+        "approval_required": True,
+        "description": "Set an OS10 VLAN interface description through an audited fixed SSH procedure.",
+        "params_schema": _DELL_OS10_VLAN_DESCRIPTION_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_WRITE_MEMORY,
+        "handler_id": DELL_OS10_S5232F_WRITE_MEMORY_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 45,
+        "approval_required": True,
+        "description": "Persist the Dell SmartFabric OS10 running configuration.",
+        "params_schema": _DELL_OS10_EMPTY_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
     },
 )
 
