@@ -535,9 +535,9 @@ def _normalize_dell_os10_bootstrap_execution(
             code="RPC_PARAM_INVALID",
         )
     certificate_name = str(params.get("certificate_name") or "").strip()
-    if any(("\n" in item or "\r" in item) for item in [certificate_name, *cipher_suites]):
+    if any(any(ch.isspace() or ord(ch) < 32 for ch in item) for item in [certificate_name, *cipher_suites]):
         raise RPCExecutionError(
-            "Dell OS10 RESTCONF bootstrap parameters must not contain newlines.",
+            "Dell OS10 RESTCONF bootstrap parameters must not contain whitespace or control characters.",
             code="RPC_PARAM_INVALID",
         )
 
