@@ -60,9 +60,10 @@ accept arbitrary SSH command text from API clients.
     shows VLT domain status; optional `domain_id` (1–255, default 1).
     Handler: `network.dell_os10_s5232f_on.show_vlt`.
   - `network.device.dell_os10.s5232f_on.configure_vlt_domain` (write, 90s, approval required):
-    configures domain ID, unit ID (1–2), VLTi discovery port channel (1–4096),
-    backup-destination IPv4, primary priority (default 32768), optional shared
-    VLT MAC (XX:XX:XX:XX:XX:XX), and write-memory (default true).
+    configures domain ID, optional unit ID (1–2 — omit on OS10 10.5.x where the
+    command is unrecognised and role is auto-negotiated), VLTi discovery port channel
+    (1–4096), backup-destination IPv4, primary priority (default 32768), optional
+    shared VLT MAC (XX:XX:XX:XX:XX:XX), and write-memory (default true).
     Normalizer validates `backup_destination` against `_DELL_OS10_IP_RE` and
     `vlt_mac` against `_DELL_OS10_MAC_RE`.
     Handler: `network.dell_os10_s5232f_on.configure_vlt_domain`.
@@ -78,10 +79,11 @@ accept arbitrary SSH command text from API clients.
     optional `description` (max 240 chars), `remove` (default false), `write_memory` (default true).
     Handler: `network.dell_os10_s5232f_on.configure_port_channel`.
   - `network.device.dell_os10.s5232f_on.configure_interface_lacp` (write, 60s, approval required):
-    adds or removes an Ethernet interface from a port-channel with LACP negotiation;
+    adds or removes an Ethernet interface from a port-channel with LACP negotiation or static LAG;
     accepts `interface_name` (OS10 identifier, e.g. `ethernet1/1/1`), `port_channel_id` (1–4096),
-    `lacp_mode` (enum `active`/`passive`, default `active`), optional `description`,
-    `remove` (default false), `write_memory` (default false — batch all interface
+    `lacp_mode` (enum `active`/`passive`/`on`, default `active` — use `on` for static LAG,
+    required when the port-channel is used as a VLT VLTi discovery-interface), optional
+    `description`, `remove` (default false), `write_memory` (default false — batch all interface
     assignments before the final `write memory` via a separate `configure_port_channel` call).
     Handler: `network.dell_os10_s5232f_on.configure_interface_lacp`.
 - Dell OS10 interface breakout procedure is seeded by migration `0013`. One write procedure

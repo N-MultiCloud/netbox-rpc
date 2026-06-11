@@ -204,6 +204,27 @@ def test_configure_vlt_domain_backup_destination_not_in_fingerprint_when_empty(
     assert "backup_destination" in normalized["command_fingerprint"]
 
 
+def test_configure_vlt_domain_accepts_omitted_unit_id(jobs_module) -> None:
+    """unit_id is optional — Dell OS10 10.5.x auto-negotiates VLT role."""
+    execution = _execution(
+        "network.device.dell_os10.s5232f_on.configure_vlt_domain",
+        "network.dell_os10_s5232f_on.configure_vlt_domain",
+        {
+            "domain_id": 1,
+            "discovery_port_channel": 50,
+            "backup_destination": "10.0.30.204",
+        },
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["domain_id"] == 1
+    assert normalized["discovery_port_channel"] == 50
+    assert normalized["backup_destination"] == "10.0.30.204"
+    assert "unit_id" not in normalized
+    assert "unit_id" not in normalized["command_fingerprint"]
+
+
 # ---------------------------------------------------------------------------
 # configure_vlt_peer
 # ---------------------------------------------------------------------------

@@ -312,7 +312,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     if procedure_name == DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN:
         params = execution.params or {}
         domain_id = _int_range(params, "domain_id", 1, 255)
-        unit_id = _int_range(params, "unit_id", 1, 2)
+        # unit_id is optional — Dell OS10 10.5.x auto-negotiates the unit role
+        # and does not recognise the 'unit-id' CLI command; omit it when absent.
+        unit_id = _optional_int_range(params, "unit_id", 1, 2)
         primary_priority = _optional_int_range(params, "primary_priority", 1, 65535)
         if primary_priority is None:
             primary_priority = 32768
@@ -333,7 +335,6 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         normalized = {
             "target": target,
             "domain_id": domain_id,
-            "unit_id": unit_id,
             "primary_priority": primary_priority,
             "discovery_port_channel": discovery_port_channel,
             "backup_destination": backup_destination,
@@ -341,12 +342,14 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
             "command_fingerprint": {
                 "handler_id": execution.procedure.handler_id,
                 "domain_id": domain_id,
-                "unit_id": unit_id,
                 "primary_priority": primary_priority,
                 "discovery_port_channel": discovery_port_channel,
                 "backup_destination": backup_destination,
             },
         }
+        if unit_id is not None:
+            normalized["unit_id"] = unit_id
+            normalized["command_fingerprint"]["unit_id"] = unit_id
         if vlt_mac:
             normalized["vlt_mac"] = vlt_mac
             normalized["command_fingerprint"]["vlt_mac"] = vlt_mac
@@ -420,9 +423,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
             )
         port_channel_id = _int_range(params, "port_channel_id", 1, 4096)
         lacp_mode = str(params.get("lacp_mode") or "active").strip().lower()
-        if lacp_mode not in {"active", "passive"}:
+        if lacp_mode not in {"active", "passive", "on"}:
             raise RPCExecutionError(
-                "lacp_mode must be 'active' or 'passive'.",
+                "lacp_mode must be 'active', 'passive', or 'on'.",
                 code="RPC_PARAM_INVALID",
             )
         description = _dell_os10_description(params)

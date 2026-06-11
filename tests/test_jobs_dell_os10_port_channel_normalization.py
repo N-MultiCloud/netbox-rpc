@@ -182,11 +182,24 @@ def test_configure_interface_lacp_accepts_passive_mode(jobs_module) -> None:
     assert normalized["command_fingerprint"]["lacp_mode"] == "passive"
 
 
+def test_configure_interface_lacp_accepts_static_lag_on_mode(jobs_module) -> None:
+    execution = _execution(
+        "network.device.dell_os10.s5232f_on.configure_interface_lacp",
+        "network.dell_os10_s5232f_on.configure_interface_lacp",
+        {"interface_name": "ethernet1/1/1", "port_channel_id": 50, "lacp_mode": "on"},
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["lacp_mode"] == "on"
+    assert normalized["command_fingerprint"]["lacp_mode"] == "on"
+
+
 def test_configure_interface_lacp_rejects_invalid_lacp_mode(jobs_module) -> None:
     execution = _execution(
         "network.device.dell_os10.s5232f_on.configure_interface_lacp",
         "network.dell_os10_s5232f_on.configure_interface_lacp",
-        {"interface_name": "ethernet1/1/1", "port_channel_id": 1, "lacp_mode": "on"},
+        {"interface_name": "ethernet1/1/1", "port_channel_id": 1, "lacp_mode": "full"},
     )
 
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
