@@ -5,7 +5,7 @@ class NetBoxRPCConfig(PluginConfig):
     name = "netbox_rpc"
     verbose_name = "NetBox RPC"
     description = "Audited RPC procedure catalog for SSH-backed NMS operations"
-    version = "0.1.1"
+    version = "0.1.2"
     base_url = "rpc"
     author = "Emerson Felipe"
     author_email = "emerson.felipe@nmultifibra.com.br"
