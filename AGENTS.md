@@ -54,6 +54,22 @@ accept arbitrary SSH command text from API clients.
   `write_memory`. Bootstrap accepts `restconf_credential_pk` by reference; the
   RESTCONF password is resolved by `nms-backend` and must never appear in
   `normalized_params` or `command_fingerprint`.
+- Dell OS10 VLT procedures are seeded by migration `0011`. Three procedures for
+  Virtual Link Trunking on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.show_vlt` (read, 30s, no approval):
+    shows VLT domain status; optional `domain_id` (1–255, default 1).
+    Handler: `network.dell_os10_s5232f_on.show_vlt`.
+  - `network.device.dell_os10.s5232f_on.configure_vlt_domain` (write, 90s, approval required):
+    configures domain ID, unit ID (1–2), VLTi discovery port channel (1–4096),
+    backup-destination IPv4, primary priority (default 32768), optional shared
+    VLT MAC (XX:XX:XX:XX:XX:XX), and write-memory (default true).
+    Normalizer validates `backup_destination` against `_DELL_OS10_IP_RE` and
+    `vlt_mac` against `_DELL_OS10_MAC_RE`.
+    Handler: `network.dell_os10_s5232f_on.configure_vlt_domain`.
+  - `network.device.dell_os10.s5232f_on.configure_vlt_peer` (write, 60s, approval required):
+    binds or removes a port-channel as a VLT LAG; accepts `port_channel_id`,
+    `vlt_port_channel_id` (1–4096), `remove` (default false), `write_memory` (default true).
+    Handler: `network.dell_os10_s5232f_on.configure_vlt_peer`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

@@ -16,9 +16,12 @@ from netbox_nms.backend import get_backend
 
 from .constants import (
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
+    DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN,
+    DELL_OS10_S5232F_CONFIGURE_VLT_PEER,
     DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION,
     DELL_OS10_S5232F_SET_VLAN_DESCRIPTION,
     DELL_OS10_S5232F_SHOW_VERSION,
+    DELL_OS10_S5232F_SHOW_VLT,
     DELL_OS10_S5232F_WRITE_MEMORY,
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_INSTALL_SSH_KEY,
@@ -49,6 +52,8 @@ RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
 _POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 _DELL_OS10_INTERFACE_RE = re.compile(r"[A-Za-z][A-Za-z0-9/._:-]{0,63}$")
+_DELL_OS10_IP_RE = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+_DELL_OS10_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
 
 
 class RPCExecutionError(RuntimeError):
@@ -91,7 +96,9 @@ class RPCExecutionJob(JobRunner):
         return job
 
     def run(self, *args: object, **kwargs: object) -> None:
-        runtime_data = kwargs.get("data") if isinstance(kwargs.get("data"), dict) else {}
+        runtime_data = (
+            kwargs.get("data") if isinstance(kwargs.get("data"), dict) else {}
+        )
         execution = self._get_execution(
             execution_pk=kwargs.get("execution_pk") or runtime_data.get("execution_pk")
         )
@@ -116,9 +123,16 @@ class RPCExecutionJob(JobRunner):
         try:
             normalized = normalize_execution_params(execution)
             execution.normalized_params = normalized
-            execution.resolved_command_hash = _hash_json(normalized.get("command_fingerprint"))
+            execution.resolved_command_hash = _hash_json(
+                normalized.get("command_fingerprint")
+            )
             execution.save(update_fields=["normalized_params", "resolved_command_hash"])
-            _event(execution, "info", "normalized", "Execution parameters normalized by NetBox.")
+            _event(
+                execution,
+                "info",
+                "normalized",
+                "Execution parameters normalized by NetBox.",
+            )
 
             response = _call_backend(backend, execution)
             _store_backend_response(execution, response)
@@ -140,7 +154,9 @@ class RPCExecutionJob(JobRunner):
         try:
             pk = int(raw_pk)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError("RPCExecutionJob received an invalid RPCExecution primary key.") from exc
+            raise RuntimeError(
+                "RPCExecutionJob received an invalid RPCExecution primary key."
+            ) from exc
         return RPCExecution.objects.select_related(
             "procedure",
             "assigned_object_type",
@@ -158,7 +174,9 @@ class RPCExecutionJob(JobRunner):
         execution.error_code = code
         execution.error_message = message
         execution.finished_at = timezone.now()
-        execution.save(update_fields=["status", "error_code", "error_message", "finished_at"])
+        execution.save(
+            update_fields=["status", "error_code", "error_message", "finished_at"]
+        )
         _event(execution, "error", "failed", message, {"code": code})
 
 
@@ -266,6 +284,88 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         _copy_optional_credential_override(params, normalized)
         return normalized
 
+    if procedure_name == DELL_OS10_S5232F_SHOW_VLT:
+        params = execution.params or {}
+        domain_id = _optional_int_range(params, "domain_id", 1, 255)
+        if domain_id is None:
+            domain_id = 1
+        normalized = {
+            "target": target,
+            "domain_id": domain_id,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "domain_id": domain_id,
+            },
+        }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN:
+        params = execution.params or {}
+        domain_id = _int_range(params, "domain_id", 1, 255)
+        unit_id = _int_range(params, "unit_id", 1, 2)
+        primary_priority = _optional_int_range(params, "primary_priority", 1, 65535)
+        if primary_priority is None:
+            primary_priority = 32768
+        discovery_port_channel = _int_range(params, "discovery_port_channel", 1, 4096)
+        backup_destination = str(params.get("backup_destination") or "").strip()
+        if not _DELL_OS10_IP_RE.fullmatch(backup_destination):
+            raise RPCExecutionError(
+                "backup_destination must be a valid IPv4 address.",
+                code="RPC_PARAM_INVALID",
+            )
+        vlt_mac = str(params.get("vlt_mac") or "").strip()
+        if vlt_mac and not _DELL_OS10_MAC_RE.fullmatch(vlt_mac):
+            raise RPCExecutionError(
+                "vlt_mac must be a valid MAC address (XX:XX:XX:XX:XX:XX).",
+                code="RPC_PARAM_INVALID",
+            )
+        write_memory = _bool_param(params, "write_memory", True)
+        normalized = {
+            "target": target,
+            "domain_id": domain_id,
+            "unit_id": unit_id,
+            "primary_priority": primary_priority,
+            "discovery_port_channel": discovery_port_channel,
+            "backup_destination": backup_destination,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "domain_id": domain_id,
+                "unit_id": unit_id,
+                "primary_priority": primary_priority,
+                "discovery_port_channel": discovery_port_channel,
+                "backup_destination": backup_destination,
+            },
+        }
+        if vlt_mac:
+            normalized["vlt_mac"] = vlt_mac
+            normalized["command_fingerprint"]["vlt_mac"] = vlt_mac
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_VLT_PEER:
+        params = execution.params or {}
+        port_channel_id = _int_range(params, "port_channel_id", 1, 4096)
+        vlt_port_channel_id = _int_range(params, "vlt_port_channel_id", 1, 4096)
+        remove = _bool_param(params, "remove", False)
+        write_memory = _bool_param(params, "write_memory", True)
+        normalized = {
+            "target": target,
+            "port_channel_id": port_channel_id,
+            "vlt_port_channel_id": vlt_port_channel_id,
+            "remove": remove,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "port_channel_id": port_channel_id,
+                "vlt_port_channel_id": vlt_port_channel_id,
+                "remove": remove,
+            },
+        }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
     if procedure_name == NGINX_1_CONFIG_TEST:
         return _normalize_nginx_node_execution(execution, target, extra_params={})
 
@@ -273,7 +373,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         params = execution.params or {}
         config_content = str(params.get("config_content") or "").strip()
         if not config_content:
-            raise RPCExecutionError("config_content must be a non-empty string.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "config_content must be a non-empty string.", code="RPC_PARAM_INVALID"
+            )
         deployment_id = _int_range(params, "deployment_id", 1, None)
         extra: dict[str, Any] = {
             "config_content": config_content,
@@ -468,7 +570,9 @@ def _normalize_convert_mellanox_nic_execution(
     # strictly in Pydantic before any shell embedding.
     bond_name = str(params.get("bond_name") or "bond1").strip() or "bond1"
     bond_vlans = str(params.get("bond_vlans") or "").strip().replace(" ", "")
-    bond_mtu = _int_range({"bond_mtu": params.get("bond_mtu", 9216)}, "bond_mtu", 576, 9216)
+    bond_mtu = _int_range(
+        {"bond_mtu": params.get("bond_mtu", 9216)}, "bond_mtu", 576, 9216
+    )
 
     normalized: dict[str, Any] = {
         "target": target,
@@ -498,7 +602,9 @@ def _normalize_convert_mellanox_nic_execution(
         "bond_mtu": bond_mtu,
         # Hash (not the body) of any custom interfaces content keeps the
         # fingerprint stable-sized while still reflecting content changes.
-        "interfaces_content_sha": _hash_json(interfaces_content) if interfaces_content else "",
+        "interfaces_content_sha": _hash_json(interfaces_content)
+        if interfaces_content
+        else "",
     }
     return normalized
 
@@ -547,7 +653,10 @@ def _normalize_dell_os10_bootstrap_execution(
             code="RPC_PARAM_INVALID",
         )
     certificate_name = str(params.get("certificate_name") or "").strip()
-    if any(any(ch.isspace() or ord(ch) < 32 for ch in item) for item in [certificate_name, *cipher_suites]):
+    if any(
+        any(ch.isspace() or ord(ch) < 32 for ch in item)
+        for item in [certificate_name, *cipher_suites]
+    ):
         raise RPCExecutionError(
             "Dell OS10 RESTCONF bootstrap parameters must not contain whitespace or control characters.",
             code="RPC_PARAM_INVALID",
@@ -643,11 +752,15 @@ def _bool_param(params: dict[str, Any], key: str, default: bool) -> bool:
     )
 
 
-def _int_range(params: dict[str, Any], key: str, minimum: int, maximum: int | None) -> int:
+def _int_range(
+    params: dict[str, Any], key: str, minimum: int, maximum: int | None
+) -> int:
     try:
         value = int(params[key])
     except (KeyError, TypeError, ValueError) as exc:
-        raise RPCExecutionError(f"{key} must be an integer.", code="RPC_PARAM_INVALID") from exc
+        raise RPCExecutionError(
+            f"{key} must be an integer.", code="RPC_PARAM_INVALID"
+        ) from exc
     if value < minimum or (maximum is not None and value > maximum):
         suffix = f" and <= {maximum}" if maximum is not None else ""
         raise RPCExecutionError(
@@ -692,8 +805,14 @@ def _call_backend(backend: NMSBackend, execution: RPCExecution) -> dict[str, Any
                 code="RPC_BACKEND_ERROR",
             )
         detail = data.get("detail")
-        message = detail if isinstance(detail, str) else data.get("error", f"HTTP {resp.status_code}")
-        raise RPCExecutionError(str(message), code=str(data.get("code") or "RPC_BACKEND_ERROR"))
+        message = (
+            detail
+            if isinstance(detail, str)
+            else data.get("error", f"HTTP {resp.status_code}")
+        )
+        raise RPCExecutionError(
+            str(message), code=str(data.get("code") or "RPC_BACKEND_ERROR")
+        )
     return data
 
 
@@ -702,9 +821,13 @@ def _store_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     execution.result = response.get("result") or {}
     execution.error_code = str(response.get("error_code") or "")
     execution.error_message = str(response.get("error_message") or "")
-    execution.status = RPCExecution.STATUS_SUCCEEDED if ok else RPCExecution.STATUS_FAILED
+    execution.status = (
+        RPCExecution.STATUS_SUCCEEDED if ok else RPCExecution.STATUS_FAILED
+    )
     execution.finished_at = timezone.now()
-    execution.save(update_fields=["result", "error_code", "error_message", "status", "finished_at"])
+    execution.save(
+        update_fields=["result", "error_code", "error_message", "status", "finished_at"]
+    )
     for item in response.get("events") or []:
         _event(
             execution,
@@ -716,7 +839,12 @@ def _store_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     if ok:
         _event(execution, "info", "completed", "RPC execution completed.")
     else:
-        _event(execution, "error", "failed", execution.error_message or "RPC execution failed.")
+        _event(
+            execution,
+            "error",
+            "failed",
+            execution.error_message or "RPC execution failed.",
+        )
 
 
 def _event(
