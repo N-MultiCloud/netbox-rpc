@@ -55,6 +55,12 @@ DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT = (
 DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT_HANDLER = (
     "network.dell_os10_s5232f_on.configure_interface_breakout"
 )
+DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC = (
+    "network.device.dell_os10.s5232f_on.configure_interface_fec"
+)
+DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC_HANDLER = (
+    "network.dell_os10_s5232f_on.configure_interface_fec"
+)
 
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.

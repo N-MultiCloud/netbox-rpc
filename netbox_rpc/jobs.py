@@ -17,6 +17,7 @@ from netbox_nms.backend import get_backend
 from .constants import (
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
+    DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP,
     DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL,
     DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN,
@@ -474,6 +475,35 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
                 "handler_id": execution.procedure.handler_id,
                 "interface_port": interface_port,
                 "breakout_mode": breakout_mode,
+            },
+        }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC:
+        params = execution.params or {}
+        interface_name = str(params.get("interface_name") or "").strip()
+        if not _DELL_OS10_INTERFACE_RE.fullmatch(interface_name):
+            raise RPCExecutionError(
+                "interface_name must be a valid OS10 interface identifier.",
+                code="RPC_PARAM_INVALID",
+            )
+        fec_mode = str(params.get("fec_mode") or "cl91").strip().lower()
+        if fec_mode not in {"cl91", "cl108", "auto", "none"}:
+            raise RPCExecutionError(
+                "fec_mode must be one of: cl91, cl108, auto, none.",
+                code="RPC_PARAM_INVALID",
+            )
+        write_memory = _bool_param(params, "write_memory", True)
+        normalized = {
+            "target": target,
+            "interface_name": interface_name,
+            "fec_mode": fec_mode,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "interface_name": interface_name,
+                "fec_mode": fec_mode,
             },
         }
         _copy_optional_credential_override(params, normalized)

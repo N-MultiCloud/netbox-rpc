@@ -92,6 +92,15 @@ accept arbitrary SSH command text from API clients.
     `ethernet` prefix), `breakout_mode` (e.g. `40g-1x`, `100g-1x`, `10g-4x`, `25g-4x`),
     `write_memory` (default true).
     Handler: `network.dell_os10_s5232f_on.configure_interface_breakout`.
+- Dell OS10 interface FEC procedure is seeded by migration `0014`. One write procedure
+  for configuring Forward Error Correction on a physical interface:
+  - `network.device.dell_os10.s5232f_on.configure_interface_fec` (write, 30s, approval required):
+    sets or removes FEC on a physical port; accepts `interface_name` (OS10 identifier with
+    `ethernet` prefix, e.g. `ethernet1/1/31`), `fec_mode` (enum `cl91` / `cl108` / `auto` /
+    `none`, default `cl91` — `none` emits `no fec`), `write_memory` (default true).
+    Use `cl91` (RS-FEC, Clause 91) for QSFP28 100G SR4/LR4 optics; `cl108` (FC-FEC, Clause 108)
+    for SFP28 25G DAC/SR; `auto` to negotiate with the peer.
+    Handler: `network.dell_os10_s5232f_on.configure_interface_fec`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
