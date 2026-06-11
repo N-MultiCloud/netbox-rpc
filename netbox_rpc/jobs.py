@@ -16,6 +16,8 @@ from netbox_nms.backend import get_backend
 
 from .constants import (
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
+    DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP,
+    DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL,
     DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN,
     DELL_OS10_S5232F_CONFIGURE_VLT_PEER,
     DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION,
@@ -54,6 +56,9 @@ _POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 _DELL_OS10_INTERFACE_RE = re.compile(r"[A-Za-z][A-Za-z0-9/._:-]{0,63}$")
 _DELL_OS10_IP_RE = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
 _DELL_OS10_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
+_DELL_OS10_TRUNK_VLANS_RE = re.compile(
+    r"\d{1,4}(?:-\d{1,4})?(?:,\d{1,4}(?:-\d{1,4})?)*"
+)
 
 
 class RPCExecutionError(RuntimeError):
@@ -363,6 +368,82 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
                 "remove": remove,
             },
         }
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL:
+        params = execution.params or {}
+        port_channel_id = _int_range(params, "port_channel_id", 1, 4096)
+        trunk_vlans = str(params.get("trunk_vlans") or "").strip()
+        if trunk_vlans and not _DELL_OS10_TRUNK_VLANS_RE.fullmatch(trunk_vlans):
+            raise RPCExecutionError(
+                "trunk_vlans must be a comma-separated list of VLAN IDs or ranges "
+                "(e.g. '20,111' or '10-20,100').",
+                code="RPC_PARAM_INVALID",
+            )
+        description = _dell_os10_description(params)
+        remove = _bool_param(params, "remove", False)
+        write_memory = _bool_param(params, "write_memory", True)
+        normalized = {
+            "target": target,
+            "port_channel_id": port_channel_id,
+            "remove": remove,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "port_channel_id": port_channel_id,
+                "remove": remove,
+            },
+        }
+        if trunk_vlans:
+            normalized["trunk_vlans"] = trunk_vlans
+            normalized["command_fingerprint"]["trunk_vlans"] = trunk_vlans
+        if description:
+            normalized["description"] = description
+            normalized["command_fingerprint"]["description_sha256"] = _hash_text(
+                description
+            )
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP:
+        params = execution.params or {}
+        interface_name = str(params.get("interface_name") or "").strip()
+        if not _DELL_OS10_INTERFACE_RE.fullmatch(interface_name):
+            raise RPCExecutionError(
+                "interface_name must be a valid OS10 interface identifier.",
+                code="RPC_PARAM_INVALID",
+            )
+        port_channel_id = _int_range(params, "port_channel_id", 1, 4096)
+        lacp_mode = str(params.get("lacp_mode") or "active").strip().lower()
+        if lacp_mode not in {"active", "passive"}:
+            raise RPCExecutionError(
+                "lacp_mode must be 'active' or 'passive'.",
+                code="RPC_PARAM_INVALID",
+            )
+        description = _dell_os10_description(params)
+        remove = _bool_param(params, "remove", False)
+        write_memory = _bool_param(params, "write_memory", False)
+        normalized = {
+            "target": target,
+            "interface_name": interface_name,
+            "port_channel_id": port_channel_id,
+            "lacp_mode": lacp_mode,
+            "remove": remove,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "interface_name": interface_name,
+                "port_channel_id": port_channel_id,
+                "lacp_mode": lacp_mode,
+                "remove": remove,
+            },
+        }
+        if description:
+            normalized["description"] = description
+            normalized["command_fingerprint"]["description_sha256"] = _hash_text(
+                description
+            )
         _copy_optional_credential_override(params, normalized)
         return normalized
 
