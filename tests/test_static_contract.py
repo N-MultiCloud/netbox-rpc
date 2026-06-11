@@ -131,7 +131,7 @@ def test_install_ssh_key_normalizer_strips_comment_before_forwarding() -> None:
     jobs = read("netbox_rpc/jobs.py")
     # Comment is stripped by splitting on whitespace and rejoining first two fields
     assert "split(None, 2)" in jobs
-    assert 'key_parts[:2]' in jobs
+    assert "key_parts[:2]" in jobs
 
 
 def test_install_ssh_key_normalizer_validates_username_with_posix_regex() -> None:
@@ -160,3 +160,29 @@ def test_ssh_key_procedure_seeded_targets_device_and_vm() -> None:
     migration = read("netbox_rpc/migrations/0006_seed_ssh_install_procedure.py")
     assert '"dcim.device"' in migration
     assert '"virtualization.virtualmachine"' in migration
+
+
+def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0011_seed_dell_os10_vlt_procedures.py")
+
+    for name in (
+        "network.device.dell_os10.s5232f_on.show_vlt",
+        "network.device.dell_os10.s5232f_on.configure_vlt_domain",
+        "network.device.dell_os10.s5232f_on.configure_vlt_peer",
+    ):
+        assert name in constants
+        assert name in migration
+    assert "network.dell_os10_s5232f_on.show_vlt" in constants
+    assert "from netbox_rpc" not in migration
+
+
+def test_dell_os10_vlt_normalizer_branches_are_registered() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "DELL_OS10_S5232F_SHOW_VLT" in jobs
+    assert "DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN" in jobs
+    assert "DELL_OS10_S5232F_CONFIGURE_VLT_PEER" in jobs
+    assert "_DELL_OS10_IP_RE" in jobs
+    assert "_DELL_OS10_MAC_RE" in jobs
+    assert "backup_destination" in jobs
+    assert "vlt_mac" in jobs

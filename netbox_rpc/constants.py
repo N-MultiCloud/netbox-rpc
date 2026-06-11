@@ -23,6 +23,20 @@ DELL_OS10_S5232F_SET_VLAN_DESCRIPTION_HANDLER = (
 )
 DELL_OS10_S5232F_WRITE_MEMORY = "network.device.dell_os10.s5232f_on.write_memory"
 DELL_OS10_S5232F_WRITE_MEMORY_HANDLER = "network.dell_os10_s5232f_on.write_memory"
+DELL_OS10_S5232F_SHOW_VLT = "network.device.dell_os10.s5232f_on.show_vlt"
+DELL_OS10_S5232F_SHOW_VLT_HANDLER = "network.dell_os10_s5232f_on.show_vlt"
+DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN = (
+    "network.device.dell_os10.s5232f_on.configure_vlt_domain"
+)
+DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN_HANDLER = (
+    "network.dell_os10_s5232f_on.configure_vlt_domain"
+)
+DELL_OS10_S5232F_CONFIGURE_VLT_PEER = (
+    "network.device.dell_os10.s5232f_on.configure_vlt_peer"
+)
+DELL_OS10_S5232F_CONFIGURE_VLT_PEER_HANDLER = (
+    "network.dell_os10_s5232f_on.configure_vlt_peer"
+)
 
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.
@@ -33,7 +47,9 @@ LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
 # Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
 # through the netbox-nms ProxmoxEndpointSSHBinding (see jobs.py normalizer).
 LINUX_PROXMOX_CONVERT_MELLANOX_NIC = "os.linux.proxmox.convert_mellanox_nic_to_ethernet"
-LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = "os.linux_proxmox.convert_mellanox_nic_to_ethernet"
+LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = (
+    "os.linux_proxmox.convert_mellanox_nic_to_ethernet"
+)
 
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
@@ -202,6 +218,106 @@ _DELL_OS10_VLAN_DESCRIPTION_PARAMS_SCHEMA = {
     },
 }
 
+_DELL_OS10_VLT_SHOW_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "domain_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 255,
+            "default": 1,
+            "description": "VLT domain ID (default 1).",
+        },
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_VLT_DOMAIN_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": [
+        "domain_id",
+        "unit_id",
+        "discovery_port_channel",
+        "backup_destination",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        "domain_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 255,
+            "description": "VLT domain ID (1–255).",
+        },
+        "unit_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2,
+            "description": "This switch's VLT unit ID (1 or 2).",
+        },
+        "primary_priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "default": 32768,
+            "description": "Primary election priority (default 32768; lower wins).",
+        },
+        "discovery_port_channel": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "Port-channel ID used as the VLT interconnect link (VLTi).",
+        },
+        "backup_destination": {
+            "type": "string",
+            "pattern": r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
+            "description": "IPv4 address of the VLT backup link peer.",
+        },
+        "vlt_mac": {
+            "type": "string",
+            "pattern": r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$",
+            "description": "Optional shared VLT MAC address (XX:XX:XX:XX:XX:XX).",
+        },
+        "write_memory": {
+            "type": "boolean",
+            "default": True,
+            "description": "Persist configuration after applying (default true).",
+        },
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
+_DELL_OS10_VLT_PEER_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["port_channel_id", "vlt_port_channel_id"],
+    "additionalProperties": False,
+    "properties": {
+        "port_channel_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "Local port-channel ID to bind as a VLT LAG.",
+        },
+        "vlt_port_channel_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "VLT port-channel ID (must match on both VLT peers).",
+        },
+        "remove": {
+            "type": "boolean",
+            "default": False,
+            "description": "Remove the VLT port-channel binding instead of adding it (default false).",
+        },
+        "write_memory": {
+            "type": "boolean",
+            "default": True,
+            "description": "Persist configuration after applying (default true).",
+        },
+        "rpc_ssh_credential_pk": _DELL_OS10_CREDENTIAL_REF,
+    },
+}
+
 _DELL_OS10_RESULT_SCHEMA = {
     "type": "object",
     "required": ["ok", "procedure", "target"],
@@ -269,6 +385,44 @@ DELL_OS10_S5232F_PROCEDURES = (
         "approval_required": True,
         "description": "Persist the Dell SmartFabric OS10 running configuration.",
         "params_schema": _DELL_OS10_EMPTY_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_SHOW_VLT,
+        "handler_id": DELL_OS10_S5232F_SHOW_VLT_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Show VLT domain status on Dell SmartFabric OS10.",
+        "params_schema": _DELL_OS10_VLT_SHOW_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN,
+        "handler_id": DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 90,
+        "approval_required": True,
+        "description": (
+            "Configure the VLT domain on Dell SmartFabric OS10 "
+            "(unit ID, priorities, backup link)."
+        ),
+        "params_schema": _DELL_OS10_VLT_DOMAIN_PARAMS_SCHEMA,
+        "result_schema": _DELL_OS10_RESULT_SCHEMA,
+    },
+    {
+        "name": DELL_OS10_S5232F_CONFIGURE_VLT_PEER,
+        "handler_id": DELL_OS10_S5232F_CONFIGURE_VLT_PEER_HANDLER,
+        "target_models": ["dcim.device"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": (
+            "Bind or remove a port-channel as a VLT LAG on Dell SmartFabric OS10."
+        ),
+        "params_schema": _DELL_OS10_VLT_PEER_PARAMS_SCHEMA,
         "result_schema": _DELL_OS10_RESULT_SCHEMA,
     },
 )
