@@ -37,6 +37,18 @@ DELL_OS10_S5232F_CONFIGURE_VLT_PEER = (
 DELL_OS10_S5232F_CONFIGURE_VLT_PEER_HANDLER = (
     "network.dell_os10_s5232f_on.configure_vlt_peer"
 )
+DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL = (
+    "network.device.dell_os10.s5232f_on.configure_port_channel"
+)
+DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL_HANDLER = (
+    "network.dell_os10_s5232f_on.configure_port_channel"
+)
+DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP = (
+    "network.device.dell_os10.s5232f_on.configure_interface_lacp"
+)
+DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP_HANDLER = (
+    "network.dell_os10_s5232f_on.configure_interface_lacp"
+)
 
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.

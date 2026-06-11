@@ -70,6 +70,20 @@ accept arbitrary SSH command text from API clients.
     binds or removes a port-channel as a VLT LAG; accepts `port_channel_id`,
     `vlt_port_channel_id` (1–4096), `remove` (default false), `write_memory` (default true).
     Handler: `network.dell_os10_s5232f_on.configure_vlt_peer`.
+- Dell OS10 port-channel and LACP procedures are seeded by migration `0012`. Two write
+  procedures for LAG configuration on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.configure_port_channel` (write, 60s, approval required):
+    creates, updates, or removes a port-channel (LAG); accepts `port_channel_id` (1–4096),
+    optional `trunk_vlans` (comma-separated VLAN IDs or ranges, e.g. `20,111`),
+    optional `description` (max 240 chars), `remove` (default false), `write_memory` (default true).
+    Handler: `network.dell_os10_s5232f_on.configure_port_channel`.
+  - `network.device.dell_os10.s5232f_on.configure_interface_lacp` (write, 60s, approval required):
+    adds or removes an Ethernet interface from a port-channel with LACP negotiation;
+    accepts `interface_name` (OS10 identifier, e.g. `ethernet1/1/1`), `port_channel_id` (1–4096),
+    `lacp_mode` (enum `active`/`passive`, default `active`), optional `description`,
+    `remove` (default false), `write_memory` (default false — batch all interface
+    assignments before the final `write memory` via a separate `configure_port_channel` call).
+    Handler: `network.dell_os10_s5232f_on.configure_interface_lacp`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
