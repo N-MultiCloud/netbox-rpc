@@ -16,6 +16,7 @@ from netbox_nms.backend import get_backend
 
 from .constants import (
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
+    DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_LACP,
     DELL_OS10_S5232F_CONFIGURE_PORT_CHANNEL,
     DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN,
@@ -59,6 +60,8 @@ _DELL_OS10_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
 _DELL_OS10_TRUNK_VLANS_RE = re.compile(
     r"\d{1,4}(?:-\d{1,4})?(?:,\d{1,4}(?:-\d{1,4})?)*"
 )
+_DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
+_DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
 
 
 class RPCExecutionError(RuntimeError):
@@ -444,6 +447,35 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
             normalized["command_fingerprint"]["description_sha256"] = _hash_text(
                 description
             )
+        _copy_optional_credential_override(params, normalized)
+        return normalized
+
+    if procedure_name == DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT:
+        params = execution.params or {}
+        interface_port = str(params.get("interface_port") or "").strip()
+        if not _DELL_OS10_BREAKOUT_PORT_RE.fullmatch(interface_port):
+            raise RPCExecutionError(
+                "interface_port must be in slot/port/subport format, e.g. '1/1/1'.",
+                code="RPC_PARAM_INVALID",
+            )
+        breakout_mode = str(params.get("breakout_mode") or "").strip()
+        if not _DELL_OS10_BREAKOUT_MODE_RE.fullmatch(breakout_mode):
+            raise RPCExecutionError(
+                "breakout_mode must be in Ng-Mx format, e.g. '40g-1x' or '10g-4x'.",
+                code="RPC_PARAM_INVALID",
+            )
+        write_memory = _bool_param(params, "write_memory", True)
+        normalized = {
+            "target": target,
+            "interface_port": interface_port,
+            "breakout_mode": breakout_mode,
+            "write_memory": write_memory,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "interface_port": interface_port,
+                "breakout_mode": breakout_mode,
+            },
+        }
         _copy_optional_credential_override(params, normalized)
         return normalized
 

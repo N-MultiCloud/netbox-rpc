@@ -84,6 +84,14 @@ accept arbitrary SSH command text from API clients.
     `remove` (default false), `write_memory` (default false — batch all interface
     assignments before the final `write memory` via a separate `configure_port_channel` call).
     Handler: `network.dell_os10_s5232f_on.configure_interface_lacp`.
+- Dell OS10 interface breakout procedure is seeded by migration `0013`. One write procedure
+  for configuring physical port breakout mode on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.configure_interface_breakout` (write, 60s, approval required):
+    runs `interface breakout <port> map <mode>` in global config mode; accepts
+    `interface_port` (physical port in `slot/port/subport` format, e.g. `1/1/1` — no
+    `ethernet` prefix), `breakout_mode` (e.g. `40g-1x`, `100g-1x`, `10g-4x`, `25g-4x`),
+    `write_memory` (default true).
+    Handler: `network.dell_os10_s5232f_on.configure_interface_breakout`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
