@@ -121,6 +121,14 @@ accept arbitrary SSH command text from API clients.
     (1–500, default 100).
     Handler: `services.pterodactyl.container_logs`.
   Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- Dell OS10 third-party optical module unlock is seeded by migration `0017`. One write procedure
+  for enabling non-Dell QSFP28-SR4 (and similar) transceivers on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.allow_third_party_transceiver` (write, 45s, approval required):
+    runs the fixed sequence `allow unsupported-transceiver` + `unlock third-party transceiver` +
+    `write memory` in global config mode; accepts only the optional `rpc_ssh_credential_pk`
+    override. Display name: "Allow third-part Optical Modules". Apply once after inserting
+    non-Dell optics; the switch loses the setting only on a factory-reset.
+    Handler: `network.dell_os10_s5232f_on.allow_third_party_transceiver`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

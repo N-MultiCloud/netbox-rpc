@@ -15,6 +15,7 @@ from netbox.jobs import JobRunner
 from netbox_nms.backend import get_backend
 
 from .constants import (
+    DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC,
@@ -250,6 +251,7 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         return _normalize_dell_os10_bootstrap_execution(execution, target)
 
     if procedure_name in {
+        DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
         DELL_OS10_S5232F_SHOW_VERSION,
         DELL_OS10_S5232F_WRITE_MEMORY,
     }:
