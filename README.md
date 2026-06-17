@@ -6,7 +6,7 @@ The plugin does not open SSH sessions directly; execution is delegated to
 `nms-backend`, which runs hard-coded handler IDs against credentials owned by
 `netbox-nms`.
 
-The initial procedure catalog is intentionally narrow:
+The procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
 - `network.device.dell_os10.s5232f_on.bootstrap_restconf`
@@ -16,6 +16,9 @@ The initial procedure catalog is intentionally narrow:
 - `network.device.dell_os10.s5232f_on.write_memory`
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+- `services.pterodactyl.bootstrap_api_key`
+- `services.pterodactyl.artisan`
+- `services.pterodactyl.container_logs`
 
 Operators call named procedures, not arbitrary SSH commands.
 
@@ -38,6 +41,35 @@ the `params_schema` since migration `0010` and re-validated strictly by
 `nms-backend` before any shell embedding. `effect="destructive"` and
 `approval_required=True`. Seeded by migration `0008`; handler
 `os.linux_proxmox.convert_mellanox_nic_to_ethernet` lives in `nms-backend`.
+
+### Pterodactyl Panel procedures
+
+Three procedures for managing a Pterodactyl Panel Docker deployment via SSH to
+the container host. Seeded by migration `0016`. Target models: `dcim.device`
+and `virtualization.virtualmachine`.
+
+**`services.pterodactyl.bootstrap_api_key`** — runs `php artisan about
+--no-interaction` (falling back to `php artisan --version`) inside the
+container. Verifies that the Panel application is operational. Optional
+`container_name` (default `pterodactyl-panel-1`). `approval_required=True`.
+Handler ID: `services.pterodactyl.bootstrap_api_key` (in `nms-backend`).
+
+**`services.pterodactyl.artisan`** — runs one allowlisted Laravel Artisan
+command inside the container. Required `command` param; accepted values:
+`queue:status`, `schedule:run`, `cache:clear`, `config:clear`,
+`queue:restart`, `migrate`. The allowlist is enforced by the normalizer
+(`_PTERODACTYL_ARTISAN_ALLOWLIST` in `jobs.py`) and again by the Pydantic
+schema in `nms-backend`. Disallowed commands raise
+`RPCExecutionError(code="RPC_PARAM_INVALID")`. Optional `container_name`
+(default `pterodactyl-panel-1`). `approval_required=False`. Handler ID:
+`services.pterodactyl.artisan` (in `nms-backend`).
+
+**`services.pterodactyl.container_logs`** — runs `docker logs --tail <N>
+<container>` on the SSH host to retrieve recent log output. Optional
+`container_name` (default `pterodactyl-panel-1`); optional `lines`
+(1–500, default 100; values outside that range are clamped, not rejected).
+`approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
+(in `nms-backend`).
 
 ## Architecture
 
