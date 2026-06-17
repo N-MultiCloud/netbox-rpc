@@ -31,6 +31,9 @@ from .constants import (
     LINUX_INSTALL_SSH_KEY,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
     NGINX_1_CONFIG_DEPLOY,
+    PTERODACTYL_ARTISAN,
+    PTERODACTYL_BOOTSTRAP_API_KEY,
+    PTERODACTYL_CONTAINER_LOGS,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
@@ -63,6 +66,10 @@ _DELL_OS10_TRUNK_VLANS_RE = re.compile(
 )
 _DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
 _DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
+_PTERODACTYL_CONTAINER_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+_PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
+    {"queue:status", "schedule:run", "cache:clear", "config:clear", "queue:restart", "migrate"}
+)
 
 
 class RPCExecutionError(RuntimeError):
@@ -545,6 +552,62 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
             )
         extra = {"deployment_id": deployment_id, "previous_config": previous_config}
         return _normalize_nginx_node_execution(execution, target, extra_params=extra)
+
+    if procedure_name == PTERODACTYL_BOOTSTRAP_API_KEY:
+        params = execution.params or {}
+        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
+            raise RPCExecutionError(
+                "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
+            )
+        return {
+            "target": target,
+            "container_name": container_name,
+            "command_fingerprint": {"handler_id": execution.procedure.handler_id},
+        }
+
+    if procedure_name == PTERODACTYL_ARTISAN:
+        params = execution.params or {}
+        command = str(params.get("command") or "").strip()
+        if command not in _PTERODACTYL_ARTISAN_ALLOWLIST:
+            raise RPCExecutionError(
+                f"command must be one of: {', '.join(sorted(_PTERODACTYL_ARTISAN_ALLOWLIST))}",
+                code="RPC_PARAM_INVALID",
+            )
+        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
+            raise RPCExecutionError(
+                "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
+            )
+        return {
+            "target": target,
+            "command": command,
+            "container_name": container_name,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "command": command,
+                "container_name": container_name,
+            },
+        }
+
+    if procedure_name == PTERODACTYL_CONTAINER_LOGS:
+        params = execution.params or {}
+        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
+            raise RPCExecutionError(
+                "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
+            )
+        lines = max(1, min(500, int(params.get("lines", 100))))
+        return {
+            "target": target,
+            "container_name": container_name,
+            "lines": lines,
+            "command_fingerprint": {
+                "handler_id": execution.procedure.handler_id,
+                "container_name": container_name,
+                "lines": lines,
+            },
+        }
 
     raise RPCExecutionError(
         f"Procedure {procedure_name!r} has no NetBox normalizer.",

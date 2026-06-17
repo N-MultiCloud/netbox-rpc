@@ -103,6 +103,24 @@ accept arbitrary SSH command text from API clients.
     Use `cl91` (RS-FEC, Clause 91) for QSFP28 100G SR4/LR4 optics; `cl108` (FC-FEC, Clause 108)
     for SFP28 25G DAC/SR; `auto` to negotiate with the peer.
     Handler: `network.dell_os10_s5232f_on.configure_interface_fec`.
+- Pterodactyl Panel procedures are seeded by migration `0016`. Three procedures for
+  managing a Pterodactyl Panel Docker deployment via `docker exec` on the host:
+  - `services.pterodactyl.bootstrap_api_key` (write, 60s, approval required):
+    bootstraps Pterodactyl Panel application and client API keys. Optional
+    `container_name` (default `pterodactyl-panel-1`).
+    Handler: `services.pterodactyl.bootstrap_api_key`.
+  - `services.pterodactyl.artisan` (write, 60s, no approval):
+    runs an allowlisted Laravel Artisan command. Required `command` (enum:
+    `queue:status`, `schedule:run`, `cache:clear`, `config:clear`,
+    `queue:restart`, `migrate`). Optional `container_name`
+    (default `pterodactyl-panel-1`).
+    Handler: `services.pterodactyl.artisan`.
+  - `services.pterodactyl.container_logs` (read, 30s, no approval):
+    fetches recent log output from the Pterodactyl Panel container. Optional
+    `container_name` (default `pterodactyl-panel-1`) and `lines`
+    (1–500, default 100).
+    Handler: `services.pterodactyl.container_logs`.
+  Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

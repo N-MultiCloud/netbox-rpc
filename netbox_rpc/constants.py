@@ -62,6 +62,14 @@ DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC_HANDLER = (
     "network.dell_os10_s5232f_on.configure_interface_fec"
 )
 
+# Pterodactyl Panel management via docker-exec on the host. Seeded by migration 0016.
+PTERODACTYL_BOOTSTRAP_API_KEY = "services.pterodactyl.bootstrap_api_key"
+PTERODACTYL_BOOTSTRAP_API_KEY_HANDLER = "services.pterodactyl.bootstrap_api_key"
+PTERODACTYL_ARTISAN = "services.pterodactyl.artisan"
+PTERODACTYL_ARTISAN_HANDLER = "services.pterodactyl.artisan"
+PTERODACTYL_CONTAINER_LOGS = "services.pterodactyl.container_logs"
+PTERODACTYL_CONTAINER_LOGS_HANDLER = "services.pterodactyl.container_logs"
+
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
