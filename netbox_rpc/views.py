@@ -1,3 +1,4 @@
+from django.http import HttpRequest
 from netbox.object_actions import AddObject, BulkDelete, BulkExport
 from netbox.views import generic
 from utilities.views import register_model_view
@@ -6,6 +7,20 @@ from . import filtersets, forms, models, tables
 
 LIST_ACTIONS = (AddObject, BulkExport, BulkDelete)
 READ_ONLY_ACTIONS = (BulkExport,)
+
+
+class RequestAwareObjectEditView(generic.ObjectEditView):
+    """Attach the current request to the edited object for form-level policy checks."""
+
+    def alter_object(
+        self,
+        obj: object,
+        request: HttpRequest,
+        url_args: tuple[object, ...],
+        url_kwargs: dict[str, object],
+    ) -> object:
+        setattr(obj, forms.REQUEST_ATTR, request)
+        return super().alter_object(obj, request, url_args, url_kwargs)
 
 
 # ── RPCProcedure ─────────────────────────────────────────────────────────────
@@ -27,7 +42,7 @@ class RPCProcedureView(generic.ObjectView):
 
 @register_model_view(models.RPCProcedure, "add", detail=False)
 @register_model_view(models.RPCProcedure, "edit")
-class RPCProcedureEditView(generic.ObjectEditView):
+class RPCProcedureEditView(RequestAwareObjectEditView):
     queryset = models.RPCProcedure.objects.all()
     form = forms.RPCProcedureForm
 
@@ -62,7 +77,7 @@ class RPCLinuxServiceAllowlistView(generic.ObjectView):
 
 @register_model_view(models.RPCLinuxServiceAllowlist, "add", detail=False)
 @register_model_view(models.RPCLinuxServiceAllowlist, "edit")
-class RPCLinuxServiceAllowlistEditView(generic.ObjectEditView):
+class RPCLinuxServiceAllowlistEditView(RequestAwareObjectEditView):
     queryset = models.RPCLinuxServiceAllowlist.objects.all()
     form = forms.RPCLinuxServiceAllowlistForm
 
