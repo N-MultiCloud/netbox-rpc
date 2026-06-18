@@ -61,6 +61,12 @@ DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC = (
 DELL_OS10_S5232F_CONFIGURE_INTERFACE_FEC_HANDLER = (
     "network.dell_os10_s5232f_on.configure_interface_fec"
 )
+DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER = (
+    "network.device.dell_os10.s5232f_on.allow_third_party_transceiver"
+)
+DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER_HANDLER = (
+    "network.dell_os10_s5232f_on.allow_third_party_transceiver"
+)
 
 # Pterodactyl Panel management via docker-exec on the host. Seeded by migration 0016.
 PTERODACTYL_BOOTSTRAP_API_KEY = "services.pterodactyl.bootstrap_api_key"
