@@ -37,7 +37,9 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
         if target_type:
             # Include procedures with no target restriction (empty list) or those
             # that explicitly allow the requested target type.
-            qs = qs.filter(Q(target_models=[]) | Q(target_models__contains=[target_type]))
+            qs = qs.filter(
+                Q(target_models=[]) | Q(target_models__contains=[target_type])
+            )
         page = self.paginate_queryset(qs)
         serializer = self.get_serializer(page if page is not None else qs, many=True)
         if page is not None:
@@ -58,6 +60,15 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "backend",
     ).prefetch_related("tags")
     serializer_class = RPCExecutionSerializer
+
+    @staticmethod
+    def _mark_enqueue_failed(execution: models.RPCExecution) -> None:
+        execution.status = models.RPCExecution.STATUS_FAILED
+        execution.error_code = "RPC_ENQUEUE_FAILED"
+        execution.error_message = (
+            "Failed to enqueue RPC job. Check RQ/Redis connectivity."
+        )
+        execution.save(update_fields=["status", "error_code", "error_message"])
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         if not request.user.has_perm("netbox_rpc.execute_rpcprocedure"):
@@ -80,9 +91,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
             try:
                 jsonschema.validate(params, procedure.params_schema)
             except jsonschema.ValidationError as exc:
-                raise drf_serializers.ValidationError(
-                    {"params": exc.message}
-                ) from exc
+                raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
         execution = serializer.save(requested_by=request.user)
         try:
@@ -95,12 +104,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         except Exception:
             # Enqueue failed (e.g. Redis unavailable). Mark the execution failed so
             # it doesn't sit permanently in STATUS_QUEUED with no associated job.
-            execution.status = models.RPCExecution.STATUS_FAILED
-            execution.error_code = "RPC_ENQUEUE_FAILED"
-            execution.error_message = (
-                "Failed to enqueue RPC job. Check RQ/Redis connectivity."
-            )
-            execution.save(update_fields=["status", "error_code", "error_message"])
+            self._mark_enqueue_failed(execution)
             raise
 
         execution.job_id = job.pk
@@ -125,5 +129,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
 
 
 class RPCExecutionEventViewSet(NetBoxModelViewSet):
-    queryset = models.RPCExecutionEvent.objects.select_related("execution").prefetch_related("tags")
+    queryset = models.RPCExecutionEvent.objects.select_related(
+        "execution"
+    ).prefetch_related("tags")
     serializer_class = RPCExecutionEventSerializer
