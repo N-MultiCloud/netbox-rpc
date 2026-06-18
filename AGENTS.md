@@ -131,6 +131,16 @@ and raises `RPCExecutionError(code="RPC_BACKEND_UNREACHABLE")` on any network
 failure (connection refused, timeout, DNS) — so a backend-unreachable condition
 surfaces as a structured, alertable error code instead of an opaque traceback.
 
+## Admin Form Security
+
+RPC object edit views must preserve the `RequestAwareObjectEditView` pattern so
+forms can evaluate the active user without duplicating NetBox's generic edit
+flow. `RPCProcedureForm` must fail closed when an existing procedure is changed
+from `approval_required=True` to `False` unless the user has
+`netbox_rpc.approve_rpcprocedure`. `RPCLinuxServiceAllowlistForm` must scope the
+`ssh_credential_override` field with `DeviceCredential.objects.restrict(user,
+"view")`; never use an unrestricted `DeviceCredential.objects.all()` queryset.
+
 ## Migration Safety
 
 - Seed data migrations inline their data directly; they must not import live
