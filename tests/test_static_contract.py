@@ -94,6 +94,27 @@ def test_create_guards_enabled_and_approval_and_params_schema() -> None:
     assert "jsonschema.validate" in views
 
 
+def test_create_marks_execution_failed_when_enqueue_fails() -> None:
+    views = read("netbox_rpc/api/views.py")
+
+    assert "def _mark_enqueue_failed(execution: models.RPCExecution) -> None:" in views
+    helper_start = views.index("def _mark_enqueue_failed")
+    helper_end = views.index("\n\n    def create", helper_start)
+    helper = views[helper_start:helper_end]
+
+    assert "execution.status = models.RPCExecution.STATUS_FAILED" in helper
+    assert 'execution.error_code = "RPC_ENQUEUE_FAILED"' in helper
+    assert "Check RQ/Redis connectivity." in helper
+    assert 'update_fields=["status", "error_code", "error_message"]' in helper
+
+    create_start = views.index("def create")
+    create_end = views.index("\n\n    @extend_schema", create_start)
+    create = views[create_start:create_end]
+    assert "except Exception:" in create
+    assert "self._mark_enqueue_failed(execution)" in create
+    assert "raise" in create
+
+
 def test_edit_forms_receive_request_context_for_security_policy() -> None:
     views = read("netbox_rpc/views.py")
     forms = read("netbox_rpc/forms.py")
