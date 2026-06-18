@@ -123,6 +123,16 @@ NetBox 4.6 validates attached job object types against the `jobs` feature, and
 The worker receives the execution primary key through `execution_pk` and
 persists it in the job `data` JSON for retry/debug recovery.
 
+## Admin Form Security
+
+NetBox edit views attach the active request to RPC form instances so form-level
+security policy can evaluate the requesting user. `RPCProcedureForm` blocks
+changing an existing procedure from `approval_required=True` to `False` unless
+the user has `netbox_rpc.approve_rpcprocedure`. `RPCLinuxServiceAllowlistForm`
+scopes `ssh_credential_override` choices with
+`DeviceCredential.objects.restrict(user, "view")` and falls back to an empty
+queryset if no request context is available.
+
 ## Testing
 
 Default tests are static or mocked:

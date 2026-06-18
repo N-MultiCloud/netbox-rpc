@@ -94,6 +94,34 @@ def test_create_guards_enabled_and_approval_and_params_schema() -> None:
     assert "jsonschema.validate" in views
 
 
+def test_edit_forms_receive_request_context_for_security_policy() -> None:
+    views = read("netbox_rpc/views.py")
+    forms = read("netbox_rpc/forms.py")
+
+    assert "class RequestAwareObjectEditView" in views
+    assert "setattr(obj, forms.REQUEST_ATTR, request)" in views
+    assert "class RPCProcedureEditView(RequestAwareObjectEditView)" in views
+    assert "class RPCLinuxServiceAllowlistEditView(RequestAwareObjectEditView)" in views
+    assert 'REQUEST_ATTR = "_netbox_rpc_request"' in forms
+
+
+def test_allowlist_ssh_credentials_are_scoped_to_request_user() -> None:
+    forms = read("netbox_rpc/forms.py")
+
+    assert "DeviceCredential.objects.all()" not in forms
+    assert 'DeviceCredential.objects.restrict(user, "view")' in forms
+    assert "DeviceCredential.objects.none()" in forms
+
+
+def test_approval_required_downgrade_requires_approve_permission() -> None:
+    forms = read("netbox_rpc/forms.py")
+
+    assert 'cleaned_data.get("approval_required") is not False' in forms
+    assert 'user.has_perm("netbox_rpc.approve_rpcprocedure")' in forms
+    assert "can disable " in forms
+    assert "approval for an existing RPC procedure" in forms
+
+
 def test_migration_does_not_import_live_constants() -> None:
     migration = read("netbox_rpc/migrations/0002_seed_initial_procedures.py")
     assert "from netbox_rpc" not in migration
