@@ -50,6 +50,8 @@ LINUX_PROXMOX_CONVERT_MELLANOX_NIC = "os.linux.proxmox.convert_mellanox_nic_to_e
 LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = (
     "os.linux_proxmox.convert_mellanox_nic_to_ethernet"
 )
+LINUX_PROXMOX_QEMU_VM_LIFECYCLE = "os.linux.proxmox.qemu_vm_lifecycle"
+LINUX_PROXMOX_QEMU_VM_LIFECYCLE_HANDLER = "os.linux_proxmox.qemu_vm_lifecycle"
 
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
@@ -716,5 +718,245 @@ MELLANOX_PROCEDURES = (
         ),
         "params_schema": _MELLANOX_CONVERT_PARAMS_SCHEMA,
         "result_schema": _MELLANOX_CONVERT_RESULT_SCHEMA,
+    },
+)
+
+_PROXMOX_QEMU_VM_LIFECYCLE_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["proxmox_endpoint_id", "operations"],
+    "additionalProperties": False,
+    "properties": {
+        "proxmox_endpoint_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "netbox-proxbox ProxmoxEndpoint id; SSH details come from its netbox-nms binding.",
+        },
+        "operations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "enum": [
+                    "clone",
+                    "nextid",
+                    "migrate",
+                    "configure",
+                    "resize",
+                    "start",
+                    "stop",
+                    "status",
+                    "agent_ping",
+                    "agent_network_get_interfaces",
+                    "agent_configure_debian_network",
+                    "agent_set_user_password",
+                    "agent_pbs_zabbix_status",
+                    "agent_configure_zabbix_agent2",
+                ],
+            },
+        },
+        "vmid": {"type": "integer", "minimum": 100, "maximum": 999999999},
+        "template_vmid": {"type": "integer", "minimum": 100, "maximum": 999999999},
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$",
+        },
+        "source_node": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+        },
+        "node": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+        },
+        "target_node": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+        },
+        "storage": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        },
+        "target_storage": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        },
+        "full_clone": {"type": "boolean", "default": True},
+        "agent_enabled": {"type": "boolean", "default": True},
+        "memory_mb": {"type": "integer", "minimum": 128, "maximum": 1048576},
+        "cores": {"type": "integer", "minimum": 1, "maximum": 512},
+        "ciuser": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+        },
+        "search_domain": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.?$",
+            "description": "Cloud-init DNS search domain passed to Proxmox as searchdomain.",
+        },
+        "dns_servers": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 45,
+                "pattern": "^[0-9A-Fa-f:.]+$",
+            },
+            "description": "Ordered DNS resolvers passed to Proxmox as nameserver.",
+        },
+        "networks": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "required": ["index", "bridge"],
+                "additionalProperties": False,
+                "properties": {
+                    "index": {"type": "integer", "minimum": 0, "maximum": 31},
+                    "model": {
+                        "type": "string",
+                        "enum": ["virtio", "e1000", "e1000e", "vmxnet3", "rtl8139"],
+                        "default": "virtio",
+                    },
+                    "bridge": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+                    },
+                    "tag": {"type": "integer", "minimum": 1, "maximum": 4094},
+                    "firewall": {"type": "boolean"},
+                },
+            },
+        },
+        "ipconfigs": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "required": ["index", "ip"],
+                "additionalProperties": False,
+                "properties": {
+                    "index": {"type": "integer", "minimum": 0, "maximum": 31},
+                    "ip": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[^\\s,]+$",
+                    },
+                    "gw": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[^\\s,]+$",
+                    },
+                },
+            },
+        },
+        "guest_networks": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "required": ["interface", "address"],
+                "additionalProperties": False,
+                "properties": {
+                    "interface": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32,
+                        "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,31}$",
+                    },
+                    "address": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[^\\s,]+$",
+                    },
+                    "gateway": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[^\\s,]+$",
+                    },
+                },
+            },
+        },
+        "guest_credential_pk": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "netbox-nms DeviceCredential id used by nms-backend to resolve "
+                "the guest username/password server-side."
+            ),
+        },
+        "zabbix_server": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.?$",
+            "default": "zabbix.nmulti.cloud",
+            "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
+        },
+        "resize_disk": {
+            "type": "string",
+            "pattern": "^(scsi|virtio|sata|ide)[0-9]+$",
+            "default": "scsi0",
+        },
+        "disk_gb": {"type": "integer", "minimum": 1, "maximum": 262144},
+    },
+}
+
+_PROXMOX_QEMU_VM_LIFECYCLE_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target", "vmid"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "vmid": {"type": "integer"},
+        "operations": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array"},
+        "nextid": {"type": "integer"},
+        "status": {"type": "object"},
+        "agent_network_interfaces": {"type": "array"},
+        "pbs_guest_status": {"type": "object"},
+    },
+}
+
+PROXMOX_QEMU_PROCEDURES = (
+    {
+        "name": LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
+        "handler_id": LINUX_PROXMOX_QEMU_VM_LIFECYCLE_HANDLER,
+        "target_models": ["netbox_proxbox.proxmoxendpoint"],
+        "effect": "destructive",
+        "timeout_seconds": 3600,
+        "approval_required": True,
+        "description": (
+            "Run audited Proxmox QEMU lifecycle actions, including clone, "
+            "migrate, configure, resize, power, QGA checks, Debian guest "
+            "network/password repair, and PBS Zabbix Agent 2 status/configure."
+        ),
+        "params_schema": _PROXMOX_QEMU_VM_LIFECYCLE_PARAMS_SCHEMA,
+        "result_schema": _PROXMOX_QEMU_VM_LIFECYCLE_RESULT_SCHEMA,
     },
 )

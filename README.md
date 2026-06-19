@@ -16,6 +16,7 @@ The initial procedure catalog is intentionally narrow:
 - `network.device.dell_os10.s5232f_on.write_memory`
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+- `os.linux.proxmox.qemu_vm_lifecycle`
 
 Operators call named procedures, not arbitrary SSH commands.
 
@@ -38,6 +39,25 @@ the `params_schema` since migration `0010` and re-validated strictly by
 `nms-backend` before any shell embedding. `effect="destructive"` and
 `approval_required=True`. Seeded by migration `0008`; handler
 `os.linux_proxmox.convert_mellanox_nic_to_ethernet` lives in `nms-backend`.
+
+### `os.linux.proxmox.qemu_vm_lifecycle`
+
+Runs fixed Proxmox QEMU VM lifecycle operations through the same
+`ProxmoxEndpointSSHBinding` path used by the Mellanox procedure. The procedure
+targets `netbox_proxbox.proxmoxendpoint`, resolves SSH details through
+`netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh()`, and forwards only
+structured fields to `nms-backend`: operation enum values, Proxmox `nextid`
+allocation, VMIDs, node/storage names, optional clone/migrate settings,
+CPU/memory, QEMU Guest Agent enablement, network interface bridge/tag objects,
+cloud-init IP config objects, DNS search domain/resolver defaults, disk resize
+target, start/status/agent-ping requests, QGA interface inspection, constrained
+Debian guest network repair, and guest password rotation by
+`guest_credential_pk`. The guest password operation stores only a
+`netbox-nms.DeviceCredential` reference in RPC params; `nms-backend` resolves
+and redacts the secret at execution time. It never stores or accepts raw shell
+command text. `effect="destructive"` and `approval_required=True`. Seeded by
+migration `0012` and extended through `0017`; handler
+`os.linux_proxmox.qemu_vm_lifecycle` lives in `nms-backend`.
 
 ## Architecture
 
@@ -63,7 +83,8 @@ owns:
 libraries. It must execute only known handler IDs such as
 `network.huawei_olt_ma5800_r024.start_ont` and
 `network.dell_os10_s5232f_on.bootstrap_restconf` and
-`os.linux_ubuntu_24.restart_service`.
+`os.linux_ubuntu_24.restart_service` and
+`os.linux_proxmox.qemu_vm_lifecycle`.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with
 `service_type="ssh"`. Those rows provide the management host, port, linked
