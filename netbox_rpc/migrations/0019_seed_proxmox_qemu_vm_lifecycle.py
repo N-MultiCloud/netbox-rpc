@@ -177,7 +177,7 @@ def unseed_proxmox_qemu_vm_lifecycle(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0018_seed_packer_procedures"),
+        ("netbox_rpc", "0017_seed_allow_third_party_optical_modules"),
     ]
 
     operations = [
