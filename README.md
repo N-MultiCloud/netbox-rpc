@@ -71,6 +71,34 @@ schema in `nms-backend`. Disallowed commands raise
 `approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
 (in `nms-backend`).
 
+### `packer.vm.*` — netbox-packer post-build verification
+
+Four **read-only** procedures (`effect="read"`, `approval_required=False`,
+`timeout_seconds=120`) that target a **netbox-packer `PackerTemplate`**
+(`target_models = ["netbox_packer.packertemplate"]`) and run read-only
+diagnostics over SSH against the Proxmox node that built the template:
+
+| Procedure / handler | Checks |
+|---|---|
+| `packer.vm.test_ssh_connectivity` | SSH connectivity to the node |
+| `packer.vm.check_agent_running` | QEMU guest agent (`qm config <vmid>` or `systemctl is-active qemu-guest-agent`) |
+| `packer.vm.verify_services` | `systemctl is-active` for an optional list of systemd units (default `qemu-guest-agent`) |
+| `packer.vm.collect_info` | `cat /etc/os-release` + `uname -a` |
+
+**One-way soft dependency (hard constraint).** netbox-packer is open-source and
+netbox-rpc is proprietary, so the coupling is strictly one-directional:
+netbox-rpc depends on netbox-packer, but **netbox-packer must never reference
+netbox-rpc**. netbox-rpc touches netbox-packer only through (1) the string
+`target_models` label and (2) a **function-local lazy import** of
+`netbox_packer.models.PackerTemplate` inside `packer_normalizer.py`, guarded by
+`try/except ImportError` (so NetBox boots fine when netbox-packer is absent).
+`jobs.py` never imports `netbox_packer` at module level. Because a
+`PackerTemplate` has no `ProxmoxEndpoint`, SSH is resolved from an explicit
+`rpc_ssh_credential_pk` (a netbox-nms `DeviceCredential` PK) plus the template's
+`proxmox_node` (overridable via `ssh_host`); the normalizer emits the
+`rpc_ssh_host` / `rpc_ssh_port` / `rpc_ssh_credential_pk` host-override keys.
+Seeded by migration `0018`; handlers (same IDs) live in `nms-backend`.
+
 ## Architecture
 
 ```text

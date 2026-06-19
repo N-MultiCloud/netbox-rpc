@@ -6,6 +6,12 @@ sync when architecture, commands, or workflows change.
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
 
+> **LLM Agent Safety:** Before creating any `RPCExecution` record, read the
+> **LLM Agent Safety Guardrails** section in `AGENTS.md`. Destructive Proxmox
+> procedures (`os.linux.proxmox.convert_mellanox_nic_to_ethernet`) MUST NOT be
+> dispatched without explicit human confirmation of the target endpoint, params,
+> and expected network impact.
+
 @AGENTS.md
 
 ## Automatic Production Deployment
