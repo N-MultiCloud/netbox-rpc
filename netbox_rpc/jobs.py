@@ -30,6 +30,7 @@ from .constants import (
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
+    PACKER_PROCEDURE_NAMES,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -229,6 +230,15 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
         return _normalize_convert_mellanox_nic_execution(execution, target)
+
+    if procedure_name in PACKER_PROCEDURE_NAMES:
+        # Function-local import keeps the netbox-packer reference lazy: this
+        # module imports packer_normalizer only when a packer.vm.* execution is
+        # actually normalized, and packer_normalizer in turn lazy-imports
+        # netbox_packer. netbox-rpc never hard-depends on netbox-packer.
+        from .packer_normalizer import normalize_packer_vm_execution
+
+        return normalize_packer_vm_execution(execution, target)
 
     if procedure_name == DELL_OS10_S5232F_BOOTSTRAP_RESTCONF:
         return _normalize_dell_os10_bootstrap_execution(execution, target)
