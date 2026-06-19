@@ -3,6 +3,64 @@
 `netbox-rpc` owns procedure policy and audit state. It must never store or
 accept arbitrary SSH command text from API clients.
 
+## LLM Agent Safety Guardrails
+
+**STOP — read this section before creating any `RPCExecution` record.**
+
+These rules apply to all LLM agents (Claude Code, Codex, or any automated
+system) that interact with the `netbox-rpc` REST API.
+
+### Destructive Proxmox Operations
+
+The `os.linux.proxmox.convert_mellanox_nic_to_ethernet` procedure
+(`effect="destructive"`, `approval_required=True`) targets a **live Proxmox
+hypervisor node** via SSH. It can:
+
+- Permanently flip InfiniBand NICs to Ethernet (irreversible without hardware reset)
+- Rewrite `/etc/network/interfaces`, breaking active network connectivity
+- Reboot the hypervisor, dropping all running VMs and containers
+- Disrupt the entire Proxmox cluster if the affected node is a quorum member
+
+**An LLM agent MUST NOT autonomously create or approve an RPCExecution for any
+procedure with `approval_required=True` or `effect="destructive"` without
+explicit, in-session confirmation from a human operator.** Before dispatching,
+the agent must confirm with the user:
+
+1. The exact `ProxmoxEndpoint` ID (`proxmox_endpoint_id` param) — verify by name
+2. The full `params` object including `reboot`, `apply_network`, `dry_run`
+3. The expected network impact on the hypervisor and its guests
+4. That the operator has a working out-of-band (IPMI/iDRAC) connection to the node
+
+**Minimum safe workflow:**
+
+```
+1. Run with dry_run=True first and show the user the planned changes.
+2. If and only if the user explicitly confirms, run with dry_run=False.
+3. Never pass reboot=True without separate explicit user confirmation.
+```
+
+### Other Write Procedures
+
+The procedures below are `approval_required=False` but still modify production
+infrastructure. An LLM agent should present the intended action to the user
+before dispatching, not after:
+
+| Procedure | Risk |
+|---|---|
+| `os.linux.ubuntu.24.restart_service` | Service downtime |
+| `os.linux.ubuntu.24.start_service` / `stop_service` | Service downtime |
+| `network.device.dell_os10.s5232f_on.configure_vlt_domain` | Network partition risk |
+| `services.pterodactyl.bootstrap_api_key` | Credential rotation |
+
+### Permission Invariant
+
+Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
+a human operator has explicitly granted it for a specific, bounded task. Holding
+this permission allows bypassing the `approval_required` API gate — it must never
+be used autonomously on destructive procedures.
+
+---
+
 - Procedure records map canonical names to backend `handler_id` values.
 - NetBox RQ jobs normalize params and delegate execution to `nms-backend`.
 - SSH credentials and host-key pinning live in `netbox-nms.DeviceService`.

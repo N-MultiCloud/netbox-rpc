@@ -235,3 +235,61 @@ def test_dell_os10_vlt_normalizer_branches_are_registered() -> None:
     assert "_DELL_OS10_MAC_RE" in jobs
     assert "backup_destination" in jobs
     assert "vlt_mac" in jobs
+
+
+# ---------------------------------------------------------------------------
+# LLM Agent Safety Guardrails — security invariants
+# ---------------------------------------------------------------------------
+
+
+def test_mellanox_procedures_are_approval_required_and_destructive() -> None:
+    """MELLANOX_PROCEDURES must always have approval_required=True and effect='destructive'.
+
+    This is a load-bearing invariant: it ensures that any autonomous LLM agent
+    dispatching an RPCExecution is blocked at the API layer unless a human
+    operator has explicitly granted the approve_rpcprocedure permission AND the
+    procedure has been manually approved in the session.
+    """
+    constants = read("netbox_rpc/constants.py")
+    # The MELLANOX_PROCEDURES tuple must exist and contain exactly one entry
+    assert "MELLANOX_PROCEDURES" in constants
+    # Both safety flags must appear inside the constants file (in the procedure dict)
+    assert '"approval_required": True' in constants or "'approval_required': True" in constants
+    assert '"effect": "destructive"' in constants or "'effect': 'destructive'" in constants
+    # The procedure name must reference Proxmox
+    assert "os.linux.proxmox.convert_mellanox_nic_to_ethernet" in constants
+    assert "netbox_proxbox.proxmoxendpoint" in constants
+
+
+def test_mellanox_normalizer_uses_function_local_import() -> None:
+    """The Mellanox normalizer must import resolve_proxmox_endpoint_ssh inside the
+    function body, not at module level.
+
+    A module-level import would make the entire jobs module fail to load when
+    an older netbox-nms release does not expose the proxmox_ssh submodule.
+    Keeping the import function-local means only a live Mellanox execution triggers
+    the ImportError, and the error is surfaced with a descriptive RPCExecutionError
+    rather than a silent import failure at Django startup.
+    """
+    jobs = read("netbox_rpc/jobs.py")
+    # The import must appear inside the normalizer function (indented), not at the top
+    assert "from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh" in jobs
+    # The comment describing the function-local rationale must be present
+    assert "function-local" in jobs
+    # The import must NOT appear at module top-level (no leading indent on the import)
+    for line in jobs.splitlines():
+        if "from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh" in line:
+            # The line must be indented (inside a function)
+            assert line.startswith("    "), (
+                "resolve_proxmox_endpoint_ssh import must be inside a function (indented), "
+                "not at module level"
+            )
+
+
+def test_agents_md_contains_llm_agent_safety_guardrails() -> None:
+    """AGENTS.md must document the LLM Agent Safety Guardrails for destructive procedures."""
+    agents = read("AGENTS.md")
+    assert "LLM Agent Safety Guardrails" in agents
+    assert "approval_required" in agents
+    assert "destructive" in agents
+    assert "convert_mellanox_nic_to_ethernet" in agents
