@@ -293,3 +293,112 @@ def test_agents_md_contains_llm_agent_safety_guardrails() -> None:
     assert "approval_required" in agents
     assert "destructive" in agents
     assert "convert_mellanox_nic_to_ethernet" in agents
+
+
+# ---------------------------------------------------------------------------
+# netbox-packer integration (issue #69) — one-way soft dependency contract
+# ---------------------------------------------------------------------------
+
+_PACKER_PROCEDURE_NAMES = (
+    "packer.vm.test_ssh_connectivity",
+    "packer.vm.check_agent_running",
+    "packer.vm.verify_services",
+    "packer.vm.collect_info",
+)
+
+
+def test_packer_procedure_catalog_names_are_seeded() -> None:
+    """All four read-only packer.vm.* procedures must be declared in constants and seeded."""
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0012_seed_packer_procedures.py")
+
+    assert "PACKER_PROCEDURES" in constants
+    assert "PACKER_PROCEDURE_NAMES" in constants
+    for name in _PACKER_PROCEDURE_NAMES:
+        assert name in constants, f"{name} missing from constants.py"
+        assert name in migration, f"{name} missing from migration 0012"
+
+
+def test_packer_procedures_are_read_only_and_target_packertemplate() -> None:
+    """Packer procedures must be read-only and target the lowercase PackerTemplate label."""
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0012_seed_packer_procedures.py")
+
+    # Lowercase content-type label is required for target_model_label matching
+    # and the /procedures/available/?target_type= filter used by the nms UI.
+    assert "netbox_packer.packertemplate" in constants
+    assert "netbox_packer.packertemplate" in migration
+    # The capitalized model name must NOT be used as a target label.
+    assert "netbox_packer.PackerTemplate" not in constants
+    assert "netbox_packer.PackerTemplate" not in migration
+    # All packer procedures are read-only with no approval gate.
+    assert '"effect": "destructive"' not in migration
+    assert '"approval_required": True' not in migration
+
+
+def test_packer_normalizer_lazy_imports_netbox_packer() -> None:
+    """packer_normalizer.py must guard the netbox_packer import with try/except ImportError."""
+    normalizer = read("netbox_rpc/packer_normalizer.py")
+    assert "try:" in normalizer
+    assert "from netbox_packer.models import PackerTemplate" in normalizer
+    assert "except ImportError" in normalizer
+    assert "RPC_PACKER_PLUGIN_MISSING" in normalizer
+    # The lazy import must live inside the normalizer function (indented).
+    for line in normalizer.splitlines():
+        if "from netbox_packer.models import PackerTemplate" in line:
+            assert line.startswith("    "), (
+                "netbox_packer import must be function-local (indented), not module-level"
+            )
+
+
+def test_jobs_does_not_import_netbox_packer_at_module_level() -> None:
+    """jobs.py must not import netbox_packer at top level; only the function-local
+    packer_normalizer dispatch may reference it."""
+    jobs = read("netbox_rpc/jobs.py")
+    # jobs.py must reach the packer normalizer lazily (function-local import).
+    assert "from .packer_normalizer import normalize_packer_vm_execution" in jobs
+    assert "PACKER_PROCEDURE_NAMES" in jobs
+    # jobs.py must never import netbox_packer directly.
+    assert "import netbox_packer" not in jobs
+    assert "from netbox_packer" not in jobs
+    # The packer_normalizer import must be indented (inside the dispatch function).
+    for line in jobs.splitlines():
+        if "from .packer_normalizer import normalize_packer_vm_execution" in line:
+            assert line.startswith("    "), (
+                "packer_normalizer import must be function-local (indented), not module-level"
+            )
+
+
+def test_netbox_packer_does_not_reference_netbox_rpc() -> None:
+    """Hard constraint: netbox-packer MUST NOT reference netbox-rpc in any way.
+
+    netbox-packer is an open-source plugin; netbox-rpc is proprietary. The
+    dependency is strictly one-way. When the sibling netbox-packer checkout is
+    available (it is in the local workspace and the integration CI stack), assert
+    that neither its pyproject.toml nor any Python source mentions netbox-rpc.
+    Skips gracefully when the sibling source is not present (unit-only CI).
+    """
+    import os
+
+    candidates = [
+        os.environ.get("NETBOX_PACKER_SRC"),
+        str(ROOT.parent / "netbox-packer"),
+        str(ROOT.parent.parent / "netbox-packer"),
+    ]
+    packer_root = next(
+        (Path(c) for c in candidates if c and (Path(c) / "pyproject.toml").exists()),
+        None,
+    )
+    if packer_root is None:
+        import pytest
+
+        pytest.skip("netbox-packer sibling source not available; skipping cross-repo check")
+
+    pyproject = (packer_root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "netbox-rpc" not in pyproject
+    assert "netbox_rpc" not in pyproject
+
+    for py_file in (packer_root / "netbox_packer").rglob("*.py"):
+        src = py_file.read_text(encoding="utf-8")
+        assert "netbox_rpc" not in src, f"{py_file} references netbox_rpc"
+        assert "netbox-rpc" not in src, f"{py_file} references netbox-rpc"

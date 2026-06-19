@@ -128,6 +128,36 @@ be used autonomously on destructive procedures.
     binds or removes a port-channel as a VLT LAG; accepts `port_channel_id`,
     `vlt_port_channel_id` (1–4096), `remove` (default false), `write_memory` (default true).
     Handler: `network.dell_os10_s5232f_on.configure_vlt_peer`.
+- netbox-packer post-build verification procedures are seeded by migration
+  `0012`. They are **read-only** (`effect="read"`, `approval_required=False`,
+  `timeout_seconds=120`) and target a **netbox-packer `PackerTemplate`**
+  (`target_models = ["netbox_packer.packertemplate"]`, lowercase content-type
+  label). They run read-only diagnostics over SSH against the Proxmox node that
+  built the template:
+  - `packer.vm.test_ssh_connectivity` — SSH connectivity probe.
+  - `packer.vm.check_agent_running` — QEMU guest-agent responsiveness (read-only
+    `qm config <vmid>` when a template VMID is known, else
+    `systemctl is-active qemu-guest-agent`).
+  - `packer.vm.verify_services` — `systemctl is-active` for an optional list of
+    charset-validated systemd unit names (defaults to `qemu-guest-agent`).
+  - `packer.vm.collect_info` — `cat /etc/os-release` + `uname -a`.
+
+  **Dependency direction (hard constraint): netbox-rpc → netbox-packer is a
+  one-way SOFT dependency.** netbox-packer is open-source; netbox-rpc is
+  proprietary. netbox-rpc references netbox-packer ONLY through (1) the string
+  `target_models` content-type label and (2) a **function-local lazy import** of
+  `netbox_packer.models.PackerTemplate` inside `packer_normalizer.py`
+  (`normalize_packer_vm_execution`), guarded by `try/except ImportError`
+  (`RPC_PACKER_PLUGIN_MISSING`). `jobs.py` never imports `netbox_packer` at
+  module level — it imports `packer_normalizer` function-locally in the dispatch
+  branch. **netbox-packer MUST NOT import, depend on, or reference netbox-rpc in
+  any way** (enforced by `tests/test_static_contract.py`). A `PackerTemplate`
+  has no `ProxmoxEndpoint`, so SSH is resolved from an explicit
+  `rpc_ssh_credential_pk` (a netbox-nms `DeviceCredential` PK) plus the
+  template's `proxmox_node` (overridable with `ssh_host`); the normalizer emits
+  the `rpc_ssh_host`/`rpc_ssh_port`/`rpc_ssh_credential_pk` host-override keys.
+  Handler IDs equal the procedure names; the SSH handlers live in nms-backend
+  (`automation/rpc/handlers.py`).
 - Nginx proxy procedures (`service.nginx.1.*`) are seeded by this plugin's own
   migration `0003_seed_nginx_procedures` (canonical source) and also by
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).

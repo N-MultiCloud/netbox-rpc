@@ -718,3 +718,157 @@ MELLANOX_PROCEDURES = (
         "result_schema": _MELLANOX_CONVERT_RESULT_SCHEMA,
     },
 )
+
+# ---------------------------------------------------------------------------
+# netbox-packer post-build verification procedures (read-only). Seeded by
+# migration 0012. The normalizer lives in packer_normalizer.py, which
+# lazy-imports netbox_packer ONLY at execution time.
+#
+# Dependency direction (hard constraint): netbox-rpc -> netbox-packer is a
+# one-way SOFT dependency (string target_models + lazy import). netbox-packer
+# MUST NOT reference netbox-rpc in any way. netbox-rpc never imports
+# netbox_packer at module top level so NetBox still boots when netbox-packer is
+# absent; only an actual packer.vm.* execution touches it.
+# ---------------------------------------------------------------------------
+
+# Lowercase Django content-type label (app_label.model). It must be lowercase to
+# match RPCExecution.target_model_label and the /procedures/available/
+# ?target_type= filter used by the nms packer UI.
+PACKER_TEMPLATE_TARGET_MODEL = "netbox_packer.packertemplate"
+
+PACKER_VM_TEST_SSH = "packer.vm.test_ssh_connectivity"
+PACKER_VM_TEST_SSH_HANDLER = "packer.vm.test_ssh_connectivity"
+PACKER_VM_CHECK_AGENT = "packer.vm.check_agent_running"
+PACKER_VM_CHECK_AGENT_HANDLER = "packer.vm.check_agent_running"
+PACKER_VM_VERIFY_SERVICES = "packer.vm.verify_services"
+PACKER_VM_VERIFY_SERVICES_HANDLER = "packer.vm.verify_services"
+PACKER_VM_COLLECT_INFO = "packer.vm.collect_info"
+PACKER_VM_COLLECT_INFO_HANDLER = "packer.vm.collect_info"
+
+# All packer.vm.* procedure names, used by the jobs.py dispatch and tests.
+PACKER_PROCEDURE_NAMES = frozenset(
+    {
+        PACKER_VM_TEST_SSH,
+        PACKER_VM_CHECK_AGENT,
+        PACKER_VM_VERIFY_SERVICES,
+        PACKER_VM_COLLECT_INFO,
+    }
+)
+
+# DeviceCredential PK reference: nms-backend decrypts it at execution time and
+# uses it together with rpc_ssh_host to reach the Proxmox node that holds the
+# built template. A PackerTemplate has no ProxmoxEndpoint reference, so SSH is
+# resolved from this explicit credential plus the template's proxmox_node
+# (overridable with ssh_host), NOT via a ProxmoxEndpointSSHBinding.
+_PACKER_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "netbox-nms DeviceCredential PK; nms-backend decrypts it at execution time.",
+}
+
+_PACKER_SSH_HOST_OVERRIDE = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 255,
+    "description": "Optional SSH host override; defaults to the template's proxmox_node.",
+}
+
+_PACKER_SSH_PORT_OVERRIDE = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 65535,
+    "description": "Optional SSH port override (default 22).",
+}
+
+_PACKER_BASE_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["rpc_ssh_credential_pk"],
+    "additionalProperties": False,
+    "properties": {
+        "rpc_ssh_credential_pk": _PACKER_CREDENTIAL_REF,
+        "ssh_host": _PACKER_SSH_HOST_OVERRIDE,
+        "ssh_port": _PACKER_SSH_PORT_OVERRIDE,
+    },
+}
+
+_PACKER_VERIFY_SERVICES_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["rpc_ssh_credential_pk"],
+    "additionalProperties": False,
+    "properties": {
+        "rpc_ssh_credential_pk": _PACKER_CREDENTIAL_REF,
+        "ssh_host": _PACKER_SSH_HOST_OVERRIDE,
+        "ssh_port": _PACKER_SSH_PORT_OVERRIDE,
+        "services": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                # systemd unit-name safe charset; the normalizer re-validates.
+                "pattern": r"^[A-Za-z0-9_.@:-]+$",
+            },
+            "description": "Optional systemd unit names to check; empty checks a default set.",
+        },
+    },
+}
+
+_PACKER_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "command_log": {"type": "array", "items": {"type": "string"}},
+        "output": {"type": "string"},
+    },
+}
+
+PACKER_PROCEDURES = (
+    {
+        "name": PACKER_VM_TEST_SSH,
+        "handler_id": PACKER_VM_TEST_SSH_HANDLER,
+        "target_models": [PACKER_TEMPLATE_TARGET_MODEL],
+        "effect": "read",
+        "timeout_seconds": 120,
+        "approval_required": False,
+        "description": "Test SSH connectivity to the Proxmox node that built a packer template.",
+        "params_schema": _PACKER_BASE_PARAMS_SCHEMA,
+        "result_schema": _PACKER_RESULT_SCHEMA,
+    },
+    {
+        "name": PACKER_VM_CHECK_AGENT,
+        "handler_id": PACKER_VM_CHECK_AGENT_HANDLER,
+        "target_models": [PACKER_TEMPLATE_TARGET_MODEL],
+        "effect": "read",
+        "timeout_seconds": 120,
+        "approval_required": False,
+        "description": "Verify the QEMU guest agent is responsive on a packer template's node.",
+        "params_schema": _PACKER_BASE_PARAMS_SCHEMA,
+        "result_schema": _PACKER_RESULT_SCHEMA,
+    },
+    {
+        "name": PACKER_VM_VERIFY_SERVICES,
+        "handler_id": PACKER_VM_VERIFY_SERVICES_HANDLER,
+        "target_models": [PACKER_TEMPLATE_TARGET_MODEL],
+        "effect": "read",
+        "timeout_seconds": 120,
+        "approval_required": False,
+        "description": "Check that cloud-init systemd services are running for a packer template.",
+        "params_schema": _PACKER_VERIFY_SERVICES_PARAMS_SCHEMA,
+        "result_schema": _PACKER_RESULT_SCHEMA,
+    },
+    {
+        "name": PACKER_VM_COLLECT_INFO,
+        "handler_id": PACKER_VM_COLLECT_INFO_HANDLER,
+        "target_models": [PACKER_TEMPLATE_TARGET_MODEL],
+        "effect": "read",
+        "timeout_seconds": 120,
+        "approval_required": False,
+        "description": "Collect OS information from a packer template's Proxmox node.",
+        "params_schema": _PACKER_BASE_PARAMS_SCHEMA,
+        "result_schema": _PACKER_RESULT_SCHEMA,
+    },
+)
