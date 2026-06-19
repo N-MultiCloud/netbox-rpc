@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -31,6 +32,7 @@ from .constants import (
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
+    LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
     NGINX_1_CONFIG_DEPLOY,
     PTERODACTYL_ARTISAN,
     PTERODACTYL_BOOTSTRAP_API_KEY,
@@ -59,6 +61,33 @@ logger = logging.getLogger(__name__)
 
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
+_PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PROXMOX_STORAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PROXMOX_BRIDGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+_PROXMOX_VM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+_PROXMOX_DISK_RE = re.compile(r"(?:scsi|virtio|sata|ide)[0-9]+$")
+_PROXMOX_NO_COMMA_SPACE_RE = re.compile(r"[^\s,]{1,64}$")
+_DNS_SEARCH_DOMAIN_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+)
+_PROXMOX_QEMU_OPERATIONS = {
+    "nextid",
+    "clone",
+    "migrate",
+    "configure",
+    "resize",
+    "start",
+    "stop",
+    "status",
+    "agent_ping",
+    "agent_network_get_interfaces",
+    "agent_configure_debian_network",
+    "agent_set_user_password",
+    "agent_pbs_zabbix_status",
+    "agent_configure_zabbix_agent2",
+}
+_PROXMOX_QEMU_NIC_MODELS = {"virtio", "e1000", "e1000e", "vmxnet3", "rtl8139"}
 _POSIX_USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 _DELL_OS10_INTERFACE_RE = re.compile(r"[A-Za-z][A-Za-z0-9/._:-]{0,63}$")
 _DELL_OS10_IP_RE = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
@@ -256,6 +285,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
         from .packer_normalizer import normalize_packer_vm_execution
 
         return normalize_packer_vm_execution(execution, target)
+
+    if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
+        return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
 
     if procedure_name == DELL_OS10_S5232F_BOOTSTRAP_RESTCONF:
         return _normalize_dell_os10_bootstrap_execution(execution, target)
@@ -745,42 +777,9 @@ def _normalize_convert_mellanox_nic_execution(
     installed netbox-nms to expose ``proxmox_ssh`` — only an actual Mellanox
     execution does.
     """
-    try:
-        from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh
-    except ImportError as exc:
-        raise RPCExecutionError(
-            "netbox-nms does not expose the Proxmox SSH resolver; "
-            "upgrade netbox-nms to a version with ProxmoxEndpointSSHBinding.",
-            code="RPC_PROXMOX_SSH_RESOLVER_MISSING",
-        ) from exc
-
     params = execution.params or {}
     endpoint_id = _int_range(params, "proxmox_endpoint_id", 1, None)
-
-    resolved = resolve_proxmox_endpoint_ssh(endpoint_id)
-    if not resolved:
-        raise RPCExecutionError(
-            f"No Proxmox Endpoint SSH binding is configured for endpoint "
-            f"{endpoint_id}. Create one in NetBox NMS "
-            "(Proxmox Endpoint SSH Bindings) before running this procedure.",
-            code="RPC_PROXMOX_SSH_BINDING_NOT_FOUND",
-        )
-
-    host = str(resolved.get("host") or "").strip()
-    if not host:
-        raise RPCExecutionError(
-            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
-            "resolvable host. Set an SSH host override or an endpoint IP/domain.",
-            code="RPC_PROXMOX_SSH_HOST_UNRESOLVED",
-        )
-
-    credential_pk = resolved.get("credential_pk")
-    if credential_pk is None:
-        raise RPCExecutionError(
-            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
-            "linked SSH credential.",
-            code="RPC_PROXMOX_SSH_CREDENTIAL_MISSING",
-        )
+    resolved = _resolve_proxmox_ssh_binding(endpoint_id)
 
     reboot = bool(params.get("reboot", False))
     apply_network = bool(params.get("apply_network", False))
@@ -797,9 +796,9 @@ def _normalize_convert_mellanox_nic_execution(
 
     normalized: dict[str, Any] = {
         "target": target,
-        "rpc_ssh_host": host,
+        "rpc_ssh_host": resolved["host"],
         "rpc_ssh_port": int(resolved.get("port") or 22),
-        "rpc_ssh_credential_pk": int(credential_pk),
+        "rpc_ssh_credential_pk": int(resolved["credential_pk"]),
         "rpc_ssh_known_hosts_entry": str(resolved.get("known_hosts_entry") or ""),
         "rpc_ssh_strict_host_key_checking": bool(
             resolved.get("strict_host_key_checking", True)
@@ -828,6 +827,364 @@ def _normalize_convert_mellanox_nic_execution(
         else "",
     }
     return normalized
+
+
+def _normalize_proxmox_qemu_vm_lifecycle_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize a constrained Proxmox QEMU VM lifecycle request."""
+    params = execution.params or {}
+    endpoint_id = _int_range(params, "proxmox_endpoint_id", 1, None)
+    resolved = _resolve_proxmox_ssh_binding(endpoint_id)
+    operations = _proxmox_operations(params)
+    vmid = _optional_int_range(params, "vmid", 100, 999999999)
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "rpc_ssh_host": resolved["host"],
+        "rpc_ssh_port": int(resolved.get("port") or 22),
+        "rpc_ssh_credential_pk": int(resolved["credential_pk"]),
+        "rpc_ssh_known_hosts_entry": str(resolved.get("known_hosts_entry") or ""),
+        "rpc_ssh_strict_host_key_checking": bool(
+            resolved.get("strict_host_key_checking", True)
+        ),
+        "proxmox_endpoint_id": endpoint_id,
+        "operations": operations,
+    }
+    if vmid is not None:
+        normalized["vmid"] = vmid
+
+    command_fingerprint: dict[str, Any] = {
+        "handler_id": execution.procedure.handler_id,
+        "proxmox_endpoint_id": endpoint_id,
+        "operations": operations,
+    }
+    if vmid is not None:
+        command_fingerprint["vmid"] = vmid
+
+    for key, regex in (
+        ("name", _PROXMOX_VM_NAME_RE),
+        ("source_node", _PROXMOX_NODE_RE),
+        ("node", _PROXMOX_NODE_RE),
+        ("target_node", _PROXMOX_NODE_RE),
+        ("storage", _PROXMOX_STORAGE_RE),
+        ("target_storage", _PROXMOX_STORAGE_RE),
+    ):
+        value = _optional_regex_param(params, key, regex)
+        if value:
+            normalized[key] = value
+            command_fingerprint[key] = value
+
+    for key, minimum, maximum in (
+        ("template_vmid", 100, 999999999),
+        ("memory_mb", 128, 1048576),
+        ("cores", 1, 512),
+        ("disk_gb", 1, 262144),
+        ("guest_credential_pk", 1, None),
+    ):
+        value = _optional_int_range(params, key, minimum, maximum)
+        if value is not None:
+            normalized[key] = value
+            command_fingerprint[key] = value
+
+    if "full_clone" in params:
+        normalized["full_clone"] = _bool_param(params, "full_clone", True)
+    else:
+        normalized["full_clone"] = True
+    command_fingerprint["full_clone"] = normalized["full_clone"]
+
+    normalized["agent_enabled"] = _bool_param(params, "agent_enabled", True)
+    command_fingerprint["agent_enabled"] = normalized["agent_enabled"]
+
+    ciuser = str(params.get("ciuser") or "").strip()
+    if ciuser:
+        if not _POSIX_USERNAME_RE.fullmatch(ciuser):
+            raise RPCExecutionError("ciuser must be a valid POSIX username.", code="RPC_PARAM_INVALID")
+        normalized["ciuser"] = ciuser
+        command_fingerprint["ciuser"] = ciuser
+
+    search_domain = _normalize_dns_search_domain(params.get("search_domain"))
+    if search_domain:
+        normalized["search_domain"] = search_domain
+        command_fingerprint["search_domain"] = search_domain
+    dns_servers = _normalize_dns_servers(params.get("dns_servers") or [])
+    if dns_servers:
+        normalized["dns_servers"] = dns_servers
+        command_fingerprint["dns_servers"] = dns_servers
+
+    resize_disk = str(params.get("resize_disk") or "scsi0").strip()
+    if "resize" in operations:
+        if not _PROXMOX_DISK_RE.fullmatch(resize_disk):
+            raise RPCExecutionError("resize_disk must be a valid Proxmox disk key.", code="RPC_PARAM_INVALID")
+        normalized["resize_disk"] = resize_disk
+        command_fingerprint["resize_disk"] = resize_disk
+
+    networks = _normalize_proxmox_networks(params.get("networks") or [])
+    if networks:
+        normalized["networks"] = networks
+        command_fingerprint["networks"] = networks
+    ipconfigs = _normalize_proxmox_ipconfigs(params.get("ipconfigs") or [])
+    if ipconfigs:
+        normalized["ipconfigs"] = ipconfigs
+        command_fingerprint["ipconfigs"] = ipconfigs
+    guest_networks = _normalize_proxmox_guest_networks(params.get("guest_networks") or [])
+    if guest_networks:
+        normalized["guest_networks"] = guest_networks
+        command_fingerprint["guest_networks"] = guest_networks
+
+    if {"agent_pbs_zabbix_status", "agent_configure_zabbix_agent2"} & set(operations):
+        zabbix_server = _normalize_zabbix_server(
+            params.get("zabbix_server") or "zabbix.nmulti.cloud"
+        )
+        normalized["zabbix_server"] = zabbix_server
+        command_fingerprint["zabbix_server"] = zabbix_server
+
+    _require_proxmox_fields(operations, normalized)
+    normalized["command_fingerprint"] = command_fingerprint
+    return normalized
+
+
+def _resolve_proxmox_ssh_binding(endpoint_id: int) -> dict[str, Any]:
+    try:
+        from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh
+    except ImportError as exc:
+        raise RPCExecutionError(
+            "netbox-nms does not expose the Proxmox SSH resolver; "
+            "upgrade netbox-nms to a version with ProxmoxEndpointSSHBinding.",
+            code="RPC_PROXMOX_SSH_RESOLVER_MISSING",
+        ) from exc
+
+    resolved = resolve_proxmox_endpoint_ssh(endpoint_id)
+    if not resolved:
+        raise RPCExecutionError(
+            f"No Proxmox Endpoint SSH binding is configured for endpoint "
+            f"{endpoint_id}. Create one in NetBox NMS "
+            "(Proxmox Endpoint SSH Bindings) before running this procedure.",
+            code="RPC_PROXMOX_SSH_BINDING_NOT_FOUND",
+        )
+    host = str(resolved.get("host") or "").strip()
+    if not host:
+        raise RPCExecutionError(
+            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
+            "resolvable host. Set an SSH host override or an endpoint IP/domain.",
+            code="RPC_PROXMOX_SSH_HOST_UNRESOLVED",
+        )
+    if resolved.get("credential_pk") is None:
+        raise RPCExecutionError(
+            f"The Proxmox Endpoint SSH binding for endpoint {endpoint_id} has no "
+            "linked SSH credential.",
+            code="RPC_PROXMOX_SSH_CREDENTIAL_MISSING",
+        )
+    return {**resolved, "host": host}
+
+
+def _proxmox_operations(params: dict[str, Any]) -> list[str]:
+    raw = params.get("operations")
+    if not isinstance(raw, list) or not raw:
+        raise RPCExecutionError("operations must be a non-empty list.", code="RPC_PARAM_INVALID")
+    operations: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if value not in _PROXMOX_QEMU_OPERATIONS:
+            raise RPCExecutionError(f"Unsupported Proxmox QEMU operation: {value}", code="RPC_PARAM_INVALID")
+        if value in operations:
+            raise RPCExecutionError("operations must not contain duplicates.", code="RPC_PARAM_INVALID")
+        operations.append(value)
+    return operations
+
+
+def _optional_regex_param(
+    params: dict[str, Any],
+    key: str,
+    regex: re.Pattern[str],
+) -> str:
+    value = str(params.get(key) or "").strip()
+    if not value:
+        return ""
+    if not regex.fullmatch(value):
+        raise RPCExecutionError(f"{key} contains invalid characters.", code="RPC_PARAM_INVALID")
+    return value
+
+
+def _normalize_proxmox_networks(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise RPCExecutionError("networks must be a list.", code="RPC_PARAM_INVALID")
+    if len(raw) > 8:
+        raise RPCExecutionError("networks may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+    seen: set[int] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RPCExecutionError("network entries must be objects.", code="RPC_PARAM_INVALID")
+        index = _int_range(item, "index", 0, 31)
+        if index in seen:
+            raise RPCExecutionError("network indexes must be unique.", code="RPC_PARAM_INVALID")
+        seen.add(index)
+        model = str(item.get("model") or "virtio").strip()
+        if model not in _PROXMOX_QEMU_NIC_MODELS:
+            raise RPCExecutionError("network model is not allowlisted.", code="RPC_PARAM_INVALID")
+        bridge = str(item.get("bridge") or "").strip()
+        if not _PROXMOX_BRIDGE_RE.fullmatch(bridge):
+            raise RPCExecutionError("network bridge contains invalid characters.", code="RPC_PARAM_INVALID")
+        entry: dict[str, Any] = {"index": index, "model": model, "bridge": bridge}
+        if item.get("tag") not in (None, ""):
+            entry["tag"] = _int_range(item, "tag", 1, 4094)
+        if "firewall" in item:
+            entry["firewall"] = _bool_param(item, "firewall", False)
+        normalized.append(entry)
+    return sorted(normalized, key=lambda entry: int(entry["index"]))
+
+
+def _normalize_proxmox_ipconfigs(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise RPCExecutionError("ipconfigs must be a list.", code="RPC_PARAM_INVALID")
+    if len(raw) > 8:
+        raise RPCExecutionError("ipconfigs may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+    seen: set[int] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RPCExecutionError("ipconfig entries must be objects.", code="RPC_PARAM_INVALID")
+        index = _int_range(item, "index", 0, 31)
+        if index in seen:
+            raise RPCExecutionError("ipconfig indexes must be unique.", code="RPC_PARAM_INVALID")
+        seen.add(index)
+        ip = str(item.get("ip") or "").strip()
+        if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(ip):
+            raise RPCExecutionError("ipconfig ip contains invalid characters.", code="RPC_PARAM_INVALID")
+        entry: dict[str, Any] = {"index": index, "ip": ip}
+        gw = str(item.get("gw") or "").strip()
+        if gw:
+            if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(gw):
+                raise RPCExecutionError("ipconfig gw contains invalid characters.", code="RPC_PARAM_INVALID")
+            entry["gw"] = gw
+        normalized.append(entry)
+    return sorted(normalized, key=lambda entry: int(entry["index"]))
+
+
+def _normalize_proxmox_guest_networks(raw: Any) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise RPCExecutionError("guest_networks must be a list.", code="RPC_PARAM_INVALID")
+    if len(raw) > 8:
+        raise RPCExecutionError("guest_networks may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RPCExecutionError("guest_network entries must be objects.", code="RPC_PARAM_INVALID")
+        interface = str(item.get("interface") or "").strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,31}", interface):
+            raise RPCExecutionError("guest_network interface contains invalid characters.", code="RPC_PARAM_INVALID")
+        if interface in seen:
+            raise RPCExecutionError("guest_network interfaces must be unique.", code="RPC_PARAM_INVALID")
+        seen.add(interface)
+        address = str(item.get("address") or "").strip()
+        if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(address):
+            raise RPCExecutionError("guest_network address contains invalid characters.", code="RPC_PARAM_INVALID")
+        entry: dict[str, Any] = {"interface": interface, "address": address}
+        gateway = str(item.get("gateway") or "").strip()
+        if gateway:
+            if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(gateway):
+                raise RPCExecutionError("guest_network gateway contains invalid characters.", code="RPC_PARAM_INVALID")
+            entry["gateway"] = gateway
+        normalized.append(entry)
+    return sorted(normalized, key=lambda entry: str(entry["interface"]))
+
+
+def _normalize_dns_search_domain(raw: Any) -> str:
+    value = str(raw or "").strip().rstrip(".")
+    if not value:
+        return ""
+    if len(value) > 253 or not _DNS_SEARCH_DOMAIN_RE.fullmatch(value):
+        raise RPCExecutionError("search_domain must be a valid DNS search domain.", code="RPC_PARAM_INVALID")
+    return value
+
+
+def _normalize_dns_servers(raw: Any) -> list[str]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise RPCExecutionError("dns_servers must be a list.", code="RPC_PARAM_INVALID")
+    if len(raw) > 3:
+        raise RPCExecutionError("dns_servers may contain at most 3 entries.", code="RPC_PARAM_INVALID")
+    normalized: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if not value:
+            raise RPCExecutionError("dns_servers must not contain empty entries.", code="RPC_PARAM_INVALID")
+        try:
+            ip_address(value)
+        except ValueError as exc:
+            raise RPCExecutionError("dns_servers entries must be valid IP addresses.", code="RPC_PARAM_INVALID") from exc
+        if value in normalized:
+            raise RPCExecutionError("dns_servers must not contain duplicates.", code="RPC_PARAM_INVALID")
+        normalized.append(value)
+    return normalized
+
+
+def _normalize_zabbix_server(raw: Any) -> str:
+    value = str(raw or "").strip().rstrip(".")
+    if not value:
+        raise RPCExecutionError("zabbix_server is required.", code="RPC_PARAM_INVALID")
+    try:
+        ip_address(value)
+        return value
+    except ValueError:
+        pass
+    if len(value) > 253 or not _DNS_SEARCH_DOMAIN_RE.fullmatch(value):
+        raise RPCExecutionError(
+            "zabbix_server must be a valid DNS name or IP address.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _require_proxmox_fields(operations: list[str], params: dict[str, Any]) -> None:
+    if "nextid" in operations:
+        if len(operations) != 1:
+            raise RPCExecutionError("nextid must be run as a standalone operation.", code="RPC_PARAM_INVALID")
+        return
+    _require_keys(params, ["vmid"])
+    if "clone" in operations:
+        _require_keys(params, ["template_vmid", "source_node", "name"])
+    if "migrate" in operations:
+        _require_keys(params, ["source_node", "target_node"])
+    if {
+        "configure",
+        "resize",
+        "start",
+        "stop",
+        "status",
+        "agent_ping",
+        "agent_network_get_interfaces",
+        "agent_configure_debian_network",
+        "agent_set_user_password",
+        "agent_pbs_zabbix_status",
+        "agent_configure_zabbix_agent2",
+    } & set(operations):
+        _require_keys(params, ["node"])
+    if "resize" in operations:
+        _require_keys(params, ["disk_gb", "resize_disk"])
+    if "agent_configure_debian_network" in operations:
+        _require_keys(params, ["guest_networks"])
+    if "agent_set_user_password" in operations:
+        _require_keys(params, ["guest_credential_pk"])
+
+
+def _require_keys(params: dict[str, Any], keys: list[str]) -> None:
+    missing = [key for key in keys if params.get(key) in (None, "", [])]
+    if missing:
+        raise RPCExecutionError(
+            f"Missing required Proxmox lifecycle field(s): {', '.join(missing)}.",
+            code="RPC_PARAM_INVALID",
+        )
 
 
 def _normalize_dell_os10_simple_execution(

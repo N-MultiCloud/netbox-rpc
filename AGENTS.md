@@ -105,6 +105,21 @@ be used autonomously on destructive procedures.
   `os.linux_proxmox.convert_mellanox_nic_to_ethernet` (in nms-backend). Keep the
   resolver import function-local so NetBox still boots when the installed
   netbox-nms predates `ProxmoxEndpointSSHBinding`.
+- Proxmox QEMU VM lifecycle: `os.linux.proxmox.qemu_vm_lifecycle`
+  (write/`destructive`, approval required) is seeded by migration `0012`. It
+  targets a **netbox-proxbox `ProxmoxEndpoint`** and resolves SSH details
+  through `netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh`. Its normalizer
+  forwards only structured, validated lifecycle fields: operation enum values
+  (`nextid`, `clone`, `migrate`, `configure`, `resize`, `start`, `stop`,
+  `status`, `agent_ping`, `agent_network_get_interfaces`,
+  `agent_configure_debian_network`, `agent_set_user_password`), VMIDs,
+  node/storage names, CPU/memory, QEMU Guest Agent enablement, NIC bridge/tag
+  objects, cloud-init IP configs, DNS search domain/resolver defaults, Debian
+  guest interface stanzas, disk resize size, and `guest_credential_pk` for password rotation. Guest passwords are
+  resolved by `nms-backend` from `netbox-nms.DeviceCredential` and must not
+  appear in RPC params beyond the credential id. It must never accept arbitrary
+  shell command text. Handler ID: `os.linux_proxmox.qemu_vm_lifecycle` (in
+  nms-backend).
 - Dell SmartFabric OS10 S5232F-ON procedures are seeded by migration `0009`.
   They are fixed SSH fallback/bootstrap procedures for a RESTCONF-first driver:
   `network.device.dell_os10.s5232f_on.bootstrap_restconf`,
