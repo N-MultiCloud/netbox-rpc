@@ -211,6 +211,109 @@ def test_ssh_key_procedure_seeded_targets_device_and_vm() -> None:
     assert '"virtualization.virtualmachine"' in migration
 
 
+def test_dns_host_procedure_catalog_names_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+
+    assert "DNS_HOST_PROCEDURES" in constants
+    for name in (
+        "os.linux.dns_host.deploy_dns_stack",
+        "os.linux.dns_host.status_dns_stack",
+    ):
+        assert name in constants
+        assert name in migration
+    assert "from netbox_rpc" not in migration
+    assert "arbitrary_command" not in constants
+    assert "shell_command" not in constants
+
+
+def test_dns_host_migration_depends_on_0026() -> None:
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+    assert '"0026_merge_packer_and_proxmox"' in migration
+
+
+def test_dns_host_procedures_have_expected_effect_and_approval() -> None:
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+    deploy_start = migration.index('"name": "os.linux.dns_host.deploy_dns_stack"')
+    status_start = migration.index('"name": "os.linux.dns_host.status_dns_stack"')
+    deploy_block = migration[deploy_start:status_start]
+    status_block = migration[status_start:]
+
+    assert '"handler_id": "os.linux.dns_host.deploy_dns_stack"' in deploy_block
+    assert '"target_models": []' in deploy_block
+    assert '"effect": "write"' in deploy_block
+    assert '"timeout_seconds": 180' in deploy_block
+    assert '"approval_required": True' in deploy_block
+
+    assert '"handler_id": "os.linux.dns_host.status_dns_stack"' in status_block
+    assert '"target_models": []' in status_block
+    assert '"effect": "read"' in status_block
+    assert '"timeout_seconds": 60' in status_block
+    assert '"approval_required": False' in status_block
+
+
+def test_dns_host_normalizer_branches_are_registered() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "DNS_HOST_DEPLOY_PROCEDURE" in jobs
+    assert "DNS_HOST_STATUS_PROCEDURE" in jobs
+    assert "_normalize_dns_host_deploy_execution" in jobs
+    assert "_normalize_dns_host_status_execution" in jobs
+    assert "rpc_ssh_known_hosts_entry" in jobs
+
+
+def test_linux_agent_install_procedures_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read(
+        "netbox_rpc/migrations/0028_seed_linux_agent_install_procedures.py"
+    )
+
+    for procedure, handler_id in (
+        (
+            "os.linux.ubuntu.24.install_qemu_guest_agent",
+            "os.linux_ubuntu_24.install_qemu_guest_agent",
+        ),
+        (
+            "os.linux.ubuntu.24.install_zabbix_agent2",
+            "os.linux_ubuntu_24.install_zabbix_agent2",
+        ),
+    ):
+        assert procedure in constants
+        assert procedure in migration
+        assert handler_id in constants
+        assert handler_id in migration
+    assert '"effect": "write"' in migration
+    assert '"approval_required": False' in migration
+    assert '"enabled": True' in migration
+    assert '"version": 1' in migration
+    assert '"timeout_seconds": 300' in migration
+    assert '"timeout_seconds": 600' in migration
+    assert '"dcim.device"' in migration
+    assert '"virtualization.virtualmachine"' in migration
+    assert "from netbox_rpc" not in migration
+    assert "0027_seed_dns_host_procedures" in migration
+
+
+def test_linux_agent_install_params_schema_is_narrow() -> None:
+    migration = read(
+        "netbox_rpc/migrations/0028_seed_linux_agent_install_procedures.py"
+    )
+    for key in (
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    ):
+        assert key in migration
+    assert '"additionalProperties": False' in migration
+    assert '"zabbix_server"' in migration
+    assert '"default": "zabbix.nmulti.cloud"' in migration
+    assert '"maxLength": 253' in migration
+    assert "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?" in migration
+    assert "apt" not in migration.lower()
+    assert "command" not in migration.lower()
+
+
 def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
     constants = read("netbox_rpc/constants.py")
     migration = read("netbox_rpc/migrations/0011_seed_dell_os10_vlt_procedures.py")
@@ -310,19 +413,19 @@ _PACKER_PROCEDURE_NAMES = (
 def test_packer_procedure_catalog_names_are_seeded() -> None:
     """All four read-only packer.vm.* procedures must be declared in constants and seeded."""
     constants = read("netbox_rpc/constants.py")
-    migration = read("netbox_rpc/migrations/0012_seed_packer_procedures.py")
+    migration = read("netbox_rpc/migrations/0018_seed_packer_procedures.py")
 
     assert "PACKER_PROCEDURES" in constants
     assert "PACKER_PROCEDURE_NAMES" in constants
     for name in _PACKER_PROCEDURE_NAMES:
         assert name in constants, f"{name} missing from constants.py"
-        assert name in migration, f"{name} missing from migration 0012"
+        assert name in migration, f"{name} missing from migration 0018"
 
 
 def test_packer_procedures_are_read_only_and_target_packertemplate() -> None:
     """Packer procedures must be read-only and target the lowercase PackerTemplate label."""
     constants = read("netbox_rpc/constants.py")
-    migration = read("netbox_rpc/migrations/0012_seed_packer_procedures.py")
+    migration = read("netbox_rpc/migrations/0018_seed_packer_procedures.py")
 
     # Lowercase content-type label is required for target_model_label matching
     # and the /procedures/available/?target_type= filter used by the nms UI.

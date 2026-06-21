@@ -49,6 +49,8 @@ before dispatching, not after:
 |---|---|
 | `os.linux.ubuntu.24.restart_service` | Service downtime |
 | `os.linux.ubuntu.24.start_service` / `stop_service` | Service downtime |
+| `os.linux.ubuntu.24.install_qemu_guest_agent` | Package install and service enablement |
+| `os.linux.ubuntu.24.install_zabbix_agent2` | Package install, config write, and service restart |
 | `network.device.dell_os10.s5232f_on.configure_vlt_domain` | Network partition risk |
 | `services.pterodactyl.bootstrap_api_key` | Credential rotation |
 
@@ -88,6 +90,17 @@ be used autonomously on destructive procedures.
   key registration. Target models: `dcim.device` and
   `virtualization.virtualmachine`. Migration `0006` depends on
   `netbox_nms.0029_user_ssh_key`.
+- Direct-SSH Ubuntu 24 agent installers are seeded by migration `0028` and
+  target `dcim.device` plus `virtualization.virtualmachine`.
+  `os.linux.ubuntu.24.install_qemu_guest_agent`
+  (`os.linux_ubuntu_24.install_qemu_guest_agent`, write, no approval, 300s)
+  installs/enables `qemu-guest-agent` over SSH without requiring QGA first.
+  `os.linux.ubuntu.24.install_zabbix_agent2`
+  (`os.linux_ubuntu_24.install_zabbix_agent2`, write, no approval, 600s)
+  installs/configures Zabbix Agent 2 over SSH and defaults `zabbix_server` to
+  `zabbix.nmulti.cloud`. Their schemas accept only the standard
+  `rpc_ssh_*` connection override keys, plus `zabbix_server` for Zabbix; never
+  add arbitrary package, command, or shell text parameters.
 - Mellanox NIC conversion: `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
   (write/`destructive`, approval required) is seeded by migration `0008`. It
   targets a **netbox-proxbox `ProxmoxEndpoint`**
@@ -105,6 +118,21 @@ be used autonomously on destructive procedures.
   `os.linux_proxmox.convert_mellanox_nic_to_ethernet` (in nms-backend). Keep the
   resolver import function-local so NetBox still boots when the installed
   netbox-nms predates `ProxmoxEndpointSSHBinding`.
+- Proxmox QEMU VM lifecycle: `os.linux.proxmox.qemu_vm_lifecycle`
+  (write/`destructive`, approval required) is seeded by migration `0012`. It
+  targets a **netbox-proxbox `ProxmoxEndpoint`** and resolves SSH details
+  through `netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh`. Its normalizer
+  forwards only structured, validated lifecycle fields: operation enum values
+  (`nextid`, `clone`, `migrate`, `configure`, `resize`, `start`, `stop`,
+  `status`, `agent_ping`, `agent_network_get_interfaces`,
+  `agent_configure_debian_network`, `agent_set_user_password`), VMIDs,
+  node/storage names, CPU/memory, QEMU Guest Agent enablement, NIC bridge/tag
+  objects, cloud-init IP configs, DNS search domain/resolver defaults, Debian
+  guest interface stanzas, disk resize size, and `guest_credential_pk` for password rotation. Guest passwords are
+  resolved by `nms-backend` from `netbox-nms.DeviceCredential` and must not
+  appear in RPC params beyond the credential id. It must never accept arbitrary
+  shell command text. Handler ID: `os.linux_proxmox.qemu_vm_lifecycle` (in
+  nms-backend).
 - Dell SmartFabric OS10 S5232F-ON procedures are seeded by migration `0009`.
   They are fixed SSH fallback/bootstrap procedures for a RESTCONF-first driver:
   `network.device.dell_os10.s5232f_on.bootstrap_restconf`,
@@ -118,9 +146,10 @@ be used autonomously on destructive procedures.
     shows VLT domain status; optional `domain_id` (1–255, default 1).
     Handler: `network.dell_os10_s5232f_on.show_vlt`.
   - `network.device.dell_os10.s5232f_on.configure_vlt_domain` (write, 90s, approval required):
-    configures domain ID, unit ID (1–2), VLTi discovery port channel (1–4096),
-    backup-destination IPv4, primary priority (default 32768), optional shared
-    VLT MAC (XX:XX:XX:XX:XX:XX), and write-memory (default true).
+    configures domain ID, optional unit ID (1–2 — omit on OS10 10.5.x where the
+    command is unrecognised and role is auto-negotiated), VLTi discovery port channel
+    (1–4096), backup-destination IPv4, primary priority (default 32768), optional
+    shared VLT MAC (XX:XX:XX:XX:XX:XX), and write-memory (default true).
     Normalizer validates `backup_destination` against `_DELL_OS10_IP_RE` and
     `vlt_mac` against `_DELL_OS10_MAC_RE`.
     Handler: `network.dell_os10_s5232f_on.configure_vlt_domain`.
@@ -128,8 +157,110 @@ be used autonomously on destructive procedures.
     binds or removes a port-channel as a VLT LAG; accepts `port_channel_id`,
     `vlt_port_channel_id` (1–4096), `remove` (default false), `write_memory` (default true).
     Handler: `network.dell_os10_s5232f_on.configure_vlt_peer`.
+- Dell OS10 port-channel and LACP procedures are seeded by migration `0012`. Two write
+  procedures for LAG configuration on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.configure_port_channel` (write, 60s, approval required):
+    creates, updates, or removes a port-channel (LAG); accepts `port_channel_id` (1–4096),
+    optional `trunk_vlans` (comma-separated VLAN IDs or ranges, e.g. `20,111`),
+    optional `description` (max 240 chars), `remove` (default false), `write_memory` (default true).
+    Handler: `network.dell_os10_s5232f_on.configure_port_channel`.
+  - `network.device.dell_os10.s5232f_on.configure_interface_lacp` (write, 60s, approval required):
+    adds or removes an Ethernet interface from a port-channel with LACP negotiation or static LAG;
+    accepts `interface_name` (OS10 identifier, e.g. `ethernet1/1/1`), `port_channel_id` (1–4096),
+    `lacp_mode` (enum `active`/`passive`/`on`, default `active` — use `on` for static LAG,
+    required when the port-channel is used as a VLT VLTi discovery-interface), optional
+    `description`, `remove` (default false), `write_memory` (default false — batch all interface
+    assignments before the final `write memory` via a separate `configure_port_channel` call).
+    Handler: `network.dell_os10_s5232f_on.configure_interface_lacp`.
+- Dell OS10 interface breakout procedure is seeded by migration `0013`. One write procedure
+  for configuring physical port breakout mode on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.configure_interface_breakout` (write, 60s, approval required):
+    runs `interface breakout <port> map <mode>` in global config mode; accepts
+    `interface_port` (physical port in `slot/port/subport` format, e.g. `1/1/1` — no
+    `ethernet` prefix), `breakout_mode` (e.g. `40g-1x`, `100g-1x`, `10g-4x`, `25g-4x`),
+    `write_memory` (default true).
+    Handler: `network.dell_os10_s5232f_on.configure_interface_breakout`.
+- Dell OS10 interface FEC procedure is seeded by migration `0014`. One write procedure
+  for configuring Forward Error Correction on a physical interface:
+  - `network.device.dell_os10.s5232f_on.configure_interface_fec` (write, 30s, approval required):
+    sets or removes FEC on a physical port; accepts `interface_name` (OS10 identifier with
+    `ethernet` prefix, e.g. `ethernet1/1/31`), `fec_mode` (enum `cl91` / `cl108` / `auto` /
+    `none`, default `cl91` — `none` emits `no fec`), `write_memory` (default true).
+    Use `cl91` (RS-FEC, Clause 91) for QSFP28 100G SR4/LR4 optics; `cl108` (FC-FEC, Clause 108)
+    for SFP28 25G DAC/SR; `auto` to negotiate with the peer.
+    Handler: `network.dell_os10_s5232f_on.configure_interface_fec`.
+- Pterodactyl Panel procedures are seeded by migration `0016`. Three procedures for
+  managing a Pterodactyl Panel Docker deployment via `docker exec` on the host:
+  - `services.pterodactyl.bootstrap_api_key` (write, 60s, approval required):
+    bootstraps Pterodactyl Panel application and client API keys. Optional
+    `container_name` (default `pterodactyl-panel-1`).
+    Handler: `services.pterodactyl.bootstrap_api_key`.
+  - `services.pterodactyl.artisan` (write, 60s, no approval):
+    runs an allowlisted Laravel Artisan command. Required `command` (enum:
+    `queue:status`, `schedule:run`, `cache:clear`, `config:clear`,
+    `queue:restart`, `migrate`). Optional `container_name`
+    (default `pterodactyl-panel-1`).
+    Handler: `services.pterodactyl.artisan`.
+  - `services.pterodactyl.container_logs` (read, 30s, no approval):
+    fetches recent log output from the Pterodactyl Panel container. Optional
+    `container_name` (default `pterodactyl-panel-1`) and `lines`
+    (1–500, default 100).
+    Handler: `services.pterodactyl.container_logs`.
+  Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- Minecraft stack procedures are seeded by migration `0029`. They provide
+  structured SSH fallback operations for game nodes and server volumes; none
+  accepts arbitrary shell command text.
+  - `services.minecraft.plugin.install_url` (write, 180s, no approval):
+    downloads a validated public http(s) `.jar` URL into
+    `/var/lib/pterodactyl/volumes/<server_uuid>/plugins/<filename>` on the
+    Wings node. Required `server_uuid`, `source_url`, and safe `.jar`
+    `filename`; optional `restart` and `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.plugin.install_url`.
+  - `services.minecraft.viaversion.install` (write, 240s, no approval):
+    installs ViaVersion-family plugins from fixed ViaVersion GitHub project
+    mappings. Accepts `server_uuid`, either `preset` (`minimal`, `standard`,
+    `full`) or explicit `plugins` (`viaversion`, `viabackwards`, `viarewind`),
+    optional `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.viaversion.install`.
+  - `services.minecraft.papermc.install` (write, 240s, no approval):
+    installs a PaperMC Fill API server JAR into the server root. Accepts
+    `server_uuid`, `project` (`paper`, `folia`, `velocity`), `version`,
+    optional `build_id`, safe `server_jarfile` (default `server.jar`), optional
+    `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.papermc.install`.
+  - `services.pterodactyl.wings.status` and
+    `services.pterodactyl.wings.logs` are read-only SSH service diagnostics for
+    `wings.service`; logs accept `lines` (1–500).
+  - `services.pterodactyl.wings.restart` restarts `wings.service` and is
+    `approval_required=True` because it can interrupt node management.
+  Target models for all six: `dcim.device` and
+  `virtualization.virtualmachine`.
+- DNS host procedures are seeded by migration `0027`. Two procedures manage the
+  PowerDNS + dns-api Docker Compose stack on standalone DNS hosts:
+  - `os.linux.dns_host.deploy_dns_stack` (write, 180s, approval required):
+    deploys or updates the `powerdns-dns-api` Compose project. Required params:
+    `target` (for example `dns01`/`dns02`) and `rpc_ssh_credential_pk`
+    (`netbox-nms.DeviceCredential` PK). Optional params: `rpc_ssh_host`
+    (defaults to `<target>.nmulti.cloud`), `rpc_ssh_port` (default 22),
+    `rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
+    true), and `force_recreate` (default false). Handler:
+    `os.linux.dns_host.deploy_dns_stack`.
+  - `os.linux.dns_host.status_dns_stack` (read, 60s, no approval): reads stack
+    status using the same SSH params minus `force_recreate`. Handler:
+    `os.linux.dns_host.status_dns_stack`.
+  Target models for both: `[]`. The normalizer emits only structured
+  `rpc_ssh_*` host-override keys, `target`, `compose_project`, and
+  deploy-only `force_recreate`; it must never accept arbitrary SSH command text.
+- Dell OS10 third-party optical module unlock is seeded by migration `0017`. One write procedure
+  for enabling non-Dell QSFP28-SR4 (and similar) transceivers on S5232F-ON switches:
+  - `network.device.dell_os10.s5232f_on.allow_third_party_transceiver` (write, 45s, approval required):
+    runs the fixed sequence `allow unsupported-transceiver` + `unlock third-party transceiver` +
+    `write memory` in global config mode; accepts only the optional `rpc_ssh_credential_pk`
+    override. Display name: "Allow third-part Optical Modules". Apply once after inserting
+    non-Dell optics; the switch loses the setting only on a factory-reset.
+    Handler: `network.dell_os10_s5232f_on.allow_third_party_transceiver`.
 - netbox-packer post-build verification procedures are seeded by migration
-  `0012`. They are **read-only** (`effect="read"`, `approval_required=False`,
+  `0018`. They are **read-only** (`effect="read"`, `approval_required=False`,
   `timeout_seconds=120`) and target a **netbox-packer `PackerTemplate`**
   (`target_models = ["netbox_packer.packertemplate"]`, lowercase content-type
   label). They run read-only diagnostics over SSH against the Proxmox node that

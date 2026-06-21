@@ -162,7 +162,7 @@ def _remove_packer_procedures(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0011_seed_dell_os10_vlt_procedures"),
+        ("netbox_rpc", "0017_seed_allow_third_party_optical_modules"),
     ]
 
     operations = [

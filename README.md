@@ -6,7 +6,7 @@ The plugin does not open SSH sessions directly; execution is delegated to
 `nms-backend`, which runs hard-coded handler IDs against credentials owned by
 `netbox-nms`.
 
-The initial procedure catalog is intentionally narrow:
+The procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
 - `network.device.dell_os10.s5232f_on.bootstrap_restconf`
@@ -14,10 +14,62 @@ The initial procedure catalog is intentionally narrow:
 - `network.device.dell_os10.s5232f_on.set_interface_description`
 - `network.device.dell_os10.s5232f_on.set_vlan_description`
 - `network.device.dell_os10.s5232f_on.write_memory`
+- `os.linux.ubuntu.24.install_qemu_guest_agent`
+- `os.linux.ubuntu.24.install_zabbix_agent2`
 - `os.linux.ubuntu.24.restart_service`
+- `os.linux.dns_host.deploy_dns_stack`
+- `os.linux.dns_host.status_dns_stack`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+- `os.linux.proxmox.qemu_vm_lifecycle`
+- `services.pterodactyl.bootstrap_api_key`
+- `services.pterodactyl.artisan`
+- `services.pterodactyl.container_logs`
 
 Operators call named procedures, not arbitrary SSH commands.
+
+### `os.linux.dns_host.*`
+
+Two procedures manage the PowerDNS + dns-api Docker Compose stack on the
+standalone DNS hosts `dns01` and `dns02`. They are seeded by migration `0027`,
+have no NetBox target model (`target_models=[]`), and use explicit SSH
+host-override params instead of a `dcim.device` or Proxmox binding.
+
+**`os.linux.dns_host.deploy_dns_stack`** deploys or updates the
+`powerdns-dns-api` Compose project. Required params are `target` and
+`rpc_ssh_credential_pk`; optional params are `rpc_ssh_host` (default
+`<target>.nmulti.cloud`), `rpc_ssh_port` (default `22`),
+`rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
+`true`), and `force_recreate` (default `false`). `effect="write"` and
+`approval_required=True`. Handler ID equals the procedure name.
+
+**`os.linux.dns_host.status_dns_stack`** reads status for the same Compose
+project with the same SSH params minus `force_recreate`. `effect="read"` and
+`approval_required=False`. Handler ID equals the procedure name.
+
+The normalizer emits only structured fields: the `rpc_ssh_*` host-override
+keys, `target`, `compose_project="powerdns-dns-api"`, deploy-only
+`force_recreate`, and an audit `command_fingerprint`. It does not accept raw
+SSH command text.
+
+### Direct-SSH Ubuntu agent installers
+
+Two fixed Ubuntu 24 procedures install already-deployed Linux agents over direct
+SSH, without rebuilding the instance and without depending on QEMU Guest Agent
+being present:
+
+| Procedure | Handler | Timeout |
+|---|---|---:|
+| `os.linux.ubuntu.24.install_qemu_guest_agent` | `os.linux_ubuntu_24.install_qemu_guest_agent` | 300s |
+| `os.linux.ubuntu.24.install_zabbix_agent2` | `os.linux_ubuntu_24.install_zabbix_agent2` | 600s |
+
+Both are `effect="write"`, `approval_required=False`, and target
+`dcim.device` plus `virtualization.virtualmachine`. Their only SSH connection
+parameters are the audited `rpc_ssh_*` overrides consumed by `nms-backend`
+(`rpc_ssh_credential_pk`, `rpc_ssh_host`, `rpc_ssh_port`,
+`rpc_ssh_known_hosts_entry`, and `rpc_ssh_strict_host_key_checking`).
+`install_zabbix_agent2` also accepts `zabbix_server` with default
+`zabbix.nmulti.cloud`. No arbitrary package, command, or shell text parameter is
+accepted. Seeded by migration `0028`.
 
 ### `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 
@@ -38,6 +90,57 @@ the `params_schema` since migration `0010` and re-validated strictly by
 `nms-backend` before any shell embedding. `effect="destructive"` and
 `approval_required=True`. Seeded by migration `0008`; handler
 `os.linux_proxmox.convert_mellanox_nic_to_ethernet` lives in `nms-backend`.
+
+### Pterodactyl Panel procedures
+
+Three procedures for managing a Pterodactyl Panel Docker deployment via SSH to
+the container host. Seeded by migration `0016`. Target models: `dcim.device`
+and `virtualization.virtualmachine`.
+
+**`services.pterodactyl.bootstrap_api_key`** — runs `php artisan about
+--no-interaction` (falling back to `php artisan --version`) inside the
+container. Verifies that the Panel application is operational. Optional
+`container_name` (default `pterodactyl-panel-1`). `approval_required=True`.
+Handler ID: `services.pterodactyl.bootstrap_api_key` (in `nms-backend`).
+
+**`services.pterodactyl.artisan`** — runs one allowlisted Laravel Artisan
+command inside the container. Required `command` param; accepted values:
+`queue:status`, `schedule:run`, `cache:clear`, `config:clear`,
+`queue:restart`, `migrate`. The allowlist is enforced by the normalizer
+(`_PTERODACTYL_ARTISAN_ALLOWLIST` in `jobs.py`) and again by the Pydantic
+schema in `nms-backend`. Disallowed commands raise
+`RPCExecutionError(code="RPC_PARAM_INVALID")`. Optional `container_name`
+(default `pterodactyl-panel-1`). `approval_required=False`. Handler ID:
+`services.pterodactyl.artisan` (in `nms-backend`).
+
+**`services.pterodactyl.container_logs`** — runs `docker logs --tail <N>
+<container>` on the SSH host to retrieve recent log output. Optional
+`container_name` (default `pterodactyl-panel-1`); optional `lines`
+(1–500, default 100; values outside that range are clamped, not rejected).
+`approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
+(in `nms-backend`).
+
+### Minecraft stack SSH procedures
+
+Migration `0029` adds structured SSH fallback procedures for game nodes and
+Pterodactyl Wings server volumes. Target models are `dcim.device` and
+`virtualization.virtualmachine`; SSH credentials are resolved through the usual
+DeviceService path or explicit `rpc_ssh_*` overrides. These procedures do not
+accept raw shell commands.
+
+| Procedure / handler | Effect | Purpose |
+|---|---|---|
+| `services.minecraft.plugin.install_url` | write | Install a validated public http(s) plugin `.jar` into `/plugins` for a server UUID |
+| `services.minecraft.viaversion.install` | write | Install ViaVersion, ViaBackwards, and/or ViaRewind from fixed project mappings |
+| `services.minecraft.papermc.install` | write | Install a PaperMC, Folia, or Velocity server JAR resolved from the PaperMC Fill API |
+| `services.pterodactyl.wings.status` | read | Read `wings.service` status |
+| `services.pterodactyl.wings.logs` | read | Tail `wings.service` journal output |
+| `services.pterodactyl.wings.restart` | write, approval required | Restart `wings.service` when an operator explicitly approves node-management disruption |
+
+The NetBox normalizer validates server UUIDs, safe `.jar` filenames, ViaVersion
+presets/plugin enums, PaperMC project/version/build fields, and public URL
+shape before an execution is queued. URL values are fingerprinted in the audit
+hash rather than repeated in the command fingerprint.
 
 ### `packer.vm.*` — netbox-packer post-build verification
 
@@ -65,7 +168,26 @@ netbox-rpc**. netbox-rpc touches netbox-packer only through (1) the string
 `rpc_ssh_credential_pk` (a netbox-nms `DeviceCredential` PK) plus the template's
 `proxmox_node` (overridable via `ssh_host`); the normalizer emits the
 `rpc_ssh_host` / `rpc_ssh_port` / `rpc_ssh_credential_pk` host-override keys.
-Seeded by migration `0012`; handlers (same IDs) live in `nms-backend`.
+Seeded by migration `0018`; handlers (same IDs) live in `nms-backend`.
+
+### `os.linux.proxmox.qemu_vm_lifecycle`
+
+Runs fixed Proxmox QEMU VM lifecycle operations through the same
+`ProxmoxEndpointSSHBinding` path used by the Mellanox procedure. The procedure
+targets `netbox_proxbox.proxmoxendpoint`, resolves SSH details through
+`netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh()`, and forwards only
+structured fields to `nms-backend`: operation enum values, Proxmox `nextid`
+allocation, VMIDs, node/storage names, optional clone/migrate settings,
+CPU/memory, QEMU Guest Agent enablement, network interface bridge/tag objects,
+cloud-init IP config objects, DNS search domain/resolver defaults, disk resize
+target, start/status/agent-ping requests, QGA interface inspection, constrained
+Debian guest network repair, and guest password rotation by
+`guest_credential_pk`. The guest password operation stores only a
+`netbox-nms.DeviceCredential` reference in RPC params; `nms-backend` resolves
+and redacts the secret at execution time. It never stores or accepts raw shell
+command text. `effect="destructive"` and `approval_required=True`. Seeded by
+migration `0012` and extended through `0017`; handler
+`os.linux_proxmox.qemu_vm_lifecycle` lives in `nms-backend`.
 
 ## Architecture
 
@@ -91,7 +213,9 @@ owns:
 libraries. It must execute only known handler IDs such as
 `network.huawei_olt_ma5800_r024.start_ont` and
 `network.dell_os10_s5232f_on.bootstrap_restconf` and
-`os.linux_ubuntu_24.restart_service`.
+`os.linux_ubuntu_24.restart_service` and
+`os.linux.dns_host.deploy_dns_stack` and
+`os.linux_proxmox.qemu_vm_lifecycle`.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with
 `service_type="ssh"`. Those rows provide the management host, port, linked
