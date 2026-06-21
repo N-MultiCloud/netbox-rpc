@@ -29,6 +29,8 @@ from .constants import (
     DELL_OS10_S5232F_SHOW_VERSION,
     DELL_OS10_S5232F_SHOW_VLT,
     DELL_OS10_S5232F_WRITE_MEMORY,
+    DNS_HOST_DEPLOY_PROCEDURE,
+    DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
@@ -98,6 +100,8 @@ _DELL_OS10_TRUNK_VLANS_RE = re.compile(
 _DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
 _DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
 _PTERODACTYL_CONTAINER_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+_DNS_HOST_TARGET_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
+_DNS_HOST_COMPOSE_PROJECT = "powerdns-dns-api"
 _PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
     {"queue:status", "schedule:run", "cache:clear", "config:clear", "queue:restart", "migrate"}
 )
@@ -273,6 +277,12 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == LINUX_INSTALL_SSH_KEY:
         return _normalize_ssh_install_key_execution(execution, target)
+
+    if procedure_name == DNS_HOST_DEPLOY_PROCEDURE:
+        return _normalize_dns_host_deploy_execution(execution)
+
+    if procedure_name == DNS_HOST_STATUS_PROCEDURE:
+        return _normalize_dns_host_status_execution(execution)
 
     if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
         return _normalize_convert_mellanox_nic_execution(execution, target)
@@ -762,6 +772,84 @@ def _normalize_ssh_install_key_execution(
         result["username"] = username
 
     return result
+
+
+def _normalize_dns_host_deploy_execution(execution: RPCExecution) -> dict[str, Any]:
+    """Normalize the audited DNS stack deploy procedure for an arbitrary SSH host."""
+    normalized = _normalize_dns_host_execution(execution)
+    force_recreate = _bool_param(execution.params or {}, "force_recreate", False)
+    normalized["force_recreate"] = force_recreate
+    normalized["command_fingerprint"]["force_recreate"] = force_recreate
+    return normalized
+
+
+def _normalize_dns_host_status_execution(execution: RPCExecution) -> dict[str, Any]:
+    """Normalize the read-only DNS stack status procedure for an arbitrary SSH host."""
+    return _normalize_dns_host_execution(execution)
+
+
+def _normalize_dns_host_execution(execution: RPCExecution) -> dict[str, Any]:
+    params = execution.params or {}
+    target = str(params.get("target") or "").strip()
+    if not _DNS_HOST_TARGET_RE.fullmatch(target):
+        raise RPCExecutionError(
+            "target must be a short DNS host name such as dns01 or dns02.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    credential_pk = _int_range(params, "rpc_ssh_credential_pk", 1, None)
+    host = str(params.get("rpc_ssh_host") or "").strip() or f"{target}.nmulti.cloud"
+    _validate_dns_host_ssh_host(host)
+    ssh_port = _optional_int_range(params, "rpc_ssh_port", 1, 65535) or 22
+    known_hosts_entry = str(params.get("rpc_ssh_known_hosts_entry") or "")
+    if "\n" in known_hosts_entry or "\r" in known_hosts_entry:
+        raise RPCExecutionError(
+            "rpc_ssh_known_hosts_entry must be a single line.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(known_hosts_entry) > 8192:
+        raise RPCExecutionError(
+            "rpc_ssh_known_hosts_entry may contain at most 8192 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    return {
+        "target": target,
+        "rpc_ssh_host": host,
+        "rpc_ssh_port": ssh_port,
+        "rpc_ssh_credential_pk": credential_pk,
+        "rpc_ssh_known_hosts_entry": known_hosts_entry,
+        "rpc_ssh_strict_host_key_checking": _bool_param(
+            params, "rpc_ssh_strict_host_key_checking", True
+        ),
+        "compose_project": _DNS_HOST_COMPOSE_PROJECT,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": execution.procedure.name,
+            "target": target,
+            "compose_project": _DNS_HOST_COMPOSE_PROJECT,
+            "rpc_ssh_host": host,
+            "rpc_ssh_port": ssh_port,
+        },
+    }
+
+
+def _validate_dns_host_ssh_host(host: str) -> None:
+    if not host:
+        raise RPCExecutionError(
+            "rpc_ssh_host could not be resolved from params.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(host) > 255:
+        raise RPCExecutionError(
+            "rpc_ssh_host may contain at most 255 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(ch.isspace() or ord(ch) < 32 for ch in host):
+        raise RPCExecutionError(
+            "rpc_ssh_host must not contain whitespace or control characters.",
+            code="RPC_PARAM_INVALID",
+        )
 
 
 def _normalize_convert_mellanox_nic_execution(
