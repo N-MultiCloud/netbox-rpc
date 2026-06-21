@@ -194,6 +194,22 @@ be used autonomously on destructive procedures.
     (1–500, default 100).
     Handler: `services.pterodactyl.container_logs`.
   Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- DNS host procedures are seeded by migration `0027`. Two procedures manage the
+  PowerDNS + dns-api Docker Compose stack on standalone DNS hosts:
+  - `os.linux.dns_host.deploy_dns_stack` (write, 180s, approval required):
+    deploys or updates the `powerdns-dns-api` Compose project. Required params:
+    `target` (for example `dns01`/`dns02`) and `rpc_ssh_credential_pk`
+    (`netbox-nms.DeviceCredential` PK). Optional params: `rpc_ssh_host`
+    (defaults to `<target>.nmulti.cloud`), `rpc_ssh_port` (default 22),
+    `rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
+    true), and `force_recreate` (default false). Handler:
+    `os.linux.dns_host.deploy_dns_stack`.
+  - `os.linux.dns_host.status_dns_stack` (read, 60s, no approval): reads stack
+    status using the same SSH params minus `force_recreate`. Handler:
+    `os.linux.dns_host.status_dns_stack`.
+  Target models for both: `[]`. The normalizer emits only structured
+  `rpc_ssh_*` host-override keys, `target`, `compose_project`, and
+  deploy-only `force_recreate`; it must never accept arbitrary SSH command text.
 - Dell OS10 third-party optical module unlock is seeded by migration `0017`. One write procedure
   for enabling non-Dell QSFP28-SR4 (and similar) transceivers on S5232F-ON switches:
   - `network.device.dell_os10.s5232f_on.allow_third_party_transceiver` (write, 45s, approval required):

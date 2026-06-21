@@ -15,6 +15,8 @@ The procedure catalog is intentionally narrow:
 - `network.device.dell_os10.s5232f_on.set_vlan_description`
 - `network.device.dell_os10.s5232f_on.write_memory`
 - `os.linux.ubuntu.24.restart_service`
+- `os.linux.dns_host.deploy_dns_stack`
+- `os.linux.dns_host.status_dns_stack`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.qemu_vm_lifecycle`
 - `services.pterodactyl.bootstrap_api_key`
@@ -22,6 +24,30 @@ The procedure catalog is intentionally narrow:
 - `services.pterodactyl.container_logs`
 
 Operators call named procedures, not arbitrary SSH commands.
+
+### `os.linux.dns_host.*`
+
+Two procedures manage the PowerDNS + dns-api Docker Compose stack on the
+standalone DNS hosts `dns01` and `dns02`. They are seeded by migration `0027`,
+have no NetBox target model (`target_models=[]`), and use explicit SSH
+host-override params instead of a `dcim.device` or Proxmox binding.
+
+**`os.linux.dns_host.deploy_dns_stack`** deploys or updates the
+`powerdns-dns-api` Compose project. Required params are `target` and
+`rpc_ssh_credential_pk`; optional params are `rpc_ssh_host` (default
+`<target>.nmulti.cloud`), `rpc_ssh_port` (default `22`),
+`rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
+`true`), and `force_recreate` (default `false`). `effect="write"` and
+`approval_required=True`. Handler ID equals the procedure name.
+
+**`os.linux.dns_host.status_dns_stack`** reads status for the same Compose
+project with the same SSH params minus `force_recreate`. `effect="read"` and
+`approval_required=False`. Handler ID equals the procedure name.
+
+The normalizer emits only structured fields: the `rpc_ssh_*` host-override
+keys, `target`, `compose_project="powerdns-dns-api"`, deploy-only
+`force_recreate`, and an audit `command_fingerprint`. It does not accept raw
+SSH command text.
 
 ### `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 
@@ -144,6 +170,7 @@ libraries. It must execute only known handler IDs such as
 `network.huawei_olt_ma5800_r024.start_ont` and
 `network.dell_os10_s5232f_on.bootstrap_restconf` and
 `os.linux_ubuntu_24.restart_service` and
+`os.linux.dns_host.deploy_dns_stack` and
 `os.linux_proxmox.qemu_vm_lifecycle`.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with

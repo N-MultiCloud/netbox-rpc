@@ -211,6 +211,56 @@ def test_ssh_key_procedure_seeded_targets_device_and_vm() -> None:
     assert '"virtualization.virtualmachine"' in migration
 
 
+def test_dns_host_procedure_catalog_names_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+
+    assert "DNS_HOST_PROCEDURES" in constants
+    for name in (
+        "os.linux.dns_host.deploy_dns_stack",
+        "os.linux.dns_host.status_dns_stack",
+    ):
+        assert name in constants
+        assert name in migration
+    assert "from netbox_rpc" not in migration
+    assert "arbitrary_command" not in constants
+    assert "shell_command" not in constants
+
+
+def test_dns_host_migration_depends_on_0026() -> None:
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+    assert '"0026_merge_packer_and_proxmox"' in migration
+
+
+def test_dns_host_procedures_have_expected_effect_and_approval() -> None:
+    migration = read("netbox_rpc/migrations/0027_seed_dns_host_procedures.py")
+    deploy_start = migration.index('"name": "os.linux.dns_host.deploy_dns_stack"')
+    status_start = migration.index('"name": "os.linux.dns_host.status_dns_stack"')
+    deploy_block = migration[deploy_start:status_start]
+    status_block = migration[status_start:]
+
+    assert '"handler_id": "os.linux.dns_host.deploy_dns_stack"' in deploy_block
+    assert '"target_models": []' in deploy_block
+    assert '"effect": "write"' in deploy_block
+    assert '"timeout_seconds": 180' in deploy_block
+    assert '"approval_required": True' in deploy_block
+
+    assert '"handler_id": "os.linux.dns_host.status_dns_stack"' in status_block
+    assert '"target_models": []' in status_block
+    assert '"effect": "read"' in status_block
+    assert '"timeout_seconds": 60' in status_block
+    assert '"approval_required": False' in status_block
+
+
+def test_dns_host_normalizer_branches_are_registered() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    assert "DNS_HOST_DEPLOY_PROCEDURE" in jobs
+    assert "DNS_HOST_STATUS_PROCEDURE" in jobs
+    assert "_normalize_dns_host_deploy_execution" in jobs
+    assert "_normalize_dns_host_status_execution" in jobs
+    assert "rpc_ssh_known_hosts_entry" in jobs
+
+
 def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
     constants = read("netbox_rpc/constants.py")
     migration = read("netbox_rpc/migrations/0011_seed_dell_os10_vlt_procedures.py")

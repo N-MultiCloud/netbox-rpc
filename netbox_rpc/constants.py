@@ -76,6 +76,9 @@ PTERODACTYL_ARTISAN_HANDLER = "services.pterodactyl.artisan"
 PTERODACTYL_CONTAINER_LOGS = "services.pterodactyl.container_logs"
 PTERODACTYL_CONTAINER_LOGS_HANDLER = "services.pterodactyl.container_logs"
 
+DNS_HOST_DEPLOY_PROCEDURE = "os.linux.dns_host.deploy_dns_stack"
+DNS_HOST_STATUS_PROCEDURE = "os.linux.dns_host.status_dns_stack"
+
 # SSH key installation — appends a public key to authorized_keys on a target host
 # using the device's existing privileged SSH DeviceService credential.
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
@@ -175,6 +178,113 @@ SSH_KEY_PROCEDURES = (
         ),
         "params_schema": _SSH_INSTALL_KEY_PARAMS_SCHEMA,
         "result_schema": _SSH_INSTALL_KEY_RESULT_SCHEMA,
+    },
+)
+
+_DNS_HOST_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "netbox-nms DeviceCredential PK; nms-backend decrypts it at execution time.",
+}
+
+_DNS_HOST_TARGET = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 63,
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,62}$",
+    "description": "Short DNS host target, e.g. dns01 or dns02.",
+}
+
+_DNS_HOST_SSH_HOST_OVERRIDE = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 255,
+    "description": "Optional SSH host override; defaults to <target>.nmulti.cloud.",
+}
+
+_DNS_HOST_SSH_PORT_OVERRIDE = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 65535,
+    "default": 22,
+    "description": "Optional SSH port override.",
+}
+
+_DNS_HOST_KNOWN_HOSTS_ENTRY = {
+    "type": "string",
+    "maxLength": 8192,
+    "description": "Optional OpenSSH known_hosts entry for the target host.",
+}
+
+_DNS_HOST_BASE_PARAMS_PROPERTIES = {
+    "rpc_ssh_credential_pk": _DNS_HOST_CREDENTIAL_REF,
+    "target": _DNS_HOST_TARGET,
+    "rpc_ssh_host": _DNS_HOST_SSH_HOST_OVERRIDE,
+    "rpc_ssh_port": _DNS_HOST_SSH_PORT_OVERRIDE,
+    "rpc_ssh_known_hosts_entry": _DNS_HOST_KNOWN_HOSTS_ENTRY,
+    "rpc_ssh_strict_host_key_checking": {
+        "type": "boolean",
+        "default": True,
+        "description": "Require host-key verification when connecting over SSH.",
+    },
+}
+
+_DNS_HOST_STATUS_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["rpc_ssh_credential_pk", "target"],
+    "additionalProperties": False,
+    "properties": _DNS_HOST_BASE_PARAMS_PROPERTIES,
+}
+
+_DNS_HOST_DEPLOY_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["rpc_ssh_credential_pk", "target"],
+    "additionalProperties": False,
+    "properties": {
+        **_DNS_HOST_BASE_PARAMS_PROPERTIES,
+        "force_recreate": {
+            "type": "boolean",
+            "default": False,
+            "description": "Recreate containers even when Compose detects no changes.",
+        },
+    },
+}
+
+_DNS_HOST_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "compose_project": {"type": "string"},
+        "output": {"type": "string"},
+        "command_log": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+DNS_HOST_PROCEDURES = (
+    {
+        "name": DNS_HOST_DEPLOY_PROCEDURE,
+        "handler_id": DNS_HOST_DEPLOY_PROCEDURE,
+        "target_models": [],
+        "effect": "write",
+        "timeout_seconds": 180,
+        "approval_required": True,
+        "description": "Deploy or update the PowerDNS and dns-api Docker Compose stack on a DNS host.",
+        "params_schema": _DNS_HOST_DEPLOY_PARAMS_SCHEMA,
+        "result_schema": _DNS_HOST_RESULT_SCHEMA,
+    },
+    {
+        "name": DNS_HOST_STATUS_PROCEDURE,
+        "handler_id": DNS_HOST_STATUS_PROCEDURE,
+        "target_models": [],
+        "effect": "read",
+        "timeout_seconds": 60,
+        "approval_required": False,
+        "description": "Read status for the PowerDNS and dns-api Docker Compose stack on a DNS host.",
+        "params_schema": _DNS_HOST_STATUS_PARAMS_SCHEMA,
+        "result_schema": _DNS_HOST_RESULT_SCHEMA,
     },
 )
 
