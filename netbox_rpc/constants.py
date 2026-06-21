@@ -83,6 +83,12 @@ DNS_HOST_STATUS_PROCEDURE = "os.linux.dns_host.status_dns_stack"
 # using the device's existing privileged SSH DeviceService credential.
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
 LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
+LINUX_INSTALL_QEMU_GUEST_AGENT = "os.linux.ubuntu.24.install_qemu_guest_agent"
+LINUX_INSTALL_QEMU_GUEST_AGENT_HANDLER = (
+    "os.linux_ubuntu_24.install_qemu_guest_agent"
+)
+LINUX_INSTALL_ZABBIX_AGENT2 = "os.linux.ubuntu.24.install_zabbix_agent2"
+LINUX_INSTALL_ZABBIX_AGENT2_HANDLER = "os.linux_ubuntu_24.install_zabbix_agent2"
 
 # Mellanox ConnectX-3 (mlx4) InfiniBand -> Ethernet conversion on a Proxmox host.
 # Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
@@ -160,6 +166,77 @@ _SSH_INSTALL_KEY_RESULT_SCHEMA = {
         "target": {"type": "string"},
         "username": {"type": "string"},
         "fingerprint": {"type": "string"},
+    },
+}
+
+_RPC_SSH_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "DeviceCredential primary key; nms-backend decrypts it at execution time.",
+}
+
+_RPC_SSH_OVERRIDE_PROPERTIES = {
+    "rpc_ssh_credential_pk": _RPC_SSH_CREDENTIAL_REF,
+    "rpc_ssh_host": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255,
+        "description": "Optional SSH host override consumed by nms-backend.",
+    },
+    "rpc_ssh_port": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "Optional SSH port override consumed by nms-backend.",
+    },
+    "rpc_ssh_known_hosts_entry": {
+        "type": "string",
+        "description": "Optional known_hosts line consumed by nms-backend.",
+    },
+    "rpc_ssh_strict_host_key_checking": {
+        "type": "boolean",
+        "description": "Optional strict host-key checking override consumed by nms-backend.",
+    },
+}
+
+_LINUX_AGENT_BASE_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": _RPC_SSH_OVERRIDE_PROPERTIES,
+}
+
+_ZABBIX_SERVER_PATTERN = (
+    "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    "(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.?$"
+)
+
+_LINUX_INSTALL_ZABBIX_AGENT2_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "zabbix_server": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": _ZABBIX_SERVER_PATTERN,
+            "default": "zabbix.nmulti.cloud",
+            "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
+        },
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+    },
+}
+
+_LINUX_AGENT_INSTALL_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "installed": {"type": "boolean"},
+        "active": {"type": "string"},
+        "enabled": {"type": "string"},
+        "zabbix_server": {"type": "string"},
     },
 }
 
@@ -285,6 +362,31 @@ DNS_HOST_PROCEDURES = (
         "description": "Read status for the PowerDNS and dns-api Docker Compose stack on a DNS host.",
         "params_schema": _DNS_HOST_STATUS_PARAMS_SCHEMA,
         "result_schema": _DNS_HOST_RESULT_SCHEMA,
+    },
+)
+
+LINUX_AGENT_INSTALL_PROCEDURES = (
+    {
+        "name": LINUX_INSTALL_QEMU_GUEST_AGENT,
+        "handler_id": LINUX_INSTALL_QEMU_GUEST_AGENT_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 300,
+        "approval_required": False,
+        "description": "Install and enable the QEMU Guest Agent over SSH (no rebuild).",
+        "params_schema": _LINUX_AGENT_BASE_PARAMS_SCHEMA,
+        "result_schema": _LINUX_AGENT_INSTALL_RESULT_SCHEMA,
+    },
+    {
+        "name": LINUX_INSTALL_ZABBIX_AGENT2,
+        "handler_id": LINUX_INSTALL_ZABBIX_AGENT2_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 600,
+        "approval_required": False,
+        "description": "Install and configure Zabbix Agent 2 (ServerActive/Server) over SSH (no rebuild).",
+        "params_schema": _LINUX_INSTALL_ZABBIX_AGENT2_PARAMS_SCHEMA,
+        "result_schema": _LINUX_AGENT_INSTALL_RESULT_SCHEMA,
     },
 )
 

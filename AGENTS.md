@@ -49,6 +49,8 @@ before dispatching, not after:
 |---|---|
 | `os.linux.ubuntu.24.restart_service` | Service downtime |
 | `os.linux.ubuntu.24.start_service` / `stop_service` | Service downtime |
+| `os.linux.ubuntu.24.install_qemu_guest_agent` | Package install and service enablement |
+| `os.linux.ubuntu.24.install_zabbix_agent2` | Package install, config write, and service restart |
 | `network.device.dell_os10.s5232f_on.configure_vlt_domain` | Network partition risk |
 | `services.pterodactyl.bootstrap_api_key` | Credential rotation |
 
@@ -88,6 +90,17 @@ be used autonomously on destructive procedures.
   key registration. Target models: `dcim.device` and
   `virtualization.virtualmachine`. Migration `0006` depends on
   `netbox_nms.0029_user_ssh_key`.
+- Direct-SSH Ubuntu 24 agent installers are seeded by migration `0028` and
+  target `dcim.device` plus `virtualization.virtualmachine`.
+  `os.linux.ubuntu.24.install_qemu_guest_agent`
+  (`os.linux_ubuntu_24.install_qemu_guest_agent`, write, no approval, 300s)
+  installs/enables `qemu-guest-agent` over SSH without requiring QGA first.
+  `os.linux.ubuntu.24.install_zabbix_agent2`
+  (`os.linux_ubuntu_24.install_zabbix_agent2`, write, no approval, 600s)
+  installs/configures Zabbix Agent 2 over SSH and defaults `zabbix_server` to
+  `zabbix.nmulti.cloud`. Their schemas accept only the standard
+  `rpc_ssh_*` connection override keys, plus `zabbix_server` for Zabbix; never
+  add arbitrary package, command, or shell text parameters.
 - Mellanox NIC conversion: `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
   (write/`destructive`, approval required) is seeded by migration `0008`. It
   targets a **netbox-proxbox `ProxmoxEndpoint`**
