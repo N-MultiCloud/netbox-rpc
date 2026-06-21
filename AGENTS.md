@@ -210,6 +210,11 @@ be used autonomously on destructive procedures.
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.
+  See `docs/MINECRAFT_STACK_RPC.md` for the full operator/maintainer guardrail
+  contract. Any change to procedure names, handler IDs, JSON schemas,
+  normalizers, approval flags, URL rules, filename rules, or SSH override
+  handling must update that guide and the static contract tests in the same
+  branch.
   - `services.minecraft.plugin.install_url` (write, 180s, no approval):
     downloads a validated public http(s) `.jar` URL into
     `/var/lib/pterodactyl/volumes/<server_uuid>/plugins/<filename>` on the
