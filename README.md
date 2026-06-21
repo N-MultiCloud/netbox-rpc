@@ -14,6 +14,8 @@ The procedure catalog is intentionally narrow:
 - `network.device.dell_os10.s5232f_on.set_interface_description`
 - `network.device.dell_os10.s5232f_on.set_vlan_description`
 - `network.device.dell_os10.s5232f_on.write_memory`
+- `os.linux.ubuntu.24.install_qemu_guest_agent`
+- `os.linux.ubuntu.24.install_zabbix_agent2`
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.dns_host.deploy_dns_stack`
 - `os.linux.dns_host.status_dns_stack`
@@ -48,6 +50,26 @@ The normalizer emits only structured fields: the `rpc_ssh_*` host-override
 keys, `target`, `compose_project="powerdns-dns-api"`, deploy-only
 `force_recreate`, and an audit `command_fingerprint`. It does not accept raw
 SSH command text.
+
+### Direct-SSH Ubuntu agent installers
+
+Two fixed Ubuntu 24 procedures install already-deployed Linux agents over direct
+SSH, without rebuilding the instance and without depending on QEMU Guest Agent
+being present:
+
+| Procedure | Handler | Timeout |
+|---|---|---:|
+| `os.linux.ubuntu.24.install_qemu_guest_agent` | `os.linux_ubuntu_24.install_qemu_guest_agent` | 300s |
+| `os.linux.ubuntu.24.install_zabbix_agent2` | `os.linux_ubuntu_24.install_zabbix_agent2` | 600s |
+
+Both are `effect="write"`, `approval_required=False`, and target
+`dcim.device` plus `virtualization.virtualmachine`. Their only SSH connection
+parameters are the audited `rpc_ssh_*` overrides consumed by `nms-backend`
+(`rpc_ssh_credential_pk`, `rpc_ssh_host`, `rpc_ssh_port`,
+`rpc_ssh_known_hosts_entry`, and `rpc_ssh_strict_host_key_checking`).
+`install_zabbix_agent2` also accepts `zabbix_server` with default
+`zabbix.nmulti.cloud`. No arbitrary package, command, or shell text parameter is
+accepted. Seeded by migration `0028`.
 
 ### `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 

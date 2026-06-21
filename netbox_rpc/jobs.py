@@ -32,7 +32,9 @@ from .constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
+    LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
+    LINUX_INSTALL_ZABBIX_AGENT2,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
     LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
     NGINX_1_CONFIG_DEPLOY,
@@ -283,6 +285,16 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == DNS_HOST_STATUS_PROCEDURE:
         return _normalize_dns_host_status_execution(execution)
+
+    if procedure_name == LINUX_INSTALL_QEMU_GUEST_AGENT:
+        return _normalize_linux_agent_install_execution(execution, target)
+
+    if procedure_name == LINUX_INSTALL_ZABBIX_AGENT2:
+        return _normalize_linux_agent_install_execution(
+            execution,
+            target,
+            zabbix_server=True,
+        )
 
     if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
         return _normalize_convert_mellanox_nic_execution(execution, target)
@@ -852,6 +864,27 @@ def _validate_dns_host_ssh_host(host: str) -> None:
         )
 
 
+def _normalize_linux_agent_install_execution(
+    execution: RPCExecution,
+    target: str,
+    *,
+    zabbix_server: bool = False,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {"handler_id": execution.procedure.handler_id},
+    }
+    if zabbix_server:
+        server = _normalize_zabbix_server(
+            params.get("zabbix_server") or "zabbix.nmulti.cloud"
+        )
+        normalized["zabbix_server"] = server
+        normalized["command_fingerprint"]["zabbix_server"] = server
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
 def _normalize_convert_mellanox_nic_execution(
     execution: RPCExecution,
     target: str,
@@ -1368,6 +1401,43 @@ def _copy_optional_credential_override(
     if credential_pk is not None:
         normalized["rpc_ssh_credential_pk"] = credential_pk
         normalized["command_fingerprint"]["rpc_ssh_credential_pk"] = credential_pk
+
+
+def _copy_optional_ssh_overrides(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    credential_pk = _optional_int_range(params, "rpc_ssh_credential_pk", 1, None)
+    if credential_pk is not None:
+        normalized["rpc_ssh_credential_pk"] = credential_pk
+        normalized["command_fingerprint"]["rpc_ssh_credential_pk"] = credential_pk
+
+    if "rpc_ssh_host" in params:
+        host = str(params.get("rpc_ssh_host") or "").strip()
+        if not host:
+            raise RPCExecutionError(
+                "rpc_ssh_host must be a non-empty string.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["rpc_ssh_host"] = host
+        normalized["command_fingerprint"]["rpc_ssh_host"] = host
+
+    port = _optional_int_range(params, "rpc_ssh_port", 1, 65535)
+    if port is not None:
+        normalized["rpc_ssh_port"] = port
+        normalized["command_fingerprint"]["rpc_ssh_port"] = port
+
+    if "rpc_ssh_known_hosts_entry" in params:
+        known_hosts_entry = str(params.get("rpc_ssh_known_hosts_entry") or "").strip()
+        normalized["rpc_ssh_known_hosts_entry"] = known_hosts_entry
+        normalized["command_fingerprint"]["rpc_ssh_known_hosts_entry_sha256"] = (
+            _hash_text(known_hosts_entry)
+        )
+
+    if "rpc_ssh_strict_host_key_checking" in params:
+        strict = _bool_param(params, "rpc_ssh_strict_host_key_checking", True)
+        normalized["rpc_ssh_strict_host_key_checking"] = strict
+        normalized["command_fingerprint"]["rpc_ssh_strict_host_key_checking"] = strict
 
 
 def _dell_os10_description(params: dict[str, Any]) -> str:

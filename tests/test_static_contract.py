@@ -261,6 +261,59 @@ def test_dns_host_normalizer_branches_are_registered() -> None:
     assert "rpc_ssh_known_hosts_entry" in jobs
 
 
+def test_linux_agent_install_procedures_are_seeded() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read(
+        "netbox_rpc/migrations/0028_seed_linux_agent_install_procedures.py"
+    )
+
+    for procedure, handler_id in (
+        (
+            "os.linux.ubuntu.24.install_qemu_guest_agent",
+            "os.linux_ubuntu_24.install_qemu_guest_agent",
+        ),
+        (
+            "os.linux.ubuntu.24.install_zabbix_agent2",
+            "os.linux_ubuntu_24.install_zabbix_agent2",
+        ),
+    ):
+        assert procedure in constants
+        assert procedure in migration
+        assert handler_id in constants
+        assert handler_id in migration
+    assert '"effect": "write"' in migration
+    assert '"approval_required": False' in migration
+    assert '"enabled": True' in migration
+    assert '"version": 1' in migration
+    assert '"timeout_seconds": 300' in migration
+    assert '"timeout_seconds": 600' in migration
+    assert '"dcim.device"' in migration
+    assert '"virtualization.virtualmachine"' in migration
+    assert "from netbox_rpc" not in migration
+    assert "0027_seed_dns_host_procedures" in migration
+
+
+def test_linux_agent_install_params_schema_is_narrow() -> None:
+    migration = read(
+        "netbox_rpc/migrations/0028_seed_linux_agent_install_procedures.py"
+    )
+    for key in (
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    ):
+        assert key in migration
+    assert '"additionalProperties": False' in migration
+    assert '"zabbix_server"' in migration
+    assert '"default": "zabbix.nmulti.cloud"' in migration
+    assert '"maxLength": 253' in migration
+    assert "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?" in migration
+    assert "apt" not in migration.lower()
+    assert "command" not in migration.lower()
+
+
 def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
     constants = read("netbox_rpc/constants.py")
     migration = read("netbox_rpc/migrations/0011_seed_dell_os10_vlt_procedures.py")
