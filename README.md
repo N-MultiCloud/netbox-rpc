@@ -142,6 +142,12 @@ presets/plugin enums, PaperMC project/version/build fields, and public URL
 shape before an execution is queued. URL values are fingerprinted in the audit
 hash rather than repeated in the command fingerprint.
 
+Detailed operator and maintainer guardrails live in
+[`docs/MINECRAFT_STACK_RPC.md`](docs/MINECRAFT_STACK_RPC.md). Keep that guide,
+`AGENTS.md`, the migration seed data, and the static contract tests aligned any
+time a Minecraft procedure schema, normalizer, handler ID, or approval boundary
+changes.
+
 ### `packer.vm.*` — netbox-packer post-build verification
 
 Four **read-only** procedures (`effect="read"`, `approval_required=False`,

@@ -1,3 +1,4 @@
+import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -5,6 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def load_constants() -> dict:
+    return runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
 
 
 def test_plugin_uses_rpc_base_url_and_requires_netbox_nms() -> None:
@@ -314,6 +319,106 @@ def test_linux_agent_install_params_schema_is_narrow() -> None:
     assert "command" not in migration.lower()
 
 
+_MINECRAFT_STACK_PROCEDURES = (
+    "services.minecraft.plugin.install_url",
+    "services.minecraft.viaversion.install",
+    "services.minecraft.papermc.install",
+    "services.pterodactyl.wings.status",
+    "services.pterodactyl.wings.logs",
+    "services.pterodactyl.wings.restart",
+)
+
+
+def test_minecraft_stack_procedure_catalog_guardrails() -> None:
+    constants = load_constants()
+    procedures = constants["MINECRAFT_STACK_PROCEDURES"]
+    by_name = {procedure["name"]: procedure for procedure in procedures}
+
+    assert tuple(by_name) == _MINECRAFT_STACK_PROCEDURES
+    forbidden_param_names = {
+        "command",
+        "commands",
+        "shell_command",
+        "raw_command",
+        "command_text",
+        "script",
+        "argv",
+        "args",
+        "destination_path",
+    }
+
+    for name, procedure in by_name.items():
+        assert procedure["handler_id"] == name
+        assert procedure["target_models"] == [
+            "dcim.device",
+            "virtualization.virtualmachine",
+        ]
+        schema = procedure["params_schema"]
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert forbidden_param_names.isdisjoint(schema["properties"])
+
+    assert by_name["services.minecraft.plugin.install_url"]["effect"] == "write"
+    assert (
+        by_name["services.minecraft.plugin.install_url"]["params_schema"]["properties"][
+            "source_url"
+        ]["pattern"]
+        == "^https?://"
+    )
+    assert by_name["services.minecraft.viaversion.install"]["params_schema"][
+        "properties"
+    ]["plugins"]["items"]["enum"] == ["viaversion", "viabackwards", "viarewind"]
+    assert by_name["services.minecraft.papermc.install"]["params_schema"]["properties"][
+        "project"
+    ]["enum"] == ["paper", "folia", "velocity"]
+    assert by_name["services.pterodactyl.wings.status"]["effect"] == "read"
+    assert by_name["services.pterodactyl.wings.logs"]["effect"] == "read"
+    assert by_name["services.pterodactyl.wings.restart"]["effect"] == "write"
+    assert by_name["services.pterodactyl.wings.restart"]["approval_required"] is True
+
+
+def test_minecraft_stack_migration_matches_constants_and_stays_data_only() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0029_seed_minecraft_stack_procedures.py")
+
+    for name in _MINECRAFT_STACK_PROCEDURES:
+        assert name in constants
+        assert name in migration
+    assert "from netbox_rpc" not in migration
+    assert '"additionalProperties": False' in migration
+    for forbidden in (
+        "shell_command",
+        "raw_command",
+        "command_text",
+        "arbitrary_command",
+        "subprocess",
+        "os.system",
+        "eval(",
+    ):
+        assert forbidden not in constants
+        assert forbidden not in migration
+
+
+def test_minecraft_stack_guardrail_docs_are_present() -> None:
+    guide = read("docs/MINECRAFT_STACK_RPC.md")
+    readme = read("README.md")
+    agents = read("AGENTS.md")
+
+    for content in (guide, readme, agents):
+        assert "services.minecraft.plugin.install_url" in content
+        assert "services.minecraft.viaversion.install" in content
+        assert "services.minecraft.papermc.install" in content
+        assert "services.pterodactyl.wings.restart" in content
+    for token in (
+        "additionalProperties: False",
+        "source_url_sha256",
+        "wings.service",
+        "raw_command",
+        "DeviceService",
+    ):
+        assert token in guide
+
+
 def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
     constants = read("netbox_rpc/constants.py")
     migration = read("netbox_rpc/migrations/0011_seed_dell_os10_vlt_procedures.py")
@@ -357,8 +462,13 @@ def test_mellanox_procedures_are_approval_required_and_destructive() -> None:
     # The MELLANOX_PROCEDURES tuple must exist and contain exactly one entry
     assert "MELLANOX_PROCEDURES" in constants
     # Both safety flags must appear inside the constants file (in the procedure dict)
-    assert '"approval_required": True' in constants or "'approval_required': True" in constants
-    assert '"effect": "destructive"' in constants or "'effect': 'destructive'" in constants
+    assert (
+        '"approval_required": True' in constants
+        or "'approval_required': True" in constants
+    )
+    assert (
+        '"effect": "destructive"' in constants or "'effect': 'destructive'" in constants
+    )
     # The procedure name must reference Proxmox
     assert "os.linux.proxmox.convert_mellanox_nic_to_ethernet" in constants
     assert "netbox_proxbox.proxmoxendpoint" in constants
@@ -495,7 +605,9 @@ def test_netbox_packer_does_not_reference_netbox_rpc() -> None:
     if packer_root is None:
         import pytest
 
-        pytest.skip("netbox-packer sibling source not available; skipping cross-repo check")
+        pytest.skip(
+            "netbox-packer sibling source not available; skipping cross-repo check"
+        )
 
     pyproject = (packer_root / "pyproject.toml").read_text(encoding="utf-8")
     assert "netbox-rpc" not in pyproject
