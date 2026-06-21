@@ -6,6 +6,7 @@ import logging
 import re
 from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import requests
 from django.db import IntegrityError
@@ -37,10 +38,16 @@ from .constants import (
     LINUX_INSTALL_ZABBIX_AGENT2,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
     LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
+    MINECRAFT_PAPERMC_INSTALL,
+    MINECRAFT_PLUGIN_INSTALL_URL,
+    MINECRAFT_VIAVERSION_INSTALL,
     NGINX_1_CONFIG_DEPLOY,
     PTERODACTYL_ARTISAN,
     PTERODACTYL_BOOTSTRAP_API_KEY,
     PTERODACTYL_CONTAINER_LOGS,
+    PTERODACTYL_WINGS_LOGS,
+    PTERODACTYL_WINGS_RESTART,
+    PTERODACTYL_WINGS_STATUS,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
@@ -102,10 +109,29 @@ _DELL_OS10_TRUNK_VLANS_RE = re.compile(
 _DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
 _DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
 _PTERODACTYL_CONTAINER_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+_MINECRAFT_SERVER_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_MINECRAFT_JAR_FILENAME_RE = re.compile(r"[A-Za-z0-9._-]+\.jar$")
+_MINECRAFT_VERSION_RE = re.compile(r"[A-Za-z0-9._+-]{1,64}$")
+_MINECRAFT_VIAVERSION_PRESETS = {
+    "minimal": ("viaversion",),
+    "standard": ("viaversion", "viabackwards"),
+    "full": ("viaversion", "viabackwards", "viarewind"),
+}
+_MINECRAFT_VIAVERSION_PLUGINS = frozenset({"viaversion", "viabackwards", "viarewind"})
+_MINECRAFT_PAPERMC_PROJECTS = frozenset({"paper", "folia", "velocity"})
 _DNS_HOST_TARGET_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
 _DNS_HOST_COMPOSE_PROJECT = "powerdns-dns-api"
 _PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
-    {"queue:status", "schedule:run", "cache:clear", "config:clear", "queue:restart", "migrate"}
+    {
+        "queue:status",
+        "schedule:run",
+        "cache:clear",
+        "config:clear",
+        "queue:restart",
+        "migrate",
+    }
 )
 
 
@@ -621,7 +647,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == PTERODACTYL_BOOTSTRAP_API_KEY:
         params = execution.params or {}
-        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        container_name = str(
+            params.get("container_name") or "pterodactyl-panel-1"
+        ).strip()
         if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
             raise RPCExecutionError(
                 "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
@@ -640,7 +668,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
                 f"command must be one of: {', '.join(sorted(_PTERODACTYL_ARTISAN_ALLOWLIST))}",
                 code="RPC_PARAM_INVALID",
             )
-        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        container_name = str(
+            params.get("container_name") or "pterodactyl-panel-1"
+        ).strip()
         if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
             raise RPCExecutionError(
                 "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
@@ -658,7 +688,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
     if procedure_name == PTERODACTYL_CONTAINER_LOGS:
         params = execution.params or {}
-        container_name = str(params.get("container_name") or "pterodactyl-panel-1").strip()
+        container_name = str(
+            params.get("container_name") or "pterodactyl-panel-1"
+        ).strip()
         if not _PTERODACTYL_CONTAINER_NAME_RE.fullmatch(container_name):
             raise RPCExecutionError(
                 "container_name contains invalid characters.", code="RPC_PARAM_INVALID"
@@ -675,10 +707,256 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
             },
         }
 
+    if procedure_name == MINECRAFT_PLUGIN_INSTALL_URL:
+        return _normalize_minecraft_plugin_install_url_execution(execution, target)
+
+    if procedure_name == MINECRAFT_VIAVERSION_INSTALL:
+        return _normalize_minecraft_viaversion_install_execution(execution, target)
+
+    if procedure_name == MINECRAFT_PAPERMC_INSTALL:
+        return _normalize_minecraft_papermc_install_execution(execution, target)
+
+    if procedure_name == PTERODACTYL_WINGS_STATUS:
+        return _normalize_pterodactyl_wings_service_execution(
+            execution, target, action="status"
+        )
+
+    if procedure_name == PTERODACTYL_WINGS_LOGS:
+        normalized = _normalize_pterodactyl_wings_service_execution(
+            execution,
+            target,
+            action="logs",
+        )
+        lines = max(1, min(500, int((execution.params or {}).get("lines", 100))))
+        normalized["lines"] = lines
+        normalized["command_fingerprint"]["lines"] = lines
+        return normalized
+
+    if procedure_name == PTERODACTYL_WINGS_RESTART:
+        return _normalize_pterodactyl_wings_service_execution(
+            execution, target, action="restart"
+        )
+
     raise RPCExecutionError(
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_minecraft_plugin_install_url_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    server_uuid = _minecraft_server_uuid(params)
+    source_url = _minecraft_public_url(params.get("source_url"))
+    filename = _minecraft_jar_filename(params.get("filename"), "filename")
+    restart = _bool_param(params, "restart", False)
+    normalized = {
+        "target": target,
+        "server_uuid": server_uuid,
+        "source_url": source_url,
+        "filename": filename,
+        "restart": restart,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "server_uuid": server_uuid,
+            "source_url_sha256": _hash_text(source_url),
+            "filename": filename,
+            "restart": restart,
+        },
+    }
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_minecraft_viaversion_install_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    server_uuid = _minecraft_server_uuid(params)
+    raw_plugins = params.get("plugins")
+    if raw_plugins:
+        if not isinstance(raw_plugins, list):
+            raise RPCExecutionError("plugins must be a list.", code="RPC_PARAM_INVALID")
+        plugins = tuple(str(item).strip().lower() for item in raw_plugins)
+        if not plugins or len(plugins) > 3 or len(set(plugins)) != len(plugins):
+            raise RPCExecutionError(
+                "plugins must contain one to three unique entries.",
+                code="RPC_PARAM_INVALID",
+            )
+        if any(plugin not in _MINECRAFT_VIAVERSION_PLUGINS for plugin in plugins):
+            raise RPCExecutionError(
+                "plugins must be viaversion, viabackwards, and/or viarewind.",
+                code="RPC_PARAM_INVALID",
+            )
+        ordered = [
+            plugin
+            for plugin in ("viaversion", "viabackwards", "viarewind")
+            if plugin in plugins
+        ]
+        plugins = tuple(ordered)
+        preset = "custom"
+    else:
+        preset = str(params.get("preset") or "standard").strip().lower()
+        if preset not in _MINECRAFT_VIAVERSION_PRESETS:
+            raise RPCExecutionError(
+                "preset must be minimal, standard, or full.",
+                code="RPC_PARAM_INVALID",
+            )
+        plugins = _MINECRAFT_VIAVERSION_PRESETS[preset]
+    restart = _bool_param(params, "restart", False)
+    normalized = {
+        "target": target,
+        "server_uuid": server_uuid,
+        "preset": preset,
+        "plugins": list(plugins),
+        "restart": restart,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "server_uuid": server_uuid,
+            "preset": preset,
+            "plugins": list(plugins),
+            "restart": restart,
+        },
+    }
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_minecraft_papermc_install_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    server_uuid = _minecraft_server_uuid(params)
+    project = str(params.get("project") or "").strip().lower()
+    if project not in _MINECRAFT_PAPERMC_PROJECTS:
+        raise RPCExecutionError(
+            "project must be paper, folia, or velocity.",
+            code="RPC_PARAM_INVALID",
+        )
+    version = str(params.get("version") or "").strip()
+    if not _MINECRAFT_VERSION_RE.fullmatch(version):
+        raise RPCExecutionError(
+            "version must be a safe PaperMC version identifier.",
+            code="RPC_PARAM_INVALID",
+        )
+    server_jarfile = _minecraft_jar_filename(
+        params.get("server_jarfile") or "server.jar",
+        "server_jarfile",
+    )
+    restart = _bool_param(params, "restart", False)
+    normalized = {
+        "target": target,
+        "server_uuid": server_uuid,
+        "project": project,
+        "version": version,
+        "server_jarfile": server_jarfile,
+        "restart": restart,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "server_uuid": server_uuid,
+            "project": project,
+            "version": version,
+            "server_jarfile": server_jarfile,
+            "restart": restart,
+        },
+    }
+    build_id = _optional_int_range(params, "build_id", 1, None)
+    if build_id is not None:
+        normalized["build_id"] = build_id
+        normalized["command_fingerprint"]["build_id"] = build_id
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_pterodactyl_wings_service_execution(
+    execution: RPCExecution,
+    target: str,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    normalized = {
+        "target": target,
+        "service_name": "wings.service",
+        "action": action,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "service_name": "wings.service",
+            "action": action,
+        },
+    }
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _minecraft_server_uuid(params: dict[str, Any]) -> str:
+    server_uuid = str(params.get("server_uuid") or "").strip()
+    if not _MINECRAFT_SERVER_UUID_RE.fullmatch(server_uuid):
+        raise RPCExecutionError(
+            "server_uuid must be a canonical UUID.",
+            code="RPC_PARAM_INVALID",
+        )
+    return server_uuid.lower()
+
+
+def _minecraft_jar_filename(raw: object, field_name: str) -> str:
+    filename = str(raw or "").strip()
+    if (
+        not _MINECRAFT_JAR_FILENAME_RE.fullmatch(filename)
+        or ".." in filename
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise RPCExecutionError(
+            f"{field_name} must be a safe .jar filename.",
+            code="RPC_PARAM_INVALID",
+        )
+    return filename
+
+
+def _minecraft_public_url(raw: object) -> str:
+    value = str(raw or "").strip()
+    if len(value) > 2048:
+        raise RPCExecutionError(
+            "source_url may contain at most 2048 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+    ):
+        raise RPCExecutionError(
+            "source_url must be an http(s) URL.",
+            code="RPC_PARAM_INVALID",
+        )
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        raise RPCExecutionError(
+            "source_url host is not allowed.",
+            code="RPC_PARAM_INVALID",
+        )
+    try:
+        ip = ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
+            raise RPCExecutionError(
+                "source_url must not point to a private or local IP address.",
+                code="RPC_PARAM_INVALID",
+            )
+    if any(ord(ch) < 32 for ch in value):
+        raise RPCExecutionError(
+            "source_url must not contain control characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
 
 
 def _normalize_nginx_node_execution(
@@ -1021,7 +1299,9 @@ def _normalize_proxmox_qemu_vm_lifecycle_execution(
     ciuser = str(params.get("ciuser") or "").strip()
     if ciuser:
         if not _POSIX_USERNAME_RE.fullmatch(ciuser):
-            raise RPCExecutionError("ciuser must be a valid POSIX username.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "ciuser must be a valid POSIX username.", code="RPC_PARAM_INVALID"
+            )
         normalized["ciuser"] = ciuser
         command_fingerprint["ciuser"] = ciuser
 
@@ -1037,7 +1317,10 @@ def _normalize_proxmox_qemu_vm_lifecycle_execution(
     resize_disk = str(params.get("resize_disk") or "scsi0").strip()
     if "resize" in operations:
         if not _PROXMOX_DISK_RE.fullmatch(resize_disk):
-            raise RPCExecutionError("resize_disk must be a valid Proxmox disk key.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "resize_disk must be a valid Proxmox disk key.",
+                code="RPC_PARAM_INVALID",
+            )
         normalized["resize_disk"] = resize_disk
         command_fingerprint["resize_disk"] = resize_disk
 
@@ -1049,7 +1332,9 @@ def _normalize_proxmox_qemu_vm_lifecycle_execution(
     if ipconfigs:
         normalized["ipconfigs"] = ipconfigs
         command_fingerprint["ipconfigs"] = ipconfigs
-    guest_networks = _normalize_proxmox_guest_networks(params.get("guest_networks") or [])
+    guest_networks = _normalize_proxmox_guest_networks(
+        params.get("guest_networks") or []
+    )
     if guest_networks:
         normalized["guest_networks"] = guest_networks
         command_fingerprint["guest_networks"] = guest_networks
@@ -1103,14 +1388,20 @@ def _resolve_proxmox_ssh_binding(endpoint_id: int) -> dict[str, Any]:
 def _proxmox_operations(params: dict[str, Any]) -> list[str]:
     raw = params.get("operations")
     if not isinstance(raw, list) or not raw:
-        raise RPCExecutionError("operations must be a non-empty list.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "operations must be a non-empty list.", code="RPC_PARAM_INVALID"
+        )
     operations: list[str] = []
     for item in raw:
         value = str(item or "").strip()
         if value not in _PROXMOX_QEMU_OPERATIONS:
-            raise RPCExecutionError(f"Unsupported Proxmox QEMU operation: {value}", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                f"Unsupported Proxmox QEMU operation: {value}", code="RPC_PARAM_INVALID"
+            )
         if value in operations:
-            raise RPCExecutionError("operations must not contain duplicates.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "operations must not contain duplicates.", code="RPC_PARAM_INVALID"
+            )
         operations.append(value)
     return operations
 
@@ -1124,7 +1415,9 @@ def _optional_regex_param(
     if not value:
         return ""
     if not regex.fullmatch(value):
-        raise RPCExecutionError(f"{key} contains invalid characters.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            f"{key} contains invalid characters.", code="RPC_PARAM_INVALID"
+        )
     return value
 
 
@@ -1134,22 +1427,32 @@ def _normalize_proxmox_networks(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raise RPCExecutionError("networks must be a list.", code="RPC_PARAM_INVALID")
     if len(raw) > 8:
-        raise RPCExecutionError("networks may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "networks may contain at most 8 entries.", code="RPC_PARAM_INVALID"
+        )
     seen: set[int] = set()
     normalized: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise RPCExecutionError("network entries must be objects.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "network entries must be objects.", code="RPC_PARAM_INVALID"
+            )
         index = _int_range(item, "index", 0, 31)
         if index in seen:
-            raise RPCExecutionError("network indexes must be unique.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "network indexes must be unique.", code="RPC_PARAM_INVALID"
+            )
         seen.add(index)
         model = str(item.get("model") or "virtio").strip()
         if model not in _PROXMOX_QEMU_NIC_MODELS:
-            raise RPCExecutionError("network model is not allowlisted.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "network model is not allowlisted.", code="RPC_PARAM_INVALID"
+            )
         bridge = str(item.get("bridge") or "").strip()
         if not _PROXMOX_BRIDGE_RE.fullmatch(bridge):
-            raise RPCExecutionError("network bridge contains invalid characters.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "network bridge contains invalid characters.", code="RPC_PARAM_INVALID"
+            )
         entry: dict[str, Any] = {"index": index, "model": model, "bridge": bridge}
         if item.get("tag") not in (None, ""):
             entry["tag"] = _int_range(item, "tag", 1, 4094)
@@ -1165,24 +1468,34 @@ def _normalize_proxmox_ipconfigs(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raise RPCExecutionError("ipconfigs must be a list.", code="RPC_PARAM_INVALID")
     if len(raw) > 8:
-        raise RPCExecutionError("ipconfigs may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "ipconfigs may contain at most 8 entries.", code="RPC_PARAM_INVALID"
+        )
     seen: set[int] = set()
     normalized: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise RPCExecutionError("ipconfig entries must be objects.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "ipconfig entries must be objects.", code="RPC_PARAM_INVALID"
+            )
         index = _int_range(item, "index", 0, 31)
         if index in seen:
-            raise RPCExecutionError("ipconfig indexes must be unique.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "ipconfig indexes must be unique.", code="RPC_PARAM_INVALID"
+            )
         seen.add(index)
         ip = str(item.get("ip") or "").strip()
         if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(ip):
-            raise RPCExecutionError("ipconfig ip contains invalid characters.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "ipconfig ip contains invalid characters.", code="RPC_PARAM_INVALID"
+            )
         entry: dict[str, Any] = {"index": index, "ip": ip}
         gw = str(item.get("gw") or "").strip()
         if gw:
             if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(gw):
-                raise RPCExecutionError("ipconfig gw contains invalid characters.", code="RPC_PARAM_INVALID")
+                raise RPCExecutionError(
+                    "ipconfig gw contains invalid characters.", code="RPC_PARAM_INVALID"
+                )
             entry["gw"] = gw
         normalized.append(entry)
     return sorted(normalized, key=lambda entry: int(entry["index"]))
@@ -1192,28 +1505,45 @@ def _normalize_proxmox_guest_networks(raw: Any) -> list[dict[str, Any]]:
     if raw in (None, ""):
         return []
     if not isinstance(raw, list):
-        raise RPCExecutionError("guest_networks must be a list.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "guest_networks must be a list.", code="RPC_PARAM_INVALID"
+        )
     if len(raw) > 8:
-        raise RPCExecutionError("guest_networks may contain at most 8 entries.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "guest_networks may contain at most 8 entries.", code="RPC_PARAM_INVALID"
+        )
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise RPCExecutionError("guest_network entries must be objects.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "guest_network entries must be objects.", code="RPC_PARAM_INVALID"
+            )
         interface = str(item.get("interface") or "").strip()
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,31}", interface):
-            raise RPCExecutionError("guest_network interface contains invalid characters.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "guest_network interface contains invalid characters.",
+                code="RPC_PARAM_INVALID",
+            )
         if interface in seen:
-            raise RPCExecutionError("guest_network interfaces must be unique.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "guest_network interfaces must be unique.", code="RPC_PARAM_INVALID"
+            )
         seen.add(interface)
         address = str(item.get("address") or "").strip()
         if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(address):
-            raise RPCExecutionError("guest_network address contains invalid characters.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "guest_network address contains invalid characters.",
+                code="RPC_PARAM_INVALID",
+            )
         entry: dict[str, Any] = {"interface": interface, "address": address}
         gateway = str(item.get("gateway") or "").strip()
         if gateway:
             if not _PROXMOX_NO_COMMA_SPACE_RE.fullmatch(gateway):
-                raise RPCExecutionError("guest_network gateway contains invalid characters.", code="RPC_PARAM_INVALID")
+                raise RPCExecutionError(
+                    "guest_network gateway contains invalid characters.",
+                    code="RPC_PARAM_INVALID",
+                )
             entry["gateway"] = gateway
         normalized.append(entry)
     return sorted(normalized, key=lambda entry: str(entry["interface"]))
@@ -1224,7 +1554,9 @@ def _normalize_dns_search_domain(raw: Any) -> str:
     if not value:
         return ""
     if len(value) > 253 or not _DNS_SEARCH_DOMAIN_RE.fullmatch(value):
-        raise RPCExecutionError("search_domain must be a valid DNS search domain.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "search_domain must be a valid DNS search domain.", code="RPC_PARAM_INVALID"
+        )
     return value
 
 
@@ -1234,18 +1566,27 @@ def _normalize_dns_servers(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         raise RPCExecutionError("dns_servers must be a list.", code="RPC_PARAM_INVALID")
     if len(raw) > 3:
-        raise RPCExecutionError("dns_servers may contain at most 3 entries.", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError(
+            "dns_servers may contain at most 3 entries.", code="RPC_PARAM_INVALID"
+        )
     normalized: list[str] = []
     for item in raw:
         value = str(item or "").strip()
         if not value:
-            raise RPCExecutionError("dns_servers must not contain empty entries.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "dns_servers must not contain empty entries.", code="RPC_PARAM_INVALID"
+            )
         try:
             ip_address(value)
         except ValueError as exc:
-            raise RPCExecutionError("dns_servers entries must be valid IP addresses.", code="RPC_PARAM_INVALID") from exc
+            raise RPCExecutionError(
+                "dns_servers entries must be valid IP addresses.",
+                code="RPC_PARAM_INVALID",
+            ) from exc
         if value in normalized:
-            raise RPCExecutionError("dns_servers must not contain duplicates.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "dns_servers must not contain duplicates.", code="RPC_PARAM_INVALID"
+            )
         normalized.append(value)
     return normalized
 
@@ -1270,7 +1611,10 @@ def _normalize_zabbix_server(raw: Any) -> str:
 def _require_proxmox_fields(operations: list[str], params: dict[str, Any]) -> None:
     if "nextid" in operations:
         if len(operations) != 1:
-            raise RPCExecutionError("nextid must be run as a standalone operation.", code="RPC_PARAM_INVALID")
+            raise RPCExecutionError(
+                "nextid must be run as a standalone operation.",
+                code="RPC_PARAM_INVALID",
+            )
         return
     _require_keys(params, ["vmid"])
     if "clone" in operations:

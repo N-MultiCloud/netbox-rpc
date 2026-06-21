@@ -68,7 +68,9 @@ def test_bootstrap_api_key_rejects_invalid_container_name(jobs_module) -> None:
     assert "container_name" in str(exc_info.value).lower()
 
 
-def test_bootstrap_api_key_rejects_empty_container_name_via_default(jobs_module) -> None:
+def test_bootstrap_api_key_rejects_empty_container_name_via_default(
+    jobs_module,
+) -> None:
     # Passing an empty string falls through to the default "pterodactyl-panel-1"
     execution = _execution(
         "services.pterodactyl.bootstrap_api_key",
@@ -317,11 +319,205 @@ def test_container_logs_fingerprint_includes_container_and_lines(jobs_module) ->
 
 
 # ---------------------------------------------------------------------------
+# Minecraft stack normalizers
+# ---------------------------------------------------------------------------
+
+
+SERVER_UUID = "123e4567-e89b-12d3-a456-426614174000"
+
+
+def test_minecraft_plugin_url_install_normalizes_safe_url(jobs_module) -> None:
+    execution = _execution(
+        "services.minecraft.plugin.install_url",
+        "services.minecraft.plugin.install_url",
+        {
+            "server_uuid": SERVER_UUID,
+            "source_url": "https://example.com/plugins/Foo-1.0.0.jar",
+            "filename": "Foo-1.0.0.jar",
+            "restart": True,
+            "rpc_ssh_credential_pk": 7,
+            "rpc_ssh_host": "node01.example",
+        },
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["server_uuid"] == SERVER_UUID
+    assert normalized["source_url"] == "https://example.com/plugins/Foo-1.0.0.jar"
+    assert normalized["filename"] == "Foo-1.0.0.jar"
+    assert normalized["restart"] is True
+    assert normalized["rpc_ssh_credential_pk"] == 7
+    assert normalized["rpc_ssh_host"] == "node01.example"
+    assert "source_url" not in normalized["command_fingerprint"]
+    assert "source_url_sha256" in normalized["command_fingerprint"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {
+            "server_uuid": "not-a-uuid",
+            "source_url": "https://example.com/a.jar",
+            "filename": "a.jar",
+        },
+        {
+            "server_uuid": SERVER_UUID,
+            "source_url": "ftp://example.com/a.jar",
+            "filename": "a.jar",
+        },
+        {
+            "server_uuid": SERVER_UUID,
+            "source_url": "https://127.0.0.1/a.jar",
+            "filename": "a.jar",
+        },
+        {
+            "server_uuid": SERVER_UUID,
+            "source_url": "https://example.com/a.jar",
+            "filename": "../a.jar",
+        },
+    ],
+)
+def test_minecraft_plugin_url_install_rejects_unsafe_params(
+    jobs_module, params: dict
+) -> None:
+    execution = _execution(
+        "services.minecraft.plugin.install_url",
+        "services.minecraft.plugin.install_url",
+        params,
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_minecraft_viaversion_uses_standard_preset(jobs_module) -> None:
+    execution = _execution(
+        "services.minecraft.viaversion.install",
+        "services.minecraft.viaversion.install",
+        {"server_uuid": SERVER_UUID},
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["preset"] == "standard"
+    assert normalized["plugins"] == ["viaversion", "viabackwards"]
+    assert normalized["restart"] is False
+
+
+def test_minecraft_viaversion_orders_custom_plugin_set(jobs_module) -> None:
+    execution = _execution(
+        "services.minecraft.viaversion.install",
+        "services.minecraft.viaversion.install",
+        {
+            "server_uuid": SERVER_UUID,
+            "plugins": ["viarewind", "viaversion"],
+            "restart": True,
+        },
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["preset"] == "custom"
+    assert normalized["plugins"] == ["viaversion", "viarewind"]
+    assert normalized["command_fingerprint"]["plugins"] == ["viaversion", "viarewind"]
+
+
+def test_minecraft_viaversion_rejects_unknown_plugin(jobs_module) -> None:
+    execution = _execution(
+        "services.minecraft.viaversion.install",
+        "services.minecraft.viaversion.install",
+        {"server_uuid": SERVER_UUID, "plugins": ["viaversion", "luckperms"]},
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_minecraft_papermc_install_normalizes_project_version_and_build(
+    jobs_module,
+) -> None:
+    execution = _execution(
+        "services.minecraft.papermc.install",
+        "services.minecraft.papermc.install",
+        {
+            "server_uuid": SERVER_UUID,
+            "project": "Folia",
+            "version": "1.21.4",
+            "build_id": 42,
+            "server_jarfile": "folia.jar",
+        },
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["project"] == "folia"
+    assert normalized["version"] == "1.21.4"
+    assert normalized["build_id"] == 42
+    assert normalized["server_jarfile"] == "folia.jar"
+
+
+def test_minecraft_papermc_install_rejects_unsafe_version(jobs_module) -> None:
+    execution = _execution(
+        "services.minecraft.papermc.install",
+        "services.minecraft.papermc.install",
+        {"server_uuid": SERVER_UUID, "project": "paper", "version": "1.21.4;rm"},
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_pterodactyl_wings_status_and_logs_are_structured(jobs_module) -> None:
+    status = jobs_module.normalize_execution_params(
+        _execution(
+            "services.pterodactyl.wings.status",
+            "services.pterodactyl.wings.status",
+            {"rpc_ssh_credential_pk": 9},
+        )
+    )
+    logs = jobs_module.normalize_execution_params(
+        _execution(
+            "services.pterodactyl.wings.logs",
+            "services.pterodactyl.wings.logs",
+            {"lines": 9999},
+        )
+    )
+
+    assert status["service_name"] == "wings.service"
+    assert status["action"] == "status"
+    assert status["rpc_ssh_credential_pk"] == 9
+    assert logs["action"] == "logs"
+    assert logs["lines"] == 500
+
+
+def test_pterodactyl_wings_restart_requires_no_command_text(jobs_module) -> None:
+    normalized = jobs_module.normalize_execution_params(
+        _execution(
+            "services.pterodactyl.wings.restart",
+            "services.pterodactyl.wings.restart",
+            {},
+        )
+    )
+
+    assert normalized["service_name"] == "wings.service"
+    assert normalized["action"] == "restart"
+    assert "command" not in normalized
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _execution(procedure_name: str, handler_id: str, params: dict, target: str = "panel-host"):
+def _execution(
+    procedure_name: str, handler_id: str, params: dict, target: str = "panel-host"
+):
     return SimpleNamespace(
         procedure=SimpleNamespace(name=procedure_name, handler_id=handler_id),
         params=params,
@@ -363,7 +559,9 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox_nms_backend.get_backend = MagicMock(return_value=None)
 
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 

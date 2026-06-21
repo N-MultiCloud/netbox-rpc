@@ -207,6 +207,34 @@ be used autonomously on destructive procedures.
     (1–500, default 100).
     Handler: `services.pterodactyl.container_logs`.
   Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- Minecraft stack procedures are seeded by migration `0029`. They provide
+  structured SSH fallback operations for game nodes and server volumes; none
+  accepts arbitrary shell command text.
+  - `services.minecraft.plugin.install_url` (write, 180s, no approval):
+    downloads a validated public http(s) `.jar` URL into
+    `/var/lib/pterodactyl/volumes/<server_uuid>/plugins/<filename>` on the
+    Wings node. Required `server_uuid`, `source_url`, and safe `.jar`
+    `filename`; optional `restart` and `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.plugin.install_url`.
+  - `services.minecraft.viaversion.install` (write, 240s, no approval):
+    installs ViaVersion-family plugins from fixed ViaVersion GitHub project
+    mappings. Accepts `server_uuid`, either `preset` (`minimal`, `standard`,
+    `full`) or explicit `plugins` (`viaversion`, `viabackwards`, `viarewind`),
+    optional `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.viaversion.install`.
+  - `services.minecraft.papermc.install` (write, 240s, no approval):
+    installs a PaperMC Fill API server JAR into the server root. Accepts
+    `server_uuid`, `project` (`paper`, `folia`, `velocity`), `version`,
+    optional `build_id`, safe `server_jarfile` (default `server.jar`), optional
+    `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.papermc.install`.
+  - `services.pterodactyl.wings.status` and
+    `services.pterodactyl.wings.logs` are read-only SSH service diagnostics for
+    `wings.service`; logs accept `lines` (1–500).
+  - `services.pterodactyl.wings.restart` restarts `wings.service` and is
+    `approval_required=True` because it can interrupt node management.
+  Target models for all six: `dcim.device` and
+  `virtualization.virtualmachine`.
 - DNS host procedures are seeded by migration `0027`. Two procedures manage the
   PowerDNS + dns-api Docker Compose stack on standalone DNS hosts:
   - `os.linux.dns_host.deploy_dns_stack` (write, 180s, approval required):

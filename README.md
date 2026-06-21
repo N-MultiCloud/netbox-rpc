@@ -120,6 +120,28 @@ schema in `nms-backend`. Disallowed commands raise
 `approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
 (in `nms-backend`).
 
+### Minecraft stack SSH procedures
+
+Migration `0029` adds structured SSH fallback procedures for game nodes and
+Pterodactyl Wings server volumes. Target models are `dcim.device` and
+`virtualization.virtualmachine`; SSH credentials are resolved through the usual
+DeviceService path or explicit `rpc_ssh_*` overrides. These procedures do not
+accept raw shell commands.
+
+| Procedure / handler | Effect | Purpose |
+|---|---|---|
+| `services.minecraft.plugin.install_url` | write | Install a validated public http(s) plugin `.jar` into `/plugins` for a server UUID |
+| `services.minecraft.viaversion.install` | write | Install ViaVersion, ViaBackwards, and/or ViaRewind from fixed project mappings |
+| `services.minecraft.papermc.install` | write | Install a PaperMC, Folia, or Velocity server JAR resolved from the PaperMC Fill API |
+| `services.pterodactyl.wings.status` | read | Read `wings.service` status |
+| `services.pterodactyl.wings.logs` | read | Tail `wings.service` journal output |
+| `services.pterodactyl.wings.restart` | write, approval required | Restart `wings.service` when an operator explicitly approves node-management disruption |
+
+The NetBox normalizer validates server UUIDs, safe `.jar` filenames, ViaVersion
+presets/plugin enums, PaperMC project/version/build fields, and public URL
+shape before an execution is queued. URL values are fingerprinted in the audit
+hash rather than repeated in the command fingerprint.
+
 ### `packer.vm.*` — netbox-packer post-build verification
 
 Four **read-only** procedures (`effect="read"`, `approval_required=False`,
