@@ -259,7 +259,54 @@ class RPCExecutionJob(JobRunner):
         _event(execution, "error", "failed", message, {"code": code})
 
 
+# Defaults that reproduce the historical execution behaviour. When a procedure
+# leaves these untouched, no driver/parser keys are injected into normalized
+# params, keeping legacy payloads byte-for-byte identical.
+_DEFAULT_TRANSPORT_DRIVER = "asyncssh"
+_DEFAULT_OUTPUT_PARSER = "none"
+
+
 def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
+    """Build normalized params for an execution and inject driver/parser routing.
+
+    The per-procedure dispatch lives in ``_dispatch_normalize_execution_params``;
+    this wrapper centrally threads the procedure's ``transport_driver`` /
+    ``output_parser`` / ``output_schema`` selection into the normalized payload
+    (and its command fingerprint) so the nms-backend execution pipeline can read
+    them from ``normalized_params``. Non-default values only are injected, so
+    legacy AsyncSSH/raw-output procedures keep a byte-for-byte identical payload.
+    """
+    normalized = _dispatch_normalize_execution_params(execution)
+    _apply_driver_pipeline_overrides(execution, normalized)
+    return normalized
+
+
+def _apply_driver_pipeline_overrides(
+    execution: RPCExecution, normalized: dict[str, Any]
+) -> None:
+    procedure = execution.procedure
+    fingerprint = normalized.get("command_fingerprint")
+
+    driver = str(getattr(procedure, "transport_driver", "") or "").strip()
+    if driver and driver != _DEFAULT_TRANSPORT_DRIVER:
+        normalized["transport_driver"] = driver
+        if isinstance(fingerprint, dict):
+            fingerprint["transport_driver"] = driver
+
+    parser = str(getattr(procedure, "output_parser", "") or "").strip()
+    if parser and parser != _DEFAULT_OUTPUT_PARSER:
+        normalized["output_parser"] = parser
+        if isinstance(fingerprint, dict):
+            fingerprint["output_parser"] = parser
+
+    schema = getattr(procedure, "output_schema", None)
+    if schema:
+        normalized["output_schema"] = schema
+        if isinstance(fingerprint, dict):
+            fingerprint["output_schema_sha256"] = _hash_json(schema)
+
+
+def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     procedure_name = execution.procedure.name
     target = execution.target_display
 

@@ -30,6 +30,40 @@ def test_procedure_catalog_stores_handler_ids_not_commands() -> None:
     assert "os.linux_ubuntu_24.restart_service" in constants
 
 
+def test_procedure_exposes_driver_and_parser_selection_fields() -> None:
+    models = read("netbox_rpc/models.py")
+    # Driver/parser selection is explicit data on the procedure model, never
+    # encoded inside handler_id.
+    assert "transport_driver = models.CharField" in models
+    assert "output_parser = models.CharField" in models
+    assert "output_schema = models.JSONField" in models
+    for driver in ("asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
+        assert f'"{driver}"' in models
+    for parser in ("none", "auto", "json", "xml", "jc", "textfsm", "ttp", "genie", "regex"):
+        assert f'"{parser}"' in models
+
+
+def test_driver_fields_migration_is_additive_and_depends_on_previous() -> None:
+    migration = read("netbox_rpc/migrations/0030_rpcprocedure_driver_fields.py")
+    assert '"0029_seed_minecraft_stack_procedures"' in migration
+    assert "AddField" in migration
+    assert "transport_driver" in migration
+    assert "output_parser" in migration
+    assert "output_schema" in migration
+    # AsyncSSH + raw-output defaults preserve legacy behaviour.
+    assert 'default="asyncssh"' in migration
+    assert 'default="none"' in migration
+
+
+def test_normalizer_centrally_threads_driver_selection() -> None:
+    jobs = read("netbox_rpc/jobs.py")
+    # The driver/parser routing is injected once in a wrapper, not per branch.
+    assert "def _apply_driver_pipeline_overrides" in jobs
+    assert "def _dispatch_normalize_execution_params" in jobs
+    assert '_DEFAULT_TRANSPORT_DRIVER = "asyncssh"' in jobs
+    assert '_DEFAULT_OUTPUT_PARSER = "none"' in jobs
+
+
 def test_systemd_procedure_catalog_names_are_seeded() -> None:
     constants = read("netbox_rpc/constants.py")
     assert "SYSTEMD_PROCEDURES" in constants
