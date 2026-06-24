@@ -75,6 +75,19 @@ PTERODACTYL_ARTISAN = "services.pterodactyl.artisan"
 PTERODACTYL_ARTISAN_HANDLER = "services.pterodactyl.artisan"
 PTERODACTYL_CONTAINER_LOGS = "services.pterodactyl.container_logs"
 PTERODACTYL_CONTAINER_LOGS_HANDLER = "services.pterodactyl.container_logs"
+PTERODACTYL_WINGS_STATUS = "services.pterodactyl.wings.status"
+PTERODACTYL_WINGS_STATUS_HANDLER = "services.pterodactyl.wings.status"
+PTERODACTYL_WINGS_LOGS = "services.pterodactyl.wings.logs"
+PTERODACTYL_WINGS_LOGS_HANDLER = "services.pterodactyl.wings.logs"
+PTERODACTYL_WINGS_RESTART = "services.pterodactyl.wings.restart"
+PTERODACTYL_WINGS_RESTART_HANDLER = "services.pterodactyl.wings.restart"
+
+MINECRAFT_PLUGIN_INSTALL_URL = "services.minecraft.plugin.install_url"
+MINECRAFT_PLUGIN_INSTALL_URL_HANDLER = "services.minecraft.plugin.install_url"
+MINECRAFT_VIAVERSION_INSTALL = "services.minecraft.viaversion.install"
+MINECRAFT_VIAVERSION_INSTALL_HANDLER = "services.minecraft.viaversion.install"
+MINECRAFT_PAPERMC_INSTALL = "services.minecraft.papermc.install"
+MINECRAFT_PAPERMC_INSTALL_HANDLER = "services.minecraft.papermc.install"
 
 DNS_HOST_DEPLOY_PROCEDURE = "os.linux.dns_host.deploy_dns_stack"
 DNS_HOST_STATUS_PROCEDURE = "os.linux.dns_host.status_dns_stack"
@@ -84,9 +97,7 @@ DNS_HOST_STATUS_PROCEDURE = "os.linux.dns_host.status_dns_stack"
 LINUX_INSTALL_SSH_KEY = "os.linux.ubuntu.24.install_ssh_key"
 LINUX_INSTALL_SSH_KEY_HANDLER = "os.linux_ubuntu_24.install_ssh_key"
 LINUX_INSTALL_QEMU_GUEST_AGENT = "os.linux.ubuntu.24.install_qemu_guest_agent"
-LINUX_INSTALL_QEMU_GUEST_AGENT_HANDLER = (
-    "os.linux_ubuntu_24.install_qemu_guest_agent"
-)
+LINUX_INSTALL_QEMU_GUEST_AGENT_HANDLER = "os.linux_ubuntu_24.install_qemu_guest_agent"
 LINUX_INSTALL_ZABBIX_AGENT2 = "os.linux.ubuntu.24.install_zabbix_agent2"
 LINUX_INSTALL_ZABBIX_AGENT2_HANDLER = "os.linux_ubuntu_24.install_zabbix_agent2"
 
@@ -198,6 +209,208 @@ _RPC_SSH_OVERRIDE_PROPERTIES = {
         "description": "Optional strict host-key checking override consumed by nms-backend.",
     },
 }
+
+_MINECRAFT_SERVER_UUID = {
+    "type": "string",
+    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    "description": "Pterodactyl server UUID; used to locate the Wings volume.",
+}
+
+_MINECRAFT_JAR_FILENAME = {
+    "type": "string",
+    "minLength": 5,
+    "maxLength": 128,
+    "pattern": "^[A-Za-z0-9._-]+\\.jar$",
+    "description": "Safe JAR filename. Path separators and traversal are not allowed.",
+}
+
+_MINECRAFT_BOOLEAN_RESTART = {
+    "type": "boolean",
+    "default": False,
+    "description": "Restart the affected server or service after the install.",
+}
+
+_MINECRAFT_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "server_uuid": {"type": "string"},
+        "output": {"type": "string"},
+        "command_log": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+_MINECRAFT_PLUGIN_INSTALL_URL_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["server_uuid", "source_url", "filename"],
+    "additionalProperties": False,
+    "properties": {
+        "server_uuid": _MINECRAFT_SERVER_UUID,
+        "source_url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^https?://",
+            "description": "Public http(s) URL for a plugin JAR.",
+        },
+        "filename": _MINECRAFT_JAR_FILENAME,
+        "restart": _MINECRAFT_BOOLEAN_RESTART,
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+    },
+}
+
+_MINECRAFT_VIAVERSION_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["server_uuid"],
+    "additionalProperties": False,
+    "properties": {
+        "server_uuid": _MINECRAFT_SERVER_UUID,
+        "preset": {
+            "type": "string",
+            "enum": ["minimal", "standard", "full"],
+            "default": "standard",
+            "description": "ViaVersion install preset.",
+        },
+        "plugins": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "enum": ["viaversion", "viabackwards", "viarewind"],
+            },
+            "description": "Explicit ViaVersion-family plugin set; overrides preset.",
+        },
+        "restart": _MINECRAFT_BOOLEAN_RESTART,
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+    },
+}
+
+_MINECRAFT_PAPERMC_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["server_uuid", "project", "version"],
+    "additionalProperties": False,
+    "properties": {
+        "server_uuid": _MINECRAFT_SERVER_UUID,
+        "project": {
+            "type": "string",
+            "enum": ["paper", "folia", "velocity"],
+            "description": "PaperMC Fill project.",
+        },
+        "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._+-]+$",
+            "description": "Minecraft/PaperMC version identifier.",
+        },
+        "build_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional exact PaperMC build id; omitted means latest stable.",
+        },
+        "server_jarfile": {
+            **_MINECRAFT_JAR_FILENAME,
+            "default": "server.jar",
+            "description": "Server root JAR filename.",
+        },
+        "restart": _MINECRAFT_BOOLEAN_RESTART,
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+    },
+}
+
+_PTERODACTYL_WINGS_SERVICE_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": _RPC_SSH_OVERRIDE_PROPERTIES,
+}
+
+_PTERODACTYL_WINGS_LOGS_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100,
+        },
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+    },
+}
+
+MINECRAFT_STACK_PROCEDURES = (
+    {
+        "name": MINECRAFT_PLUGIN_INSTALL_URL,
+        "handler_id": MINECRAFT_PLUGIN_INSTALL_URL_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 180,
+        "approval_required": False,
+        "description": "Install a plugin JAR into a Pterodactyl Wings server volume from a validated URL over SSH.",
+        "params_schema": _MINECRAFT_PLUGIN_INSTALL_URL_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+    {
+        "name": MINECRAFT_VIAVERSION_INSTALL,
+        "handler_id": MINECRAFT_VIAVERSION_INSTALL_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 240,
+        "approval_required": False,
+        "description": "Install ViaVersion, ViaBackwards, and/or ViaRewind into a Wings server volume over SSH.",
+        "params_schema": _MINECRAFT_VIAVERSION_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+    {
+        "name": MINECRAFT_PAPERMC_INSTALL,
+        "handler_id": MINECRAFT_PAPERMC_INSTALL_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 240,
+        "approval_required": False,
+        "description": "Install a PaperMC, Folia, or Velocity server JAR into a Wings server volume over SSH.",
+        "params_schema": _MINECRAFT_PAPERMC_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+    {
+        "name": PTERODACTYL_WINGS_STATUS,
+        "handler_id": PTERODACTYL_WINGS_STATUS_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Read Pterodactyl Wings service status over SSH.",
+        "params_schema": _PTERODACTYL_WINGS_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+    {
+        "name": PTERODACTYL_WINGS_LOGS,
+        "handler_id": PTERODACTYL_WINGS_LOGS_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "read",
+        "timeout_seconds": 30,
+        "approval_required": False,
+        "description": "Fetch recent Pterodactyl Wings journal logs over SSH.",
+        "params_schema": _PTERODACTYL_WINGS_LOGS_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+    {
+        "name": PTERODACTYL_WINGS_RESTART,
+        "handler_id": PTERODACTYL_WINGS_RESTART_HANDLER,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 60,
+        "approval_required": True,
+        "description": "Restart Pterodactyl Wings over SSH. This can interrupt game server management.",
+        "params_schema": _PTERODACTYL_WINGS_SERVICE_PARAMS_SCHEMA,
+        "result_schema": _MINECRAFT_RESULT_SCHEMA,
+    },
+)
 
 _LINUX_AGENT_BASE_PARAMS_SCHEMA = {
     "type": "object",

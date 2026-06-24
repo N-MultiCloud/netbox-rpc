@@ -120,6 +120,34 @@ schema in `nms-backend`. Disallowed commands raise
 `approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
 (in `nms-backend`).
 
+### Minecraft stack SSH procedures
+
+Migration `0029` adds structured SSH fallback procedures for game nodes and
+Pterodactyl Wings server volumes. Target models are `dcim.device` and
+`virtualization.virtualmachine`; SSH credentials are resolved through the usual
+DeviceService path or explicit `rpc_ssh_*` overrides. These procedures do not
+accept raw shell commands.
+
+| Procedure / handler | Effect | Purpose |
+|---|---|---|
+| `services.minecraft.plugin.install_url` | write | Install a validated public http(s) plugin `.jar` into `/plugins` for a server UUID |
+| `services.minecraft.viaversion.install` | write | Install ViaVersion, ViaBackwards, and/or ViaRewind from fixed project mappings |
+| `services.minecraft.papermc.install` | write | Install a PaperMC, Folia, or Velocity server JAR resolved from the PaperMC Fill API |
+| `services.pterodactyl.wings.status` | read | Read `wings.service` status |
+| `services.pterodactyl.wings.logs` | read | Tail `wings.service` journal output |
+| `services.pterodactyl.wings.restart` | write, approval required | Restart `wings.service` when an operator explicitly approves node-management disruption |
+
+The NetBox normalizer validates server UUIDs, safe `.jar` filenames, ViaVersion
+presets/plugin enums, PaperMC project/version/build fields, and public URL
+shape before an execution is queued. URL values are fingerprinted in the audit
+hash rather than repeated in the command fingerprint.
+
+Detailed operator and maintainer guardrails live in
+[`docs/MINECRAFT_STACK_RPC.md`](docs/MINECRAFT_STACK_RPC.md). Keep that guide,
+`AGENTS.md`, the migration seed data, and the static contract tests aligned any
+time a Minecraft procedure schema, normalizer, handler ID, or approval boundary
+changes.
+
 ### `packer.vm.*` — netbox-packer post-build verification
 
 Four **read-only** procedures (`effect="read"`, `approval_required=False`,
@@ -174,7 +202,7 @@ Client / nms UI
   -> netbox-rpc API
   -> NetBox RQ job
   -> nms-backend /rpc/executions/{execution_id}/run
-  -> AsyncSSH or Scrapli executor
+  -> transport driver (AsyncSSH / Scrapli / Netmiko / Paramiko / NAPALM)
   -> network device or Linux host
 ```
 
@@ -194,6 +222,25 @@ libraries. It must execute only known handler IDs such as
 `os.linux_ubuntu_24.restart_service` and
 `os.linux.dns_host.deploy_dns_stack` and
 `os.linux_proxmox.qemu_vm_lifecycle`.
+
+### Transport driver & output parser selection
+
+Each `RPCProcedure` declares a pluggable **transport driver** and **output
+parser** for the nms-backend execution pipeline as explicit model fields (never
+encoded in `handler_id`):
+
+- `transport_driver`: `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
+  `napalm`. `asyncssh` preserves the historical SSH behaviour.
+- `output_parser`: `none` (default, raw), `auto` (native JSON/XML → jc →
+  TextFSM → TTP → Genie → regex fallback chain), or a pinned backend (`json`,
+  `xml`, `jc`, `textfsm`, `ttp`, `genie`, `regex`).
+- `output_schema`: optional JSON parser hints / internal target schema.
+
+These selections are threaded into `normalized_params` centrally — only when
+non-default, so existing procedures are unaffected — and the cross-repo request
+body is unchanged. The transport → parse → normalize → validate → store pipeline
+itself lives in `nms-backend automation/rpc/`; this plugin only chooses which
+driver and parser a procedure uses.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with
 `service_type="ssh"`. Those rows provide the management host, port, linked

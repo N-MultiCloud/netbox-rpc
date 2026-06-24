@@ -207,6 +207,39 @@ be used autonomously on destructive procedures.
     (1–500, default 100).
     Handler: `services.pterodactyl.container_logs`.
   Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- Minecraft stack procedures are seeded by migration `0029`. They provide
+  structured SSH fallback operations for game nodes and server volumes; none
+  accepts arbitrary shell command text.
+  See `docs/MINECRAFT_STACK_RPC.md` for the full operator/maintainer guardrail
+  contract. Any change to procedure names, handler IDs, JSON schemas,
+  normalizers, approval flags, URL rules, filename rules, or SSH override
+  handling must update that guide and the static contract tests in the same
+  branch.
+  - `services.minecraft.plugin.install_url` (write, 180s, no approval):
+    downloads a validated public http(s) `.jar` URL into
+    `/var/lib/pterodactyl/volumes/<server_uuid>/plugins/<filename>` on the
+    Wings node. Required `server_uuid`, `source_url`, and safe `.jar`
+    `filename`; optional `restart` and `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.plugin.install_url`.
+  - `services.minecraft.viaversion.install` (write, 240s, no approval):
+    installs ViaVersion-family plugins from fixed ViaVersion GitHub project
+    mappings. Accepts `server_uuid`, either `preset` (`minimal`, `standard`,
+    `full`) or explicit `plugins` (`viaversion`, `viabackwards`, `viarewind`),
+    optional `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.viaversion.install`.
+  - `services.minecraft.papermc.install` (write, 240s, no approval):
+    installs a PaperMC Fill API server JAR into the server root. Accepts
+    `server_uuid`, `project` (`paper`, `folia`, `velocity`), `version`,
+    optional `build_id`, safe `server_jarfile` (default `server.jar`), optional
+    `restart`, and optional `rpc_ssh_*` overrides. Handler:
+    `services.minecraft.papermc.install`.
+  - `services.pterodactyl.wings.status` and
+    `services.pterodactyl.wings.logs` are read-only SSH service diagnostics for
+    `wings.service`; logs accept `lines` (1–500).
+  - `services.pterodactyl.wings.restart` restarts `wings.service` and is
+    `approval_required=True` because it can interrupt node management.
+  Target models for all six: `dcim.device` and
+  `virtualization.virtualmachine`.
 - DNS host procedures are seeded by migration `0027`. Two procedures manage the
   PowerDNS + dns-api Docker Compose stack on standalone DNS hosts:
   - `os.linux.dns_host.deploy_dns_stack` (write, 180s, approval required):
@@ -292,8 +325,33 @@ plugin or a sibling plugin's migration) but has no normalizer, executions will
 fail at runtime with `RPC_PROCEDURE_NOT_NORMALIZABLE`.
 
 - Add the procedure name constant to `constants.py`.
-- Add the normalizer branch to `normalize_execution_params()` in `jobs.py`.
+- Add the normalizer branch to `_dispatch_normalize_execution_params()` in
+  `jobs.py` (the public `normalize_execution_params()` wraps it).
 - Update this file and `README.md` to document the new procedure.
+
+## Transport Driver & Output Parser Selection
+
+`RPCProcedure` carries explicit pluggable-driver routing for the nms-backend
+execution pipeline. **Never encode the driver inside `handler_id`** — it is its
+own model data:
+
+- `transport_driver` — `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
+  `napalm`. AsyncSSH reproduces the legacy single-/multi-command SSH behaviour.
+- `output_parser` — `none` (default, raw), `auto` (native JSON/XML → jc →
+  TextFSM → TTP → Genie → regex chain), or a pinned backend (`json`, `xml`,
+  `jc`, `textfsm`, `ttp`, `genie`, `regex`).
+- `output_schema` — optional JSON parser hints / target internal schema
+  (e.g. a TextFSM template ref, jc parser name, regex field map).
+
+`normalize_execution_params()` is a thin wrapper: it calls the per-procedure
+`_dispatch_normalize_execution_params()` and then
+`_apply_driver_pipeline_overrides()` injects these fields **once, centrally**
+into `normalized_params` (and `command_fingerprint`). Injection happens **only
+for non-default values**, so legacy AsyncSSH/raw-output procedures keep a
+byte-for-byte identical normalized payload (the cross-repo POST body is still
+`{}`; nms-backend reads the fields from `normalized_params`). The actual
+transport/parse/normalize/validate/store pipeline lives in nms-backend
+`automation/rpc/` — this plugin only selects which driver/parser a procedure uses.
 
 ## API Validation Guards
 

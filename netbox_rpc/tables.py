@@ -9,6 +9,8 @@ class RPCProcedureTable(NetBoxTable):
     enabled = columns.BooleanColumn()
     effect = columns.ChoiceFieldColumn()
     approval_required = columns.BooleanColumn()
+    transport_driver = columns.ChoiceFieldColumn()
+    output_parser = columns.ChoiceFieldColumn()
 
     class Meta(NetBoxTable.Meta):
         model = RPCProcedure
@@ -22,6 +24,8 @@ class RPCProcedureTable(NetBoxTable):
             "effect",
             "timeout_seconds",
             "approval_required",
+            "transport_driver",
+            "output_parser",
             "description",
             "tags",
             "actions",

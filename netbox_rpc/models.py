@@ -36,6 +36,48 @@ class RPCProcedure(NetBoxModel):
         (EFFECT_DESTRUCTIVE, "Destructive"),
     )
 
+    # Transport driver selected for the execution pipeline on nms-backend. This is
+    # explicit data on the procedure (never encoded inside handler_id). "asyncssh"
+    # is the historical default and reproduces the legacy single-/multi-command SSH
+    # behaviour; the other drivers opt into the pluggable driver layer.
+    TRANSPORT_ASYNCSSH = "asyncssh"
+    TRANSPORT_SCRAPLI = "scrapli"
+    TRANSPORT_NETMIKO = "netmiko"
+    TRANSPORT_PARAMIKO = "paramiko"
+    TRANSPORT_NAPALM = "napalm"
+    TRANSPORT_DRIVER_CHOICES = (
+        (TRANSPORT_ASYNCSSH, "AsyncSSH (default)"),
+        (TRANSPORT_SCRAPLI, "Scrapli"),
+        (TRANSPORT_NETMIKO, "Netmiko"),
+        (TRANSPORT_PARAMIKO, "Paramiko"),
+        (TRANSPORT_NAPALM, "NAPALM"),
+    )
+
+    # Output parser the nms-backend pipeline applies to raw command output when the
+    # driver did not already return structured data. "none" leaves output untouched
+    # (legacy behaviour); "auto" runs the native-JSON/XML -> jc -> TextFSM -> TTP ->
+    # Genie -> regex chain; the explicit values pin a single parser backend.
+    PARSER_NONE = "none"
+    PARSER_AUTO = "auto"
+    PARSER_JSON = "json"
+    PARSER_XML = "xml"
+    PARSER_JC = "jc"
+    PARSER_TEXTFSM = "textfsm"
+    PARSER_TTP = "ttp"
+    PARSER_GENIE = "genie"
+    PARSER_REGEX = "regex"
+    OUTPUT_PARSER_CHOICES = (
+        (PARSER_NONE, "None (raw output)"),
+        (PARSER_AUTO, "Auto (native JSON/XML, then jc/TextFSM/TTP/Genie/regex)"),
+        (PARSER_JSON, "Native JSON"),
+        (PARSER_XML, "Native XML"),
+        (PARSER_JC, "jc"),
+        (PARSER_TEXTFSM, "TextFSM"),
+        (PARSER_TTP, "TTP"),
+        (PARSER_GENIE, "Genie"),
+        (PARSER_REGEX, "Regex"),
+    )
+
     name = models.CharField(max_length=255, unique=True)
     handler_id = models.CharField(max_length=255)
     version = models.PositiveIntegerField(default=1)
@@ -50,6 +92,34 @@ class RPCProcedure(NetBoxModel):
     approval_required = models.BooleanField(default=False)
     params_schema = models.JSONField(default=dict, blank=True)
     result_schema = models.JSONField(default=dict, blank=True)
+    transport_driver = models.CharField(
+        max_length=20,
+        choices=TRANSPORT_DRIVER_CHOICES,
+        default=TRANSPORT_ASYNCSSH,
+        help_text=(
+            "Transport driver the nms-backend execution pipeline uses for this "
+            "procedure. AsyncSSH preserves the legacy behaviour."
+        ),
+    )
+    output_parser = models.CharField(
+        max_length=20,
+        choices=OUTPUT_PARSER_CHOICES,
+        default=PARSER_NONE,
+        help_text=(
+            "Parser applied to raw command output when the driver returns "
+            "unstructured text. 'none' keeps raw output; 'auto' runs the parser "
+            "chain (native JSON/XML first, then jc/TextFSM/TTP/Genie/regex)."
+        ),
+    )
+    output_schema = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Optional parser hints / target internal schema (e.g. a TextFSM "
+            "template reference, jc parser name, or regex field map) consumed by "
+            "the nms-backend output pipeline."
+        ),
+    )
     description = models.CharField(max_length=255, blank=True)
     comments = models.TextField(blank=True)
 
