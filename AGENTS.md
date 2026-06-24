@@ -325,8 +325,33 @@ plugin or a sibling plugin's migration) but has no normalizer, executions will
 fail at runtime with `RPC_PROCEDURE_NOT_NORMALIZABLE`.
 
 - Add the procedure name constant to `constants.py`.
-- Add the normalizer branch to `normalize_execution_params()` in `jobs.py`.
+- Add the normalizer branch to `_dispatch_normalize_execution_params()` in
+  `jobs.py` (the public `normalize_execution_params()` wraps it).
 - Update this file and `README.md` to document the new procedure.
+
+## Transport Driver & Output Parser Selection
+
+`RPCProcedure` carries explicit pluggable-driver routing for the nms-backend
+execution pipeline. **Never encode the driver inside `handler_id`** — it is its
+own model data:
+
+- `transport_driver` — `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
+  `napalm`. AsyncSSH reproduces the legacy single-/multi-command SSH behaviour.
+- `output_parser` — `none` (default, raw), `auto` (native JSON/XML → jc →
+  TextFSM → TTP → Genie → regex chain), or a pinned backend (`json`, `xml`,
+  `jc`, `textfsm`, `ttp`, `genie`, `regex`).
+- `output_schema` — optional JSON parser hints / target internal schema
+  (e.g. a TextFSM template ref, jc parser name, regex field map).
+
+`normalize_execution_params()` is a thin wrapper: it calls the per-procedure
+`_dispatch_normalize_execution_params()` and then
+`_apply_driver_pipeline_overrides()` injects these fields **once, centrally**
+into `normalized_params` (and `command_fingerprint`). Injection happens **only
+for non-default values**, so legacy AsyncSSH/raw-output procedures keep a
+byte-for-byte identical normalized payload (the cross-repo POST body is still
+`{}`; nms-backend reads the fields from `normalized_params`). The actual
+transport/parse/normalize/validate/store pipeline lives in nms-backend
+`automation/rpc/` — this plugin only selects which driver/parser a procedure uses.
 
 ## API Validation Guards
 

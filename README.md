@@ -202,7 +202,7 @@ Client / nms UI
   -> netbox-rpc API
   -> NetBox RQ job
   -> nms-backend /rpc/executions/{execution_id}/run
-  -> AsyncSSH or Scrapli executor
+  -> transport driver (AsyncSSH / Scrapli / Netmiko / Paramiko / NAPALM)
   -> network device or Linux host
 ```
 
@@ -222,6 +222,25 @@ libraries. It must execute only known handler IDs such as
 `os.linux_ubuntu_24.restart_service` and
 `os.linux.dns_host.deploy_dns_stack` and
 `os.linux_proxmox.qemu_vm_lifecycle`.
+
+### Transport driver & output parser selection
+
+Each `RPCProcedure` declares a pluggable **transport driver** and **output
+parser** for the nms-backend execution pipeline as explicit model fields (never
+encoded in `handler_id`):
+
+- `transport_driver`: `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
+  `napalm`. `asyncssh` preserves the historical SSH behaviour.
+- `output_parser`: `none` (default, raw), `auto` (native JSON/XML → jc →
+  TextFSM → TTP → Genie → regex fallback chain), or a pinned backend (`json`,
+  `xml`, `jc`, `textfsm`, `ttp`, `genie`, `regex`).
+- `output_schema`: optional JSON parser hints / internal target schema.
+
+These selections are threaded into `normalized_params` centrally — only when
+non-default, so existing procedures are unaffected — and the cross-repo request
+body is unchanged. The transport → parse → normalize → validate → store pipeline
+itself lives in `nms-backend automation/rpc/`; this plugin only chooses which
+driver and parser a procedure uses.
 
 `netbox-nms` owns SSH connection material through `DeviceService` rows with
 `service_type="ssh"`. Those rows provide the management host, port, linked

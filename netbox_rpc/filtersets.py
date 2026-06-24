@@ -8,10 +8,20 @@ class RPCProcedureFilterSet(NetBoxModelFilterSet):
     enabled = django_filters.BooleanFilter()
     approval_required = django_filters.BooleanFilter()
     effect = django_filters.CharFilter()
+    transport_driver = django_filters.CharFilter()
+    output_parser = django_filters.CharFilter()
 
     class Meta:
         model = RPCProcedure
-        fields = ("name", "handler_id", "enabled", "effect", "approval_required")
+        fields = (
+            "name",
+            "handler_id",
+            "enabled",
+            "effect",
+            "approval_required",
+            "transport_driver",
+            "output_parser",
+        )
 
 
 class RPCLinuxServiceAllowlistFilterSet(NetBoxModelFilterSet):
