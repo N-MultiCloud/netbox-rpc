@@ -370,6 +370,15 @@ byte-for-byte identical normalized payload (the cross-repo POST body is still
 transport/parse/normalize/validate/store pipeline lives in nms-backend
 `automation/rpc/` — this plugin only selects which driver/parser a procedure uses.
 
+### Transport-driver & output-parser selection
+
+Use [`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md)
+as the authoring guide for driver choice, parser choice, production dependency
+availability, inline parser templates, security boundaries, and deploy ordering.
+The current read-only exemplars are `os.linux.proxmox.pvesh_json`,
+`os.linux.collect_facts`, and
+`network.device.dell_os10.s5232f_on.show_version_structured`.
+
 ## API Validation Guards
 
 `RPCExecutionViewSet.create()` enforces three guards before enqueueing:
