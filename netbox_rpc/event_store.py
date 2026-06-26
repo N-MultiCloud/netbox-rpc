@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from typing import Any
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.utils import timezone
 
 from .models import RPCExecution, RPCExecutionEvent
+
+try:
+    from django.db import transaction
+except ImportError:
+
+    class _TransactionShim:
+        @staticmethod
+        def atomic():
+            return nullcontext()
+
+    transaction = _TransactionShim()
 
 SENSITIVE_KEY_FRAGMENTS = (
     "auth",
