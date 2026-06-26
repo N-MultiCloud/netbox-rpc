@@ -26,15 +26,18 @@ from .constants import (
     DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION,
     DELL_OS10_S5232F_SET_VLAN_DESCRIPTION,
     DELL_OS10_S5232F_SHOW_VERSION,
+    DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED,
     DELL_OS10_S5232F_SHOW_VLT,
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
+    LINUX_COLLECT_FACTS,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
+    LINUX_PROXMOX_PVESH_JSON,
     LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
@@ -113,6 +116,7 @@ _DELL_OS10_TRUNK_VLANS_RE = re.compile(
 )
 _DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
 _DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
+_PVESH_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.\-]{1,128}$")
 _PTERODACTYL_CONTAINER_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
 _MINECRAFT_SERVER_UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -361,6 +365,12 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name == LINUX_PROXMOX_CONVERT_MELLANOX_NIC:
         return _normalize_convert_mellanox_nic_execution(execution, target)
 
+    if procedure_name == LINUX_PROXMOX_PVESH_JSON:
+        return _normalize_pvesh_json_execution(execution, target)
+
+    if procedure_name == LINUX_COLLECT_FACTS:
+        return _normalize_pipeline_fixed_execution(execution, target)
+
     if procedure_name in PACKER_PROCEDURE_NAMES:
         # Function-local import keeps the netbox-packer reference lazy: this
         # module imports packer_normalizer only when a packer.vm.* execution is
@@ -382,6 +392,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         DELL_OS10_S5232F_WRITE_MEMORY,
     }:
         return _normalize_dell_os10_simple_execution(execution, target)
+
+    if procedure_name == DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED:
+        return _normalize_pipeline_fixed_execution(execution, target)
 
     if procedure_name == DELL_OS10_S5232F_SET_INTERFACE_DESCRIPTION:
         params = execution.params or {}
@@ -1697,6 +1710,46 @@ def _normalize_dell_os10_simple_execution(
         "target": target,
         "command_fingerprint": {"handler_id": execution.procedure.handler_id},
     }
+    _copy_optional_credential_override(params, result)
+    return result
+
+
+def _normalize_pipeline_fixed_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    result: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {"handler_id": execution.procedure.handler_id},
+    }
+    _copy_optional_credential_override(params, result)
+    return result
+
+
+def _normalize_pvesh_json_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    params = execution.params or {}
+    pvesh_path = str(params.get("pvesh_path") or "").strip()
+    if not _PVESH_PATH_RE.fullmatch(pvesh_path):
+        raise RPCExecutionError(
+            "pvesh_path must match ^/[A-Za-z0-9/_.-]{1,128}$.",
+            code="RPC_PARAM_INVALID",
+        )
+    timeout = _optional_int_range(params, "timeout", 1, 600)
+    result: dict[str, Any] = {
+        "target": target,
+        "pvesh_path": pvesh_path,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "pvesh_path": pvesh_path,
+        },
+    }
+    if timeout is not None:
+        result["timeout"] = timeout
+        result["command_fingerprint"]["timeout"] = timeout
     _copy_optional_credential_override(params, result)
     return result
 

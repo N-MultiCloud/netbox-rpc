@@ -55,6 +55,76 @@ def test_driver_fields_migration_is_additive_and_depends_on_previous() -> None:
     assert 'default="none"' in migration
 
 
+def test_pipeline_exemplar_procedures_are_seeded_by_migration_0031() -> None:
+    constants = read("netbox_rpc/constants.py")
+    migration = read("netbox_rpc/migrations/0031_seed_pipeline_exemplar_procedures.py")
+
+    for constant_name in (
+        "LINUX_PROXMOX_PVESH_JSON",
+        "LINUX_PROXMOX_PVESH_JSON_HANDLER",
+        "LINUX_COLLECT_FACTS",
+        "LINUX_COLLECT_FACTS_HANDLER",
+        "DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED",
+        "DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED_HANDLER",
+    ):
+        assert constant_name in constants
+
+    for procedure, handler_id in (
+        ("os.linux.proxmox.pvesh_json", "os.linux.proxmox.pvesh_json"),
+        ("os.linux.collect_facts", "os.linux.collect_facts"),
+        (
+            "network.device.dell_os10.s5232f_on.show_version_structured",
+            "network.dell_os10_s5232f_on.show_version_structured",
+        ),
+    ):
+        assert procedure in constants
+        assert handler_id in constants
+        assert procedure in migration
+        assert handler_id in migration
+    assert '"effect": "read"' in migration
+    assert '"approval_required": False' in migration
+    assert '"enabled": True' in migration
+    assert '"target_models": _TARGET_MODELS' in migration
+    assert '"dcim.device"' in migration
+    assert "from netbox_rpc" not in migration
+
+
+def test_pipeline_exemplar_migration_declares_driver_parser_fields() -> None:
+    migration = read("netbox_rpc/migrations/0031_seed_pipeline_exemplar_procedures.py")
+
+    assert '"0030_rpcprocedure_driver_fields"' in migration
+    assert '"transport_driver": "asyncssh"' in migration
+    assert '"transport_driver": "scrapli"' in migration
+    for parser in (
+        '"output_parser": "json"',
+        '"output_parser": "jc"',
+        '"output_parser": "textfsm"',
+    ):
+        assert parser in migration
+    assert '"jc_parser": "uname"' in migration
+    assert '"textfsm_template": _DELL_OS10_SHOW_VERSION_TEXTFSM' in migration
+    assert "Value OS_VERSION" in migration
+    assert "commands" not in migration
+    assert "shell_command" not in migration
+    assert "raw_command" not in migration
+
+
+def test_transport_and_parsing_selection_docs_are_present() -> None:
+    guide = read("docs/transport-and-parsing-selection.md")
+    readme = read("README.md")
+    agents = read("AGENTS.md")
+    claude = read("CLAUDE.md")
+
+    assert "Transport-driver and output-parser selection" in guide
+    assert "Transport-driver decision matrix" in guide
+    assert "Output-parser decision ladder" in guide
+    assert "Production availability" in guide
+    assert "MUST NOT assemble, store, or accept free-text shell" in guide
+    assert "Deploy nms-backend first" in guide
+    for content in (readme, agents, claude):
+        assert "docs/transport-and-parsing-selection.md" in content
+
+
 def test_normalizer_centrally_threads_driver_selection() -> None:
     jobs = read("netbox_rpc/jobs.py")
     # The driver/parser routing is injected once in a wrapper, not per branch.

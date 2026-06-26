@@ -67,6 +67,12 @@ DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER = (
 DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER_HANDLER = (
     "network.dell_os10_s5232f_on.allow_third_party_transceiver"
 )
+DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED = (
+    "network.device.dell_os10.s5232f_on.show_version_structured"
+)
+DELL_OS10_S5232F_SHOW_VERSION_STRUCTURED_HANDLER = (
+    "network.dell_os10_s5232f_on.show_version_structured"
+)
 
 # Pterodactyl Panel management via docker-exec on the host. Seeded by migration 0016.
 PTERODACTYL_BOOTSTRAP_API_KEY = "services.pterodactyl.bootstrap_api_key"
@@ -100,6 +106,8 @@ LINUX_INSTALL_QEMU_GUEST_AGENT = "os.linux.ubuntu.24.install_qemu_guest_agent"
 LINUX_INSTALL_QEMU_GUEST_AGENT_HANDLER = "os.linux_ubuntu_24.install_qemu_guest_agent"
 LINUX_INSTALL_ZABBIX_AGENT2 = "os.linux.ubuntu.24.install_zabbix_agent2"
 LINUX_INSTALL_ZABBIX_AGENT2_HANDLER = "os.linux_ubuntu_24.install_zabbix_agent2"
+LINUX_COLLECT_FACTS = "os.linux.collect_facts"
+LINUX_COLLECT_FACTS_HANDLER = "os.linux.collect_facts"
 
 # Mellanox ConnectX-3 (mlx4) InfiniBand -> Ethernet conversion on a Proxmox host.
 # Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
@@ -110,6 +118,8 @@ LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = (
 )
 LINUX_PROXMOX_QEMU_VM_LIFECYCLE = "os.linux.proxmox.qemu_vm_lifecycle"
 LINUX_PROXMOX_QEMU_VM_LIFECYCLE_HANDLER = "os.linux_proxmox.qemu_vm_lifecycle"
+LINUX_PROXMOX_PVESH_JSON = "os.linux.proxmox.pvesh_json"
+LINUX_PROXMOX_PVESH_JSON_HANDLER = "os.linux.proxmox.pvesh_json"
 
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
