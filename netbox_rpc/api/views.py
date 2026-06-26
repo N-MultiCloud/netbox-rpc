@@ -5,7 +5,7 @@ from typing import Any
 import jsonschema
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
-from netbox.api.viewsets import NetBoxModelViewSet
+from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.decorators import action
@@ -129,7 +129,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         return Response(serializer.data)
 
 
-class RPCExecutionEventViewSet(NetBoxModelViewSet):
+class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet):
     queryset = models.RPCExecutionEvent.objects.select_related(
         "execution"
     ).prefetch_related("tags")

@@ -39,15 +39,22 @@ compatibility.
   `network.device.dell_os10.s5232f_on.write_memory` and
   `os.linux.ubuntu.24.restart_service`; handler IDs are internal adapters.
 - **CQRS**: execution creation is the command side; execution list/detail and
-  `/events` endpoints are query-side projections.
+  `/events` endpoints are query-side projections. API clients may create
+  executions, but execution event history is exposed read-only.
 - **Event Sourcing**: `netbox_rpc.event_store` appends ordered
-  `RPCExecutionEvent` rows and updates the projection. Job code must call the
-  event-store helpers instead of mutating status/result fields inline.
+  `RPCExecutionEvent` rows and updates the projection in the same transactional
+  helper. Job code must call the event-store helpers instead of mutating
+  status/result fields inline.
 
 Durable events include `ExecutionStarted`, `ParametersNormalized`,
 `ExecutionSucceeded`, `ExecutionFailed`, and backend driver events. Events must
-store redacted payloads, hashes, and references only; never store credentials,
-private keys, or unbounded raw command output.
+store redacted payloads, `payload_hash` values, and references only; never
+store credentials, private keys, or unbounded raw command output. Event append
+failures are fail-closed: if the per-execution sequence cannot be allocated,
+the command state transition raises instead of silently dropping audit history.
+The execution-event API is read-only, model saves reject normal update/delete,
+and the migration installs PostgreSQL triggers so the event ledger remains
+append-only below the ORM.
 
 ### `os.linux.dns_host.*`
 

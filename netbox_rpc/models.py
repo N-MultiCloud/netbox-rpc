@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 from django.conf import settings
@@ -297,6 +299,7 @@ class RPCExecutionEvent(NetBoxModel):
     event = models.CharField(max_length=100)
     message = models.TextField(blank=True)
     data = models.JSONField(default=dict, blank=True)
+    payload_hash = models.CharField(max_length=128, blank=True)
 
     class Meta:
         app_label = "netbox_rpc"
@@ -311,3 +314,30 @@ class RPCExecutionEvent(NetBoxModel):
 
     def __str__(self) -> str:
         return f"{self.execution_id}:{self.sequence}:{self.event}"
+
+    @staticmethod
+    def hash_payload(payload: object) -> str:
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs) -> None:
+        if not self._state.adding:
+            raise ValidationError("RPCExecutionEvent rows are append-only.")
+        if not self.payload_hash:
+            self.payload_hash = self.hash_payload(
+                {
+                    "level": self.level,
+                    "event": self.event,
+                    "message": self.message,
+                    "data": self.data or {},
+                }
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs) -> None:
+        raise ValidationError("RPCExecutionEvent rows are append-only.")
