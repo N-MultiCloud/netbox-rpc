@@ -3,6 +3,23 @@
 `netbox-rpc` owns procedure policy and audit state. It must never store or
 accept arbitrary SSH command text from API clients.
 
+## DDD / CQRS / Event Sourcing
+
+- Treat `RPCExecution` as the command aggregate and current-state read
+  projection.
+- All status/result/error transitions must go through
+  `netbox_rpc.event_store`; do not mutate execution state directly in jobs,
+  API views, or serializers.
+- `RPCExecutionEvent` is the append-only event stream. Preserve ordered
+  sequences per execution and keep collision handling in the event-store layer.
+- API create/enqueue paths are command-side behavior. Execution detail/list and
+  execution-events endpoints are query-side behavior.
+- Event data must be redacted and bounded. Store credential references and
+  hashes, not secrets or private key material.
+- Network device procedures should delegate protocol execution to the
+  `network.nms.nmulti.cloud` command/query gateway as drivers migrate out of
+  `nms-backend`.
+
 ## LLM Agent Safety Guardrails
 
 **STOP — read this section before creating any `RPCExecution` record.**
