@@ -27,6 +27,28 @@ The procedure catalog is intentionally narrow:
 
 Operators call named procedures, not arbitrary SSH commands.
 
+## DDD / CQRS / Event Sourcing
+
+`netbox-rpc` is the Remote Command Policy bounded context for the NMS stack.
+The core aggregate is `RPCExecution`: callers request a business procedure,
+the aggregate records each transition as an append-only execution event, and
+the mutable `RPCExecution` row is treated as a read projection for NetBox API
+compatibility.
+
+- **DDD**: procedure names use business language such as
+  `network.device.dell_os10.s5232f_on.write_memory` and
+  `os.linux.ubuntu.24.restart_service`; handler IDs are internal adapters.
+- **CQRS**: execution creation is the command side; execution list/detail and
+  `/events` endpoints are query-side projections.
+- **Event Sourcing**: `netbox_rpc.event_store` appends ordered
+  `RPCExecutionEvent` rows and updates the projection. Job code must call the
+  event-store helpers instead of mutating status/result fields inline.
+
+Durable events include `ExecutionStarted`, `ParametersNormalized`,
+`ExecutionSucceeded`, `ExecutionFailed`, and backend driver events. Events must
+store redacted payloads, hashes, and references only; never store credentials,
+private keys, or unbounded raw command output.
+
 ### `os.linux.dns_host.*`
 
 Two procedures manage the PowerDNS + dns-api Docker Compose stack on the
