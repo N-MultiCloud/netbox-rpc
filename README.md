@@ -11,15 +11,18 @@ The procedure catalog is intentionally narrow:
 - `network.device.huawei.olt.ma5800.r024.start_ont`
 - `network.device.dell_os10.s5232f_on.bootstrap_restconf`
 - `network.device.dell_os10.s5232f_on.show_version`
+- `network.device.dell_os10.s5232f_on.show_version_structured`
 - `network.device.dell_os10.s5232f_on.set_interface_description`
 - `network.device.dell_os10.s5232f_on.set_vlan_description`
 - `network.device.dell_os10.s5232f_on.write_memory`
+- `os.linux.collect_facts`
 - `os.linux.ubuntu.24.install_qemu_guest_agent`
 - `os.linux.ubuntu.24.install_zabbix_agent2`
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.dns_host.deploy_dns_stack`
 - `os.linux.dns_host.status_dns_stack`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
+- `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`
 - `services.pterodactyl.bootstrap_api_key`
 - `services.pterodactyl.artisan`
@@ -252,7 +255,7 @@ libraries. It must execute only known handler IDs such as
 `os.linux.dns_host.deploy_dns_stack` and
 `os.linux_proxmox.qemu_vm_lifecycle`.
 
-### Transport driver & output parser selection
+### Transport-driver & output-parser selection
 
 Each `RPCProcedure` declares a pluggable **transport driver** and **output
 parser** for the nms-backend execution pipeline as explicit model fields (never
@@ -279,6 +282,24 @@ Per-service Linux allowlist entries may set `ssh_credential_override` to a
 `netbox-nms.DeviceCredential`; when present, the normalized execution params
 include `rpc_ssh_credential_pk` so `nms-backend` fetches that credential by PK
 instead of resolving SSH credentials by device name.
+
+For the authoring decision matrix, production dependency table, inline template
+rules, and deploy ordering for new exemplars, see
+[`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md).
+
+### Pipeline exemplar procedures
+
+Migration `0031` seeds three read-only procedures that demonstrate non-default
+parser selection without accepting executable text:
+
+| Procedure | Handler | Driver | Parser |
+| --- | --- | --- | --- |
+| `os.linux.proxmox.pvesh_json` | `os.linux.proxmox.pvesh_json` | `asyncssh` | `json` |
+| `os.linux.collect_facts` | `os.linux.collect_facts` | `asyncssh` | `jc` |
+| `network.device.dell_os10.s5232f_on.show_version_structured` | `network.dell_os10_s5232f_on.show_version_structured` | `scrapli` | `textfsm` |
+
+Their normalizers emit only validated semantic params and credential references;
+nms-backend handlers build the runtime actions server-side.
 
 ## Procedure Naming
 

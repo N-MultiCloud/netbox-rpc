@@ -6,6 +6,13 @@ sync when architecture, commands, or workflows change.
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
 
+## Transport-driver & output-parser selection
+
+Use [`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md)
+for driver/parser authoring rules, production parser availability, inline
+template guidance, security boundaries, and deploy ordering for new pipeline
+exemplar procedures.
+
 > **LLM Agent Safety:** Before creating any `RPCExecution` record, read the
 > **LLM Agent Safety Guardrails** section in `AGENTS.md`. Destructive Proxmox
 > procedures (`os.linux.proxmox.convert_mellanox_nic_to_ethernet`) MUST NOT be
