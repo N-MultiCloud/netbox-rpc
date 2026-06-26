@@ -141,10 +141,10 @@ def test_create_marks_execution_failed_when_enqueue_fails() -> None:
     helper_end = views.index("\n\n    def create", helper_start)
     helper = views[helper_start:helper_end]
 
-    assert "execution.status = models.RPCExecution.STATUS_FAILED" in helper
-    assert 'execution.error_code = "RPC_ENQUEUE_FAILED"' in helper
+    assert "mark_execution_failed" in helper
+    assert '"RPC_ENQUEUE_FAILED"' in helper
     assert "Check RQ/Redis connectivity." in helper
-    assert 'update_fields=["status", "error_code", "error_message"]' in helper
+    assert '"ExecutionEnqueueFailed"' in helper
 
     create_start = views.index("def create")
     create_end = views.index("\n\n    @extend_schema", create_start)
@@ -193,8 +193,51 @@ def test_systemd_migration_does_not_import_live_constants() -> None:
 
 
 def test_event_creation_handles_integrity_error() -> None:
+    event_store = read("netbox_rpc/event_store.py")
+    assert "IntegrityError" in event_store
+    assert "sequence collision exhausted retries" in event_store
+    assert "Event dropped" not in event_store
+    assert "raise RPCEventStoreError" in event_store
+    assert "payload_hash" in event_store
+    assert "redact_event_data" in event_store
+    assert "transaction.atomic" in event_store
+
+
+def test_execution_event_api_is_read_only_and_hashed() -> None:
+    models = read("netbox_rpc/models.py")
+    migration = read("netbox_rpc/migrations/0031_rpcexecutionevent_payload_hash.py")
+    serializers = read("netbox_rpc/api/serializers.py")
+    views = read("netbox_rpc/api/views.py")
+
+    assert "payload_hash = models.CharField" in models
+    assert "def hash_payload" in models
+    assert "RPCExecutionEvent rows are append-only" in models
+    assert "not self._state.adding" in models
+    assert "payload_hash" in migration
+    assert "backfill_payload_hash" in migration
+    assert "netbox_rpc_rpcexecutionevent_no_update" in migration
+    assert "netbox_rpc_rpcexecutionevent_no_delete" in migration
+    assert '"payload_hash"' in serializers
+    assert "read_only_fields = fields" in serializers
+    assert "NetBoxReadOnlyModelViewSet" in views
+    assert "class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet)" in views
+
+
+def test_execution_state_changes_go_through_event_store() -> None:
     jobs = read("netbox_rpc/jobs.py")
-    assert "IntegrityError" in jobs
+    views = read("netbox_rpc/api/views.py")
+    event_store = read("netbox_rpc/event_store.py")
+
+    assert "from .event_store import" in jobs
+    assert "record_execution_normalized" in jobs
+    assert "record_backend_response" in jobs
+    assert "mark_execution_running" in jobs
+    assert "mark_execution_failed" in jobs
+    assert "from ..event_store import mark_execution_failed" in views
+    assert "def append_execution_event" in event_store
+    assert "def record_backend_response" in event_store
+    assert "ExecutionSucceeded" in event_store
+    assert "ExecutionFailed" in event_store
 
 
 def test_call_backend_handles_non_dict_json() -> None:

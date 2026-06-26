@@ -5,7 +5,7 @@ from typing import Any
 import jsonschema
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
-from netbox.api.viewsets import NetBoxModelViewSet
+from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.decorators import action
@@ -14,6 +14,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import models
+from ..event_store import mark_execution_failed
 from ..jobs import RPCExecutionJob
 from .serializers import (
     RPCLinuxServiceAllowlistSerializer,
@@ -63,12 +64,12 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
 
     @staticmethod
     def _mark_enqueue_failed(execution: models.RPCExecution) -> None:
-        execution.status = models.RPCExecution.STATUS_FAILED
-        execution.error_code = "RPC_ENQUEUE_FAILED"
-        execution.error_message = (
-            "Failed to enqueue RPC job. Check RQ/Redis connectivity."
+        mark_execution_failed(
+            execution,
+            "Failed to enqueue RPC job. Check RQ/Redis connectivity.",
+            "RPC_ENQUEUE_FAILED",
+            event_name="ExecutionEnqueueFailed",
         )
-        execution.save(update_fields=["status", "error_code", "error_message"])
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         if not request.user.has_perm("netbox_rpc.execute_rpcprocedure"):
@@ -128,7 +129,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         return Response(serializer.data)
 
 
-class RPCExecutionEventViewSet(NetBoxModelViewSet):
+class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet):
     queryset = models.RPCExecutionEvent.objects.select_related(
         "execution"
     ).prefetch_related("tags")

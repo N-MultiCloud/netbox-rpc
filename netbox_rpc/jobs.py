@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import requests
-from django.db import IntegrityError
-from django.utils import timezone
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
 
@@ -62,7 +60,14 @@ from .constants import (
     UBUNTU_24_STATUS_SERVICE,
     UBUNTU_24_STOP_SERVICE,
 )
-from .models import RPCLinuxServiceAllowlist, RPCExecution, RPCExecutionEvent
+from .event_store import (
+    append_execution_event,
+    mark_execution_failed,
+    mark_execution_running,
+    record_backend_response,
+    record_execution_normalized,
+)
+from .models import RPCLinuxServiceAllowlist, RPCExecution
 
 if TYPE_CHECKING:
     from netbox_nms.models import NMSBackend
@@ -201,16 +206,10 @@ class RPCExecutionJob(JobRunner):
 
         try:
             normalized = normalize_execution_params(execution)
-            execution.normalized_params = normalized
-            execution.resolved_command_hash = _hash_json(
-                normalized.get("command_fingerprint")
-            )
-            execution.save(update_fields=["normalized_params", "resolved_command_hash"])
-            _event(
+            record_execution_normalized(
                 execution,
-                "info",
-                "normalized",
-                "Execution parameters normalized by NetBox.",
+                normalized,
+                _hash_json(normalized.get("command_fingerprint")),
             )
 
             response = _call_backend(backend, execution)
@@ -243,20 +242,10 @@ class RPCExecutionJob(JobRunner):
         ).get(pk=pk)
 
     def _mark_running(self, execution: RPCExecution) -> None:
-        execution.status = RPCExecution.STATUS_RUNNING
-        execution.started_at = timezone.now()
-        execution.save(update_fields=["status", "started_at"])
-        _event(execution, "info", "started", "RPC execution started.")
+        mark_execution_running(execution)
 
     def _mark_failed(self, execution: RPCExecution, message: str, code: str) -> None:
-        execution.status = RPCExecution.STATUS_FAILED
-        execution.error_code = code
-        execution.error_message = message
-        execution.finished_at = timezone.now()
-        execution.save(
-            update_fields=["status", "error_code", "error_message", "finished_at"]
-        )
-        _event(execution, "error", "failed", message, {"code": code})
+        mark_execution_failed(execution, message, code)
 
 
 # Defaults that reproduce the historical execution behaviour. When a procedure
@@ -1944,34 +1933,7 @@ def _call_backend(backend: NMSBackend, execution: RPCExecution) -> dict[str, Any
 
 
 def _store_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
-    ok = bool(response.get("ok"))
-    execution.result = response.get("result") or {}
-    execution.error_code = str(response.get("error_code") or "")
-    execution.error_message = str(response.get("error_message") or "")
-    execution.status = (
-        RPCExecution.STATUS_SUCCEEDED if ok else RPCExecution.STATUS_FAILED
-    )
-    execution.finished_at = timezone.now()
-    execution.save(
-        update_fields=["result", "error_code", "error_message", "status", "finished_at"]
-    )
-    for item in response.get("events") or []:
-        _event(
-            execution,
-            str(item.get("level") or "info"),
-            str(item.get("event") or "backend"),
-            str(item.get("message") or ""),
-            item.get("data") if isinstance(item.get("data"), dict) else {},
-        )
-    if ok:
-        _event(execution, "info", "completed", "RPC execution completed.")
-    else:
-        _event(
-            execution,
-            "error",
-            "failed",
-            execution.error_message or "RPC execution failed.",
-        )
+    record_backend_response(execution, response)
 
 
 def _event(
@@ -1981,44 +1943,7 @@ def _event(
     message: str,
     data: dict[str, Any] | None = None,
 ) -> None:
-    from django.db.models import Max
-    from django.db.models.functions import Coalesce
-
-    max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
-    # Retry up to 3 times on sequence collisions from concurrent RQ workers.
-    # Always attempt max_seq+1 after re-reading — never add the loop counter,
-    # which would skip valid sequence numbers on re-reads.
-    for _ in range(3):
-        try:
-            RPCExecutionEvent.objects.create(
-                execution=execution,
-                sequence=max_seq + 1,
-                level=level,
-                event=event,
-                message=message,
-                data=data or {},
-            )
-            return
-        except IntegrityError:
-            max_seq = execution.events.aggregate(m=Coalesce(Max("sequence"), 0))["m"]
-    # Final attempt after exhausting retries; log instead of propagating if this
-    # also collides, so an event loss under extreme concurrency doesn't abort the job.
-    try:
-        RPCExecutionEvent.objects.create(
-            execution=execution,
-            sequence=max_seq + 1,
-            level=level,
-            event=event,
-            message=message,
-            data=data or {},
-        )
-    except IntegrityError:
-        logger.warning(
-            "RPCExecutionEvent sequence collision exhausted retries for execution %s "
-            "(event=%r). Event dropped.",
-            execution.pk,
-            event,
-        )
+    append_execution_event(execution, level, event, message, data)
 
 
 def _hash_json(value: object) -> str:

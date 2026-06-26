@@ -88,12 +88,14 @@ class RPCExecutionEventSerializer(NetBoxModelSerializer):
             "event",
             "message",
             "data",
+            "payload_hash",
             "tags",
             "custom_fields",
             "created",
             "last_updated",
         )
         brief_fields = ("id", "url", "display", "execution", "sequence", "event")
+        read_only_fields = fields
 
 
 class RPCExecutionSerializer(NetBoxModelSerializer):
