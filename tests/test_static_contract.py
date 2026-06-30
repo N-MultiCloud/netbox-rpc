@@ -365,6 +365,10 @@ def test_execution_es_cqrs_contract_is_explicit() -> None:
     assert "http_method_names" in execution_view
     assert '"put"' not in execution_view
     assert '"patch"' not in execution_view
+    # The execution aggregate and its append-only event ledger are immutable: no
+    # arbitrary edits (put/patch) and no deletion (a cascade would hit the
+    # append-only trigger). Writes happen only through commands (create/cancel).
+    assert '"delete"' not in execution_view
     assert "def cancel" in execution_view
 
 

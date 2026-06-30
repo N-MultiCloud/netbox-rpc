@@ -57,7 +57,13 @@ class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
 
 
 class RPCExecutionViewSet(NetBoxModelViewSet):
-    http_method_names = ["get", "post", "delete", "head", "options"]
+    # Command-only write model for the event-sourced execution aggregate: clients
+    # create executions (POST) and transition them via command actions (cancel).
+    # PUT/PATCH are disabled (state is derived from the event log, never edited);
+    # DELETE is disabled because the execution's RPCExecutionEvent ledger is
+    # append-only (its cascade would hit the append-only trigger), so an execution
+    # and its history are immutable once created.
+    http_method_names = ["get", "post", "head", "options"]
     queryset = models.RPCExecution.objects.select_related(
         "procedure",
         "assigned_object_type",
