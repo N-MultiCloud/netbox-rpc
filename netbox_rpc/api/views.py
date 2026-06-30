@@ -2,20 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-import jsonschema
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
-from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import models
-from ..event_store import mark_execution_failed
-from ..jobs import RPCExecutionJob
+from ..application.command_handlers import cancel_execution, create_execution
+from ..application.queries import execution_events
 from .serializers import (
     RPCBackendSerializer,
     RPCLinuxServiceAllowlistSerializer,
@@ -60,6 +57,13 @@ class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
 
 
 class RPCExecutionViewSet(NetBoxModelViewSet):
+    # Command-only write model for the event-sourced execution aggregate: clients
+    # create executions (POST) and transition them via command actions (cancel).
+    # PUT/PATCH are disabled (state is derived from the event log, never edited);
+    # DELETE is disabled because the execution's RPCExecutionEvent ledger is
+    # append-only (its cascade would hit the append-only trigger), so an execution
+    # and its history are immutable once created.
+    http_method_names = ["get", "post", "head", "options"]
     queryset = models.RPCExecution.objects.select_related(
         "procedure",
         "assigned_object_type",
@@ -67,62 +71,24 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
     ).prefetch_related("tags")
     serializer_class = RPCExecutionSerializer
 
-    @staticmethod
-    def _mark_enqueue_failed(execution: models.RPCExecution) -> None:
-        mark_execution_failed(
-            execution,
-            "Failed to enqueue RPC job. Check RQ/Redis connectivity.",
-            "RPC_ENQUEUE_FAILED",
-            event_name="ExecutionEnqueueFailed",
-        )
-
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
-        if not request.user.has_perm("netbox_rpc.execute_rpcprocedure"):
-            raise PermissionDenied("execute_rpcprocedure permission is required.")
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        procedure = serializer.validated_data["procedure"]
-        if not procedure.enabled:
-            raise drf_serializers.ValidationError(
-                {"procedure_id": "This procedure is disabled."}
-            )
-        if procedure.approval_required:
-            if not request.user.has_perm("netbox_rpc.approve_rpcprocedure"):
-                raise PermissionDenied(
-                    "This procedure requires approval (approve_rpcprocedure permission)."
-                )
-        params = serializer.validated_data.get("params") or {}
-        if procedure.params_schema:
-            try:
-                jsonschema.validate(params, procedure.params_schema)
-            except jsonschema.ValidationError as exc:
-                raise drf_serializers.ValidationError({"params": exc.message}) from exc
-
-        execution = serializer.save(requested_by=request.user)
-        try:
-            job = RPCExecutionJob.enqueue(
-                user=request.user,
-                name=f"RPC Execution: {execution.procedure.name}",
-                backend_pk=execution.backend_id,
-                execution_pk=execution.pk,
-            )
-        except Exception:
-            # Enqueue failed (e.g. Redis unavailable). Mark the execution failed so
-            # it doesn't sit permanently in STATUS_QUEUED with no associated job.
-            self._mark_enqueue_failed(execution)
-            raise
-
-        execution.job_id = job.pk
-        execution.save(update_fields=["job_id"])
+        execution = create_execution(serializer=serializer, user=request.user)
         output = self.get_serializer(execution)
         return Response(output.data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(responses={200: RPCExecutionSerializer})
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request: Request, pk: str | None = None) -> Response:
+        execution = cancel_execution(self.get_object(), request.user)
+        serializer = self.get_serializer(execution)
+        return Response(serializer.data)
 
     @extend_schema(responses={200: RPCExecutionEventSerializer(many=True)})
     @action(detail=True, methods=["get"], url_path="events")
     def events(self, request: Request, pk: str | None = None) -> Response:
         execution = self.get_object()
-        qs = execution.events.all()
+        qs = execution_events(execution)
         page = self.paginate_queryset(qs)
         serializer = RPCExecutionEventSerializer(
             page if page is not None else qs,

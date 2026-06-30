@@ -23,7 +23,11 @@ N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
 ## DDD / CQRS / Event Sourcing
 
 - Treat `RPCExecution` as the command aggregate and current-state read
-  projection.
+  projection. The detailed contract is in `docs/architecture.md`.
+- Typed execution events live in `netbox_rpc.domain.events`; the canonical
+  projection fold is `netbox_rpc.domain.projection.apply()` /
+  `rebuild()`. `event_store.rebuild_projection()` and `reproject()` are the
+  event-sourcing proof.
 - All status/result/error transitions must go through
   `netbox_rpc.event_store`; do not mutate execution state directly in jobs,
   API views, or serializers.
@@ -33,12 +37,17 @@ N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
   triggers protect the ledger below the ORM.
 - Event append failures must fail closed. Do not log-and-drop an execution
   event after sequence collisions or database errors.
-- API create/enqueue paths are command-side behavior. Execution detail/list and
-  execution-events endpoints are query-side behavior, and the event API must
-  remain read-only.
+- API create/enqueue/cancel paths and RQ execution dispatch are command-side
+  behavior in `netbox_rpc.application.command_handlers`. Execution detail/list
+  and execution-events endpoints are query-side behavior, PUT/PATCH and DELETE
+  are disabled for `RPCExecutionViewSet` (the aggregate and its append-only
+  ledger are immutable history), and the event API must remain read-only.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
+- `RPCProcedure`, `RPCLinuxServiceAllowlist`, and `RPCBackend` are intentional
+  reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
+  audited, and not event-sourced.
 - Network device procedures should delegate protocol execution to the
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
@@ -145,7 +154,8 @@ be used autonomously on destructive procedures.
   (write/`destructive`, approval required) is seeded by migration `0008`. It
   targets a **netbox-proxbox `ProxmoxEndpoint`**
   (`target_models = ["netbox_proxbox.proxmoxendpoint"]`), not a `dcim.device`.
-  Its normalizer (`_normalize_convert_mellanox_nic_execution` in `jobs.py`)
+  Its normalizer (`_normalize_convert_mellanox_nic_execution` in
+  `netbox_rpc.domain.normalization`)
   resolves SSH details via a **function-local** import of
   `netbox_nms.proxmox_ssh.resolve_proxmox_endpoint_ssh` (netbox-rpc must never
   import netbox-proxbox; netbox-nms owns the soft `ProxmoxEndpoint` reference)
@@ -325,8 +335,9 @@ be used autonomously on destructive procedures.
   `netbox_packer.models.PackerTemplate` inside `packer_normalizer.py`
   (`normalize_packer_vm_execution`), guarded by `try/except ImportError`
   (`RPC_PACKER_PLUGIN_MISSING`). `jobs.py` never imports `netbox_packer` at
-  module level — it imports `packer_normalizer` function-locally in the dispatch
-  branch. **netbox-packer MUST NOT import, depend on, or reference netbox-rpc in
+  module level; `netbox_rpc.domain.normalization` imports `packer_normalizer`
+  function-locally in the dispatch branch. **netbox-packer MUST NOT import,
+  depend on, or reference netbox-rpc in
   any way** (enforced by `tests/test_static_contract.py`). A `PackerTemplate`
   has no `ProxmoxEndpoint`, so SSH is resolved from an explicit
   `rpc_ssh_credential_pk` (a netbox-nms `DeviceCredential` PK) plus the
@@ -339,7 +350,8 @@ be used autonomously on destructive procedures.
   `netbox-proxy` migration `0002` via `update_or_create` (idempotent duplicate).
   Both seeds produce identical data; the `0003` entry is the authoritative one.
   Normalizers live in the `NGINX_1_*` branches of
-  `normalize_execution_params()` in `jobs.py`.
+  `normalize_execution_params()` in `netbox_rpc.domain.normalization` (re-exported
+  from `jobs.py` for compatibility).
 - Keep `README.md` updated when procedure policy, handler IDs, execution
   routing, audit behavior, or security constraints change.
 - Tests must use mocks and fixtures only; do not connect to real Linux hosts,
@@ -360,13 +372,15 @@ Use `monkeypatch` and `SimpleNamespace` stubs as demonstrated in
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in
-`normalize_execution_params()` in `jobs.py`. If a procedure is seeded (by this
-plugin or a sibling plugin's migration) but has no normalizer, executions will
-fail at runtime with `RPC_PROCEDURE_NOT_NORMALIZABLE`.
+`normalize_execution_params()` in `netbox_rpc.domain.normalization`. If a
+procedure is seeded (by this plugin or a sibling plugin's migration) but has no
+normalizer, executions will fail at runtime with
+`RPC_PROCEDURE_NOT_NORMALIZABLE`.
 
 - Add the procedure name constant to `constants.py`.
 - Add the normalizer branch to `_dispatch_normalize_execution_params()` in
-  `jobs.py` (the public `normalize_execution_params()` wraps it).
+  `netbox_rpc.domain.normalization` (the public `normalize_execution_params()`
+  wraps it and `jobs.py` re-exports it).
 - Update this file and `README.md` to document the new procedure.
 
 ## Transport Driver & Output Parser Selection
@@ -404,7 +418,8 @@ The current read-only exemplars are `os.linux.proxmox.pvesh_json`,
 
 ## API Validation Guards
 
-`RPCExecutionViewSet.create()` enforces three guards before enqueueing:
+`netbox_rpc.application.command_handlers.create_execution()` enforces three
+guards before enqueueing:
 
 1. **Enabled check** — rejects disabled procedures with a 400.
 2. **Approval check** — procedures with `approval_required=True` require the
@@ -452,17 +467,17 @@ from `approval_required=True` to `False` unless the user has
 
 ## Event Sequence Integrity
 
-`_event()` in `jobs.py` uses an atomic `Coalesce(Max("sequence"), 0)` aggregate
-plus an IntegrityError retry loop (3 attempts) to prevent TOCTOU sequence
-collisions under concurrent RQ workers.
+`append_execution_event()` in `netbox_rpc.event_store` allocates the next
+per-execution sequence and retries IntegrityError collisions 3 times to prevent
+TOCTOU sequence collisions under concurrent RQ workers.
 
 Implementation rules:
-- Each retry re-reads `max_seq` via aggregate after a collision. Always try
-  `max_seq + 1` — never add the loop counter to `max_seq`, which would skip
-  valid sequence numbers.
-- The fallback after the loop is wrapped in `try/except IntegrityError` and
-  logs a warning instead of propagating, so an event loss under extreme
-  concurrency does not abort the RPC job.
+- Each retry re-reads the latest sequence after a collision and tries the next
+  contiguous number. Never skip valid sequence numbers.
+- Exhausting retries raises `RPCEventStoreError`; event append failure is
+  fail-closed and must abort the command transition.
+- Projection writes must be derived from the typed event through
+  `netbox_rpc.domain.projection.apply()`, not hand-mutated independently.
 
 ## SYSTEMD_UNIT_RE Invariants
 

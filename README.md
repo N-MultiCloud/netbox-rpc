@@ -69,31 +69,42 @@ The resolver is called as `resolver(pk)` and must return
 ## DDD / CQRS / Event Sourcing
 
 `netbox-rpc` is the Remote Command Policy bounded context for the NMS stack.
-The core aggregate is `RPCExecution`: callers request a business procedure,
-the aggregate records each transition as an append-only execution event, and
-the mutable `RPCExecution` row is treated as a read projection for NetBox API
-compatibility.
+The detailed architecture contract lives in
+[`docs/architecture.md`](docs/architecture.md). The core aggregate is
+`RPCExecution`: callers request a business procedure, the aggregate records each
+transition as an append-only execution event, and the mutable `RPCExecution` row
+is treated as a read projection for NetBox API compatibility.
 
 - **DDD**: procedure names use business language such as
   `network.device.dell_os10.s5232f_on.write_memory` and
   `os.linux.ubuntu.24.restart_service`; handler IDs are internal adapters.
-- **CQRS**: execution creation is the command side; execution list/detail and
-  `/events` endpoints are query-side projections. API clients may create
-  executions, but execution event history is exposed read-only.
+- **CQRS**: execution creation, job enqueue, job execution, and cancellation are
+  command-side handlers in `netbox_rpc.application.command_handlers`;
+  execution list/detail and `/events` endpoints are query-side projections. API
+  clients may create and cancel queued executions, but PUT/PATCH and DELETE are
+  disabled for executions (immutable history) and event history is read-only.
 - **Event Sourcing**: `netbox_rpc.event_store` appends ordered
-  `RPCExecutionEvent` rows and updates the projection in the same transactional
-  helper. Job code must call the event-store helpers instead of mutating
-  status/result fields inline.
+  `RPCExecutionEvent` rows, folds typed domain events through
+  `netbox_rpc.domain.projection.apply()`, and updates the projection in the
+  same transactional helper. Job and API code must call command handlers or
+  event-store helpers instead of mutating status/result fields inline.
 
-Durable events include `ExecutionStarted`, `ParametersNormalized`,
-`ExecutionSucceeded`, `ExecutionFailed`, and backend driver events. Events must
-store redacted payloads, `payload_hash` values, and references only; never
-store credentials, private keys, or unbounded raw command output. Event append
-failures are fail-closed: if the per-execution sequence cannot be allocated,
-the command state transition raises instead of silently dropping audit history.
-The execution-event API is read-only, model saves reject normal update/delete,
-and the migration installs PostgreSQL triggers so the event ledger remains
-append-only below the ORM.
+Durable events include `ExecutionQueued`, `JobEnqueued`, `ExecutionStarted`,
+`ParametersNormalized`, backend progress events, `ExecutionSucceeded`,
+`ExecutionFailed`, `ExecutionEnqueueFailed`, and `ExecutionCancelled`.
+`rebuild_projection(execution)` folds ordered events back into a
+`ProjectionState`, and `reproject(execution)` writes that rebuilt state to the
+model. Events must store redacted payloads, `payload_hash` values, credential
+references, and command fingerprints only; never store secrets, private keys, or
+unbounded raw command output. Event append failures are fail-closed: if the
+per-execution sequence cannot be allocated, the command state transition raises
+instead of silently dropping audit history. The execution-event API is read-only,
+model saves reject normal update/delete, and the migration installs PostgreSQL
+triggers so the event ledger remains append-only below the ORM.
+
+`RPCProcedure`, `RPCLinuxServiceAllowlist`, and `RPCBackend` are deliberate
+reference-data/configuration entities. They remain ordinary NetBox CRUD models,
+audited by NetBox `ObjectChange`, and are not event-sourced.
 
 ### `os.linux.dns_host.*`
 
@@ -175,8 +186,8 @@ Handler ID: `services.pterodactyl.bootstrap_api_key` (in `nms-backend`).
 command inside the container. Required `command` param; accepted values:
 `queue:status`, `schedule:run`, `cache:clear`, `config:clear`,
 `queue:restart`, `migrate`. The allowlist is enforced by the normalizer
-(`_PTERODACTYL_ARTISAN_ALLOWLIST` in `jobs.py`) and again by the Pydantic
-schema in `nms-backend`. Disallowed commands raise
+(`_PTERODACTYL_ARTISAN_ALLOWLIST` in `netbox_rpc.domain.normalization`) and
+again by the Pydantic schema in `nms-backend`. Disallowed commands raise
 `RPCExecutionError(code="RPC_PARAM_INVALID")`. Optional `container_name`
 (default `pterodactyl-panel-1`). `approval_required=False`. Handler ID:
 `services.pterodactyl.artisan` (in `nms-backend`).
@@ -237,7 +248,7 @@ netbox-rpc**. netbox-rpc touches netbox-packer only through (1) the string
 `target_models` label and (2) a **function-local lazy import** of
 `netbox_packer.models.PackerTemplate` inside `packer_normalizer.py`, guarded by
 `try/except ImportError` (so NetBox boots fine when netbox-packer is absent).
-`jobs.py` never imports `netbox_packer` at module level. Because a
+`netbox_rpc.domain.normalization` never imports `netbox_packer` at module level. Because a
 `PackerTemplate` has no `ProxmoxEndpoint`, SSH is resolved from an explicit
 `rpc_ssh_credential_pk` (a netbox-nms `DeviceCredential` PK) plus the template's
 `proxmox_node` (overridable via `ssh_host`); the normalizer emits the
@@ -369,8 +380,8 @@ clients must not submit arbitrary SSH command text.
 
 ## API Validation
 
-`RPCExecutionViewSet.create()` enforces three guards before an execution
-record is created and the RQ job is enqueued:
+`netbox_rpc.application.command_handlers.create_execution()` enforces three
+guards before an execution record is created and the RQ job is enqueued:
 
 1. **Enabled** — disabled procedures are rejected (HTTP 400).
 2. **Approval** — procedures with `approval_required=True` require the caller
@@ -381,6 +392,11 @@ record is created and the RQ job is enqueued:
 These guards run at the API layer, not the model layer, because the serializer
 receives the procedure as a foreign-key ID and the schema/enabled/approval
 checks require the resolved object.
+
+The command emits `ExecutionQueued` before enqueueing. If RQ/Redis enqueue
+fails, it emits `ExecutionEnqueueFailed` and projects
+`error_code="RPC_ENQUEUE_FAILED"` instead of leaving a permanent queued record
+with no job. Successful enqueue emits `JobEnqueued` and projects `job_id`.
 
 RPC execution jobs are queued without using NetBox's attached-object job fields.
 NetBox 4.6 validates attached job object types against the `jobs` feature, and

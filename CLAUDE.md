@@ -5,6 +5,8 @@ sync when architecture, commands, or workflows change.
 
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
+The DDD/CQRS/Event Sourcing architecture contract lives in
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Standalone usage
 

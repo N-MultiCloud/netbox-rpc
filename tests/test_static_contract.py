@@ -152,12 +152,15 @@ def test_transport_and_parsing_selection_docs_are_present() -> None:
 
 
 def test_normalizer_centrally_threads_driver_selection() -> None:
+    normalization = read("netbox_rpc/domain/normalization.py")
     jobs = read("netbox_rpc/jobs.py")
     # The driver/parser routing is injected once in a wrapper, not per branch.
-    assert "def _apply_driver_pipeline_overrides" in jobs
-    assert "def _dispatch_normalize_execution_params" in jobs
-    assert '_DEFAULT_TRANSPORT_DRIVER = "asyncssh"' in jobs
-    assert '_DEFAULT_OUTPUT_PARSER = "none"' in jobs
+    assert "def _apply_driver_pipeline_overrides" in normalization
+    assert "def _dispatch_normalize_execution_params" in normalization
+    assert '_DEFAULT_TRANSPORT_DRIVER = "asyncssh"' in normalization
+    assert '_DEFAULT_OUTPUT_PARSER = "none"' in normalization
+    assert "_apply_driver_pipeline_overrides" in jobs
+    assert "_dispatch_normalize_execution_params" in jobs
 
 
 def test_systemd_procedure_catalog_names_are_seeded() -> None:
@@ -197,18 +200,20 @@ def test_dell_os10_procedure_catalog_names_are_seeded() -> None:
 
 def test_execution_job_delegates_to_resolved_backend_target() -> None:
     jobs = read("netbox_rpc/jobs.py")
-    assert "resolve_backend" in jobs
+    command_handlers = read("netbox_rpc/application/command_handlers.py")
+    assert "resolve_backend" in command_handlers
     assert "BackendTarget" in jobs
     assert "/rpc/executions/{execution.pk}/run" in jobs
-    assert "normalize_execution_params" in jobs
+    assert "normalize_execution_params" in command_handlers
     assert "RPCLinuxServiceAllowlist" in jobs
 
 
 def test_execution_jobs_use_explicit_execution_pk_not_attached_object() -> None:
     views = read("netbox_rpc/api/views.py")
+    command_handlers = read("netbox_rpc/application/command_handlers.py")
     jobs = read("netbox_rpc/jobs.py")
     assert "instance=execution" not in views
-    assert "execution_pk=execution.pk" in views
+    assert "execution_pk=execution.pk" in command_handlers
     assert 'data["execution_pk"]' in jobs
     assert "def _get_execution(self, execution_pk:" in jobs
     assert "self.job.object_id" in jobs
@@ -225,30 +230,23 @@ def test_api_routes_are_registered() -> None:
 
 
 def test_create_guards_enabled_and_approval_and_params_schema() -> None:
-    views = read("netbox_rpc/api/views.py")
-    assert "procedure.enabled" in views
-    assert "procedure.approval_required" in views
-    assert "jsonschema.validate" in views
+    command_handlers = read("netbox_rpc/application/command_handlers.py")
+    assert "procedure.enabled" in command_handlers
+    assert "procedure.approval_required" in command_handlers
+    assert "jsonschema.validate" in command_handlers
 
 
 def test_create_marks_execution_failed_when_enqueue_fails() -> None:
-    views = read("netbox_rpc/api/views.py")
+    command_handlers = read("netbox_rpc/application/command_handlers.py")
 
-    assert "def _mark_enqueue_failed(execution: models.RPCExecution) -> None:" in views
-    helper_start = views.index("def _mark_enqueue_failed")
-    helper_end = views.index("\n\n    def create", helper_start)
-    helper = views[helper_start:helper_end]
-
-    assert "mark_execution_failed" in helper
-    assert '"RPC_ENQUEUE_FAILED"' in helper
-    assert "Check RQ/Redis connectivity." in helper
-    assert '"ExecutionEnqueueFailed"' in helper
-
-    create_start = views.index("def create")
-    create_end = views.index("\n\n    @extend_schema", create_start)
-    create = views[create_start:create_end]
+    create_start = command_handlers.index("def create_execution")
+    create_end = command_handlers.index("\n\n\ndef run_execution", create_start)
+    create = command_handlers[create_start:create_end]
     assert "except Exception:" in create
-    assert "self._mark_enqueue_failed(execution)" in create
+    assert "mark_execution_failed" in create
+    assert '"RPC_ENQUEUE_FAILED"' in create
+    assert "Check RQ/Redis connectivity." in create
+    assert '"ExecutionEnqueueFailed"' in create
     assert "raise" in create
 
 
@@ -335,21 +333,72 @@ def test_execution_event_api_is_read_only_and_hashed() -> None:
     assert "class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet)" in views
 
 
+def test_execution_es_cqrs_contract_is_explicit() -> None:
+    events = read("netbox_rpc/domain/events.py")
+    projection = read("netbox_rpc/domain/projection.py")
+    event_store = read("netbox_rpc/event_store.py")
+    views = read("netbox_rpc/api/views.py")
+
+    for event_name in (
+        "ExecutionQueued",
+        "ExecutionStarted",
+        "ParametersNormalized",
+        "JobEnqueued",
+        "BackendEventRecorded",
+        "ExecutionSucceeded",
+        "ExecutionFailed",
+        "ExecutionEnqueueFailed",
+        "ExecutionCancelled",
+    ):
+        assert f"class {event_name}" in events
+    assert "EVENT_TYPES" in events
+    assert "def from_record" in events
+    assert "class ProjectionState" in projection
+    assert "def apply" in projection
+    assert "def rebuild" in projection
+    assert "def rebuild_projection" in event_store
+    assert "def reproject" in event_store
+
+    execution_view_start = views.index("class RPCExecutionViewSet")
+    execution_view_end = views.index("\n\nclass RPCExecutionEventViewSet")
+    execution_view = views[execution_view_start:execution_view_end]
+    assert "http_method_names" in execution_view
+    assert '"put"' not in execution_view
+    assert '"patch"' not in execution_view
+    # The execution aggregate and its append-only event ledger are immutable: no
+    # arbitrary edits (put/patch) and no deletion (a cascade would hit the
+    # append-only trigger). Writes happen only through commands (create/cancel).
+    assert '"delete"' not in execution_view
+    assert "def cancel" in execution_view
+
+
 def test_execution_state_changes_go_through_event_store() -> None:
     jobs = read("netbox_rpc/jobs.py")
     views = read("netbox_rpc/api/views.py")
+    command_handlers = read("netbox_rpc/application/command_handlers.py")
     event_store = read("netbox_rpc/event_store.py")
 
     assert "from .event_store import" in jobs
-    assert "record_execution_normalized" in jobs
+    assert "RPCExecutionAggregate" in command_handlers
+    assert "aggregate.normalize" in command_handlers
+    assert "aggregate.record_backend_response" in command_handlers
+    assert "aggregate.fail" in command_handlers
+    # The race-critical QUEUED transitions (start vs cancel) run under a row lock.
+    assert "_transition_locked" in command_handlers
+    assert "select_for_update" in command_handlers
+    assert "agg.start()" in command_handlers
     assert "record_backend_response" in jobs
     assert "mark_execution_running" in jobs
     assert "mark_execution_failed" in jobs
-    assert "from ..event_store import mark_execution_failed" in views
+    assert "create_execution" in views
+    assert "cancel_execution" in views
     assert "def append_execution_event" in event_store
     assert "def record_backend_response" in event_store
     assert "ExecutionSucceeded" in event_store
     assert "ExecutionFailed" in event_store
+    assert "record_execution_queued" in event_store
+    assert "record_execution_enqueued" in event_store
+    assert "record_execution_cancelled" in event_store
 
 
 def test_call_backend_handles_non_dict_json() -> None:
@@ -364,32 +413,32 @@ def test_install_ssh_key_procedure_is_defined_in_constants() -> None:
     assert "os.linux_ubuntu_24.install_ssh_key" in constants
 
 
-def test_install_ssh_key_has_normalizer_branch_in_jobs() -> None:
-    jobs = read("netbox_rpc/jobs.py")
-    assert "LINUX_INSTALL_SSH_KEY" in jobs
-    assert "_normalize_ssh_install_key_execution" in jobs
+def test_install_ssh_key_has_normalizer_branch() -> None:
+    normalization = read("netbox_rpc/domain/normalization.py")
+    assert "LINUX_INSTALL_SSH_KEY" in normalization
+    assert "_normalize_ssh_install_key_execution" in normalization
 
 
 def test_install_ssh_key_normalizer_strips_comment_before_forwarding() -> None:
-    jobs = read("netbox_rpc/jobs.py")
+    normalization = read("netbox_rpc/domain/normalization.py")
     # Comment is stripped by splitting on whitespace and rejoining first two fields
-    assert "split(None, 2)" in jobs
-    assert "key_parts[:2]" in jobs
+    assert "split(None, 2)" in normalization
+    assert "key_parts[:2]" in normalization
 
 
 def test_install_ssh_key_normalizer_validates_username_with_posix_regex() -> None:
-    jobs = read("netbox_rpc/jobs.py")
-    assert "_POSIX_USERNAME_RE" in jobs
-    assert "fullmatch" in jobs
+    normalization = read("netbox_rpc/domain/normalization.py")
+    assert "_POSIX_USERNAME_RE" in normalization
+    assert "fullmatch" in normalization
 
 
 def test_dell_os10_normalizer_branches_are_registered() -> None:
-    jobs = read("netbox_rpc/jobs.py")
-    assert "DELL_OS10_S5232F_BOOTSTRAP_RESTCONF" in jobs
-    assert "_normalize_dell_os10_bootstrap_execution" in jobs
-    assert "_normalize_dell_os10_simple_execution" in jobs
-    assert "_DELL_OS10_INTERFACE_RE" in jobs
-    assert "description_sha256" in jobs
+    normalization = read("netbox_rpc/domain/normalization.py")
+    assert "DELL_OS10_S5232F_BOOTSTRAP_RESTCONF" in normalization
+    assert "_normalize_dell_os10_bootstrap_execution" in normalization
+    assert "_normalize_dell_os10_simple_execution" in normalization
+    assert "_DELL_OS10_INTERFACE_RE" in normalization
+    assert "description_sha256" in normalization
 
 
 def test_install_ssh_key_migration_has_no_netbox_nms_dependency() -> None:
@@ -472,12 +521,12 @@ def test_dns_host_procedures_have_expected_effect_and_approval() -> None:
 
 
 def test_dns_host_normalizer_branches_are_registered() -> None:
-    jobs = read("netbox_rpc/jobs.py")
-    assert "DNS_HOST_DEPLOY_PROCEDURE" in jobs
-    assert "DNS_HOST_STATUS_PROCEDURE" in jobs
-    assert "_normalize_dns_host_deploy_execution" in jobs
-    assert "_normalize_dns_host_status_execution" in jobs
-    assert "rpc_ssh_known_hosts_entry" in jobs
+    normalization = read("netbox_rpc/domain/normalization.py")
+    assert "DNS_HOST_DEPLOY_PROCEDURE" in normalization
+    assert "DNS_HOST_STATUS_PROCEDURE" in normalization
+    assert "_normalize_dns_host_deploy_execution" in normalization
+    assert "_normalize_dns_host_status_execution" in normalization
+    assert "rpc_ssh_known_hosts_entry" in normalization
 
 
 def test_linux_agent_install_procedures_are_seeded() -> None:
@@ -649,14 +698,14 @@ def test_dell_os10_vlt_procedure_catalog_names_are_seeded() -> None:
 
 
 def test_dell_os10_vlt_normalizer_branches_are_registered() -> None:
-    jobs = read("netbox_rpc/jobs.py")
-    assert "DELL_OS10_S5232F_SHOW_VLT" in jobs
-    assert "DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN" in jobs
-    assert "DELL_OS10_S5232F_CONFIGURE_VLT_PEER" in jobs
-    assert "_DELL_OS10_IP_RE" in jobs
-    assert "_DELL_OS10_MAC_RE" in jobs
-    assert "backup_destination" in jobs
-    assert "vlt_mac" in jobs
+    normalization = read("netbox_rpc/domain/normalization.py")
+    assert "DELL_OS10_S5232F_SHOW_VLT" in normalization
+    assert "DELL_OS10_S5232F_CONFIGURE_VLT_DOMAIN" in normalization
+    assert "DELL_OS10_S5232F_CONFIGURE_VLT_PEER" in normalization
+    assert "_DELL_OS10_IP_RE" in normalization
+    assert "_DELL_OS10_MAC_RE" in normalization
+    assert "backup_destination" in normalization
+    assert "vlt_mac" in normalization
 
 
 # ---------------------------------------------------------------------------
@@ -698,13 +747,16 @@ def test_mellanox_normalizer_uses_function_local_import() -> None:
     the ImportError, and the error is surfaced with a descriptive RPCExecutionError
     rather than a silent import failure at Django startup.
     """
-    jobs = read("netbox_rpc/jobs.py")
+    normalization = read("netbox_rpc/domain/normalization.py")
     # The import must appear inside the normalizer function (indented), not at the top
-    assert "from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh" in jobs
+    assert (
+        "from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh"
+        in normalization
+    )
     # The comment describing the function-local rationale must be present
-    assert "function-local" in jobs
+    assert "function-local" in normalization
     # The import must NOT appear at module top-level (no leading indent on the import)
-    for line in jobs.splitlines():
+    for line in normalization.splitlines():
         if "from netbox_nms.proxmox_ssh import resolve_proxmox_endpoint_ssh" in line:
             # The line must be indented (inside a function)
             assert line.startswith("    "), (
@@ -779,18 +831,20 @@ def test_packer_normalizer_lazy_imports_netbox_packer() -> None:
 
 
 def test_jobs_does_not_import_netbox_packer_at_module_level() -> None:
-    """jobs.py must not import netbox_packer at top level; only the function-local
+    """normalization.py must not import netbox_packer at top level; only the function-local
     packer_normalizer dispatch may reference it."""
-    jobs = read("netbox_rpc/jobs.py")
-    # jobs.py must reach the packer normalizer lazily (function-local import).
-    assert "from .packer_normalizer import normalize_packer_vm_execution" in jobs
-    assert "PACKER_PROCEDURE_NAMES" in jobs
-    # jobs.py must never import netbox_packer directly.
-    assert "import netbox_packer" not in jobs
-    assert "from netbox_packer" not in jobs
+    normalization = read("netbox_rpc/domain/normalization.py")
+    # normalization.py must reach the packer normalizer lazily (function-local import).
+    assert (
+        "from ..packer_normalizer import normalize_packer_vm_execution" in normalization
+    )
+    assert "PACKER_PROCEDURE_NAMES" in normalization
+    # normalization.py must never import netbox_packer directly.
+    assert "import netbox_packer" not in normalization
+    assert "from netbox_packer" not in normalization
     # The packer_normalizer import must be indented (inside the dispatch function).
-    for line in jobs.splitlines():
-        if "from .packer_normalizer import normalize_packer_vm_execution" in line:
+    for line in normalization.splitlines():
+        if "from ..packer_normalizer import normalize_packer_vm_execution" in line:
             assert line.startswith("    "), (
                 "packer_normalizer import must be function-local (indented), not module-level"
             )
