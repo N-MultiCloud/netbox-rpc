@@ -1,7 +1,6 @@
 # netbox-rpc
 
-License note: this repository currently includes Apache-2.0; final license
-choice remains operator-confirmable.
+Licensed under Apache-2.0 (see `LICENSE`).
 
 `netbox-rpc` is an audited RPC procedure catalog and execution framework for
 NetBox. It stores procedure policy, JSON schemas, execution records, and audit
