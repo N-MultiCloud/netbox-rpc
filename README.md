@@ -104,8 +104,8 @@ host-override params instead of a `dcim.device` or Proxmox binding.
 
 **`os.linux.dns_host.deploy_dns_stack`** deploys or updates the
 `powerdns-dns-api` Compose project. Required params are `target` and
-`rpc_ssh_credential_pk`; optional params are `rpc_ssh_host` (default
-`<target>.nmulti.cloud`), `rpc_ssh_port` (default `22`),
+`rpc_ssh_credential_pk`; optional params are `rpc_ssh_host` (if omitted,
+derived as `<target>.<dns_host_domain>` from the plugin setting), `rpc_ssh_port` (default `22`),
 `rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
 `true`), and `force_recreate` (default `false`). `effect="write"` and
 `approval_required=True`. Handler ID equals the procedure name.
@@ -135,8 +135,8 @@ Both are `effect="write"`, `approval_required=False`, and target
 parameters are the audited `rpc_ssh_*` overrides consumed by `nms-backend`
 (`rpc_ssh_credential_pk`, `rpc_ssh_host`, `rpc_ssh_port`,
 `rpc_ssh_known_hosts_entry`, and `rpc_ssh_strict_host_key_checking`).
-`install_zabbix_agent2` also accepts `zabbix_server` with default
-`zabbix.nmulti.cloud`. No arbitrary package, command, or shell text parameter is
+`install_zabbix_agent2` also accepts `zabbix_server` (configure the default via
+the `default_zabbix_server` plugin setting). No arbitrary package, command, or shell text parameter is
 accepted. Seeded by migration `0028`.
 
 ### `os.linux.proxmox.convert_mellanox_nic_to_ethernet`

@@ -442,7 +442,7 @@ _LINUX_INSTALL_ZABBIX_AGENT2_PARAMS_SCHEMA = {
             "minLength": 1,
             "maxLength": 253,
             "pattern": _ZABBIX_SERVER_PATTERN,
-            "default": "zabbix.nmulti.cloud",
+            "default": "zabbix.example.com",
             "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
         },
         **_RPC_SSH_OVERRIDE_PROPERTIES,
@@ -499,7 +499,7 @@ _DNS_HOST_SSH_HOST_OVERRIDE = {
     "type": "string",
     "minLength": 1,
     "maxLength": 255,
-    "description": "Optional SSH host override; defaults to <target>.nmulti.cloud.",
+    "description": "Optional SSH host override; if omitted, derived as <target>.<dns_host_domain plugin setting>.",
 }
 
 _DNS_HOST_SSH_PORT_OVERRIDE = {
@@ -1541,7 +1541,7 @@ _PROXMOX_QEMU_VM_LIFECYCLE_PARAMS_SCHEMA = {
             "minLength": 1,
             "maxLength": 253,
             "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.?$",
-            "default": "zabbix.nmulti.cloud",
+            "default": "zabbix.example.com",
             "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
         },
         "resize_disk": {

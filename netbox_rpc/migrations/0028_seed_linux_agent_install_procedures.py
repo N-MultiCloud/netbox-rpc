@@ -54,7 +54,7 @@ _ZABBIX_PARAMS_SCHEMA = {
             "minLength": 1,
             "maxLength": 253,
             "pattern": _ZABBIX_SERVER_PATTERN,
-            "default": "zabbix.nmulti.cloud",
+            "default": "zabbix.example.com",
             "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
         },
         **_RPC_SSH_OVERRIDE_PROPERTIES,

@@ -1,4 +1,4 @@
-name: Deploy to production (netbox.nmulti.cloud)
+name: Deploy to production
 
 on:
   push:
@@ -11,12 +11,21 @@ on:
         required: false
         default: 'main'
 
+# Deployment is environment-specific. Configure these on the repository
+# (Settings -> Actions -> Variables/Secrets) for your own infrastructure:
+#   - vars.DEPLOY_PLUGIN_BIN  : path to a local deploy script on the runner
+#                               (invoked as "<bin> rpc <ref>"), if any.
+#   - secrets.DEPLOY_SSH_HOST : SSH host/alias to run "deploy-plugin rpc <ref>"
+#                               on, used when no local deploy script is present.
+# If neither is set, the job exits with a clear configuration error.
 jobs:
   deploy:
     name: Deploy plugin
     runs-on: prod-deploy
     env:
       REF: ${{ inputs.ref || github.sha }}
+      DEPLOY_PLUGIN_BIN: ${{ vars.DEPLOY_PLUGIN_BIN }}
+      DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
     steps:
       - name: Deploy plugin
         shell: bash
@@ -26,11 +35,14 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]* | main | develop | [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
             *) echo "ERROR: Invalid ref format: $REF"; exit 1 ;;
           esac
-          if [[ -x /opt/nmulticloud/deploy/bin/deploy-netbox-plugin ]]; then
-            /opt/nmulticloud/deploy/bin/deploy-netbox-plugin rpc "$REF"
-          else
+          if [[ -n "$DEPLOY_PLUGIN_BIN" && -x "$DEPLOY_PLUGIN_BIN" ]]; then
+            "$DEPLOY_PLUGIN_BIN" rpc "$REF"
+          elif [[ -n "$DEPLOY_SSH_HOST" ]]; then
             ssh -o StrictHostKeyChecking=accept-new \
                 -o ServerAliveInterval=30 \
                 -o ServerAliveCountMax=20 \
-                nmc-prod-207 -- deploy-plugin rpc "$REF"
+                "$DEPLOY_SSH_HOST" -- deploy-plugin rpc "$REF"
+          else
+            echo "ERROR: configure vars.DEPLOY_PLUGIN_BIN or secrets.DEPLOY_SSH_HOST to deploy." >&2
+            exit 1
           fi
