@@ -61,9 +61,33 @@ def create_execution(*, serializer: Any, user: object) -> object:
     return execution
 
 
+def _transition_locked(execution: object, transition) -> object:
+    """Run a status-guarded transition while holding a row lock on the execution.
+
+    Concurrent QUEUED transitions (e.g. an API cancel racing the RQ worker's
+    start) would otherwise both read ``status == "queued"`` and each append an
+    event, producing an inconsistent stream. Re-fetching the row with
+    ``select_for_update`` inside the transaction serializes them: the first
+    writer commits its terminal/running transition, and the second re-reads the
+    new status and is cleanly rejected by the aggregate invariant.
+    """
+    from django.db import transaction
+
+    from ..models import RPCExecution
+
+    with transaction.atomic():
+        locked = RPCExecution.objects.select_for_update().get(pk=execution.pk)
+        transition(RPCExecutionAggregate(locked))
+        return locked
+
+
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
+    try:
+        execution = _transition_locked(execution, lambda agg: agg.start())
+    except RPCExecutionAggregateError:
+        # Lost the race to a cancel (or already terminal): nothing to run.
+        return
     aggregate = RPCExecutionAggregate(execution)
-    aggregate.start()
 
     target = resolve_backend(
         backend_pk if backend_pk is not None else execution.backend_id
@@ -102,7 +126,7 @@ def cancel_execution(execution: object, user: object) -> object:
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
     try:
-        RPCExecutionAggregate(execution).cancel(user=user)
+        execution = _transition_locked(execution, lambda agg: agg.cancel(user=user))
     except RPCExecutionAggregateError as exc:
         raise drf_serializers.ValidationError({"status": str(exc)}) from exc
     return execution

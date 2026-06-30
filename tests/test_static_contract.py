@@ -382,8 +382,11 @@ def test_execution_state_changes_go_through_event_store() -> None:
     assert "RPCExecutionAggregate" in command_handlers
     assert "aggregate.normalize" in command_handlers
     assert "aggregate.record_backend_response" in command_handlers
-    assert "aggregate.start" in command_handlers
     assert "aggregate.fail" in command_handlers
+    # The race-critical QUEUED transitions (start vs cancel) run under a row lock.
+    assert "_transition_locked" in command_handlers
+    assert "select_for_update" in command_handlers
+    assert "agg.start()" in command_handlers
     assert "record_backend_response" in jobs
     assert "mark_execution_running" in jobs
     assert "mark_execution_failed" in jobs
