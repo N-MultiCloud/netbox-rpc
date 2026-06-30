@@ -18,7 +18,7 @@ new boundary is still safe.
 | Execution record and audit fields | `RPCExecution` and `normalize_execution_params()` | Normalized params are structured data. URL values are fingerprinted with SHA-256 in `command_fingerprint`. |
 | SSH target and credential | `DeviceService` SSH rows or explicit `rpc_ssh_*` overrides | SSH overrides are connection metadata only. They are not command text. |
 | Shell command construction | `nms-backend automation.rpc.handlers` | Backend handlers build fixed command templates from normalized fields only. |
-| Browser route | `console.minecraft.nmulti.cloud` through NMS | Browser never receives SSH credentials, NetBox service tokens, backend URLs, or raw RPC internals. |
+| Browser route | the NMS browser console through NMS | Browser never receives SSH credentials, NetBox service tokens, backend URLs, or raw RPC internals. |
 
 ## Procedures
 
@@ -173,7 +173,7 @@ Before adding or changing a Minecraft stack procedure:
 6. Add static tests that pin schema fields, migration seed data, and docs.
 7. Update this guide, `README.md`, and `AGENTS.md`.
 8. Coordinate the matching backend handler in `nms-backend`.
-9. Keep browser-facing route docs in `console.minecraft.nmulti.cloud` aligned.
+9. Keep browser-facing route docs in the NMS browser console aligned.
 
 ## Verification Map
 

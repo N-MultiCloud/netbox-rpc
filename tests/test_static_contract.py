@@ -526,7 +526,7 @@ def test_linux_agent_install_params_schema_is_narrow() -> None:
         assert key in migration
     assert '"additionalProperties": False' in migration
     assert '"zabbix_server"' in migration
-    assert '"default": "zabbix.nmulti.cloud"' in migration
+    assert '"default": "zabbix.example.com"' in migration
     assert '"maxLength": 253' in migration
     assert "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?" in migration
     assert "apt" not in migration.lower()

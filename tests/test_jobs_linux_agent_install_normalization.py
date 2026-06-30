@@ -48,29 +48,45 @@ def test_install_qemu_guest_agent_forwards_direct_ssh_overrides(jobs_module) -> 
     assert fingerprint["rpc_ssh_strict_host_key_checking"] is False
 
 
-def test_install_zabbix_agent2_defaults_server(jobs_module) -> None:
+def test_install_zabbix_agent2_uses_configured_default_server(jobs_module) -> None:
+    """With no explicit param, the configured 'default_zabbix_server' plugin setting is used."""
     execution = _execution("install_zabbix_agent2")
 
     normalized = jobs_module.normalize_execution_params(execution)
 
-    assert normalized["zabbix_server"] == "zabbix.nmulti.cloud"
+    assert normalized["zabbix_server"] == "zabbix.example.com"
     assert (
         normalized["command_fingerprint"]["handler_id"]
         == "os.linux_ubuntu_24.install_zabbix_agent2"
     )
-    assert normalized["command_fingerprint"]["zabbix_server"] == "zabbix.nmulti.cloud"
+    assert normalized["command_fingerprint"]["zabbix_server"] == "zabbix.example.com"
+
+
+def test_install_zabbix_agent2_requires_server_when_unconfigured(
+    jobs_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With neither an explicit param nor a configured default, normalization fails clearly."""
+    import django.conf as django_conf  # the stubbed module
+
+    monkeypatch.setattr(django_conf.settings, "PLUGINS_CONFIG", {"netbox_rpc": {}})
+    execution = _execution("install_zabbix_agent2")
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
 def test_install_zabbix_agent2_strips_and_validates_server(jobs_module) -> None:
     execution = _execution(
         "install_zabbix_agent2",
-        zabbix_server=" zabbix.nmulti.cloud. ",
+        zabbix_server=" zabbix.example.com. ",
         rpc_ssh_credential_pk=11,
     )
 
     normalized = jobs_module.normalize_execution_params(execution)
 
-    assert normalized["zabbix_server"] == "zabbix.nmulti.cloud"
+    assert normalized["zabbix_server"] == "zabbix.example.com"
     assert normalized["rpc_ssh_credential_pk"] == 11
 
 
@@ -134,6 +150,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
     django_db.IntegrityError = type("IntegrityError", (Exception,), {})
+    django_conf = types.ModuleType("django.conf")
+    django_conf.settings = SimpleNamespace(
+        PLUGINS_CONFIG={"netbox_rpc": {"default_zabbix_server": "zabbix.example.com"}}
+    )
     django_utils = types.ModuleType("django.utils")
     django_timezone = types.ModuleType("django.utils.timezone")
     django_timezone.now = MagicMock(return_value=None)
@@ -156,6 +176,7 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "netbox.jobs", netbox_jobs)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
+    monkeypatch.setitem(sys.modules, "django.conf", django_conf)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)

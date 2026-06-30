@@ -36,7 +36,7 @@ def test_proxmox_qemu_lifecycle_normalizes_structured_payload(jobs_module) -> No
         cores=4,
         ciuser="root",
         agent_enabled=True,
-        search_domain="nmulti.cloud",
+        search_domain="example.com",
         dns_servers=["168.0.96.26", "168.0.96.27", "8.8.8.8"],
         disk_gb=8192,
         networks=[
@@ -58,7 +58,7 @@ def test_proxmox_qemu_lifecycle_normalizes_structured_payload(jobs_module) -> No
     assert normalized["vmid"] == 163
     assert normalized["node"] == "node05"
     assert normalized["agent_enabled"] is True
-    assert normalized["search_domain"] == "nmulti.cloud"
+    assert normalized["search_domain"] == "example.com"
     assert normalized["dns_servers"] == ["168.0.96.26", "168.0.96.27", "8.8.8.8"]
     assert normalized["disk_gb"] == 8192
     assert normalized["resize_disk"] == "scsi0"
@@ -132,7 +132,7 @@ def test_proxmox_qemu_lifecycle_accepts_debian_network_repair(jobs_module) -> No
         operations=["agent_configure_debian_network"],
         vmid=163,
         node="node05",
-        search_domain="nmulti.cloud",
+        search_domain="example.com",
         dns_servers=["168.0.96.26", "168.0.96.27", "8.8.8.8"],
         guest_networks=[
             {"interface": "eth0", "address": "10.0.30.138/24", "gateway": "10.0.30.1"},
@@ -146,7 +146,7 @@ def test_proxmox_qemu_lifecycle_accepts_debian_network_repair(jobs_module) -> No
     assert normalized["guest_networks"][0]["interface"] == "eth0"
     assert normalized["guest_networks"][0]["gateway"] == "10.0.30.1"
     assert normalized["guest_networks"][1]["address"] == "10.0.20.138/24"
-    assert normalized["search_domain"] == "nmulti.cloud"
+    assert normalized["search_domain"] == "example.com"
     assert normalized["dns_servers"][2] == "8.8.8.8"
 
 
@@ -177,8 +177,8 @@ def test_proxmox_qemu_lifecycle_accepts_pbs_zabbix_status(jobs_module) -> None:
     normalized = jobs_module.normalize_execution_params(execution)
 
     assert normalized["operations"] == ["agent_pbs_zabbix_status"]
-    assert normalized["zabbix_server"] == "zabbix.nmulti.cloud"
-    assert normalized["command_fingerprint"]["zabbix_server"] == "zabbix.nmulti.cloud"
+    assert normalized["zabbix_server"] == "zabbix.example.com"
+    assert normalized["command_fingerprint"]["zabbix_server"] == "zabbix.example.com"
 
 
 def test_proxmox_qemu_lifecycle_accepts_zabbix_agent2_configure(jobs_module) -> None:
@@ -187,13 +187,13 @@ def test_proxmox_qemu_lifecycle_accepts_zabbix_agent2_configure(jobs_module) -> 
         operations=["agent_configure_zabbix_agent2"],
         vmid=163,
         node="node05",
-        zabbix_server="zabbix.nmulti.cloud",
+        zabbix_server="zabbix.example.com",
     )
 
     normalized = jobs_module.normalize_execution_params(execution)
 
     assert normalized["operations"] == ["agent_configure_zabbix_agent2"]
-    assert normalized["zabbix_server"] == "zabbix.nmulti.cloud"
+    assert normalized["zabbix_server"] == "zabbix.example.com"
 
 
 def _set_resolver(return_value) -> None:
@@ -237,6 +237,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
     django_db.IntegrityError = type("IntegrityError", (Exception,), {})
+    django_conf = types.ModuleType("django.conf")
+    django_conf.settings = SimpleNamespace(
+        PLUGINS_CONFIG={"netbox_rpc": {"default_zabbix_server": "zabbix.example.com"}}
+    )
     django_utils = types.ModuleType("django.utils")
     django_timezone = types.ModuleType("django.utils.timezone")
     django_timezone.now = MagicMock(return_value=None)
@@ -258,6 +262,7 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "netbox.jobs", netbox_jobs)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
+    monkeypatch.setitem(sys.modules, "django.conf", django_conf)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)

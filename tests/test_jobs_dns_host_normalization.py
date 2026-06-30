@@ -62,7 +62,7 @@ def test_dns_host_status_defaults_host_from_target(jobs_module) -> None:
     normalized = jobs_module.normalize_execution_params(execution)
 
     assert normalized["target"] == "dns02"
-    assert normalized["rpc_ssh_host"] == "dns02.nmulti.cloud"
+    assert normalized["rpc_ssh_host"] == "dns02.example.com"
     assert normalized["rpc_ssh_port"] == 22
     assert normalized["rpc_ssh_credential_pk"] == 8
     assert normalized["rpc_ssh_known_hosts_entry"] == ""
@@ -85,7 +85,7 @@ def test_dns_host_deploy_defaults_force_recreate_false(jobs_module) -> None:
 
     normalized = jobs_module.normalize_execution_params(execution)
 
-    assert normalized["rpc_ssh_host"] == "dns01.nmulti.cloud"
+    assert normalized["rpc_ssh_host"] == "dns01.example.com"
     assert normalized["force_recreate"] is False
     assert normalized["command_fingerprint"]["force_recreate"] is False
 
@@ -131,6 +131,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
     django_db.IntegrityError = type("IntegrityError", (Exception,), {})
+    django_conf = types.ModuleType("django.conf")
+    django_conf.settings = SimpleNamespace(
+        PLUGINS_CONFIG={"netbox_rpc": {"dns_host_domain": "example.com"}}
+    )
     django_utils = types.ModuleType("django.utils")
     django_timezone = types.ModuleType("django.utils.timezone")
     django_timezone.now = MagicMock(return_value=None)
@@ -153,6 +157,7 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "netbox.jobs", netbox_jobs)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
+    monkeypatch.setitem(sys.modules, "django.conf", django_conf)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)

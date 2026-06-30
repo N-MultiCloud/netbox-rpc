@@ -254,8 +254,12 @@ class RPCExecutionJob(JobRunner):
 # params, keeping legacy payloads byte-for-byte identical.
 _DEFAULT_TRANSPORT_DRIVER = "asyncssh"
 _DEFAULT_OUTPUT_PARSER = "none"
-_DEFAULT_DNS_HOST_DOMAIN = "nmulti.cloud"
-_DEFAULT_ZABBIX_SERVER = "zabbix.nmulti.cloud"
+# Deployment-specific defaults are intentionally empty so the public plugin
+# ships no site-specific hostnames. Configure them per deployment via the
+# netbox_rpc plugin settings ("dns_host_domain", "default_zabbix_server"), or
+# pass explicit values in the execution params.
+_DEFAULT_DNS_HOST_DOMAIN = ""
+_DEFAULT_ZABBIX_SERVER = ""
 
 
 def _netbox_rpc_plugin_setting(key: str, default: str) -> str:
@@ -1163,9 +1167,17 @@ def _normalize_dns_host_execution(execution: RPCExecution) -> dict[str, Any]:
         )
 
     credential_pk = _int_range(params, "rpc_ssh_credential_pk", 1, None)
-    host = str(params.get("rpc_ssh_host") or "").strip() or (
-        f"{target}.{_default_dns_host_domain()}"
-    )
+    host = str(params.get("rpc_ssh_host") or "").strip()
+    if not host:
+        domain = _default_dns_host_domain()
+        if not domain:
+            raise RPCExecutionError(
+                "rpc_ssh_host is required: pass it explicitly, or configure the "
+                "netbox_rpc 'dns_host_domain' plugin setting to derive "
+                "'<target>.<domain>'.",
+                code="RPC_PARAM_INVALID",
+            )
+        host = f"{target}.{domain}"
     _validate_dns_host_ssh_host(host)
     ssh_port = _optional_int_range(params, "rpc_ssh_port", 1, 65535) or 22
     known_hosts_entry = str(params.get("rpc_ssh_known_hosts_entry") or "")
@@ -1231,9 +1243,14 @@ def _normalize_linux_agent_install_execution(
         "command_fingerprint": {"handler_id": execution.procedure.handler_id},
     }
     if zabbix_server:
-        server = _normalize_zabbix_server(
-            params.get("zabbix_server") or _default_zabbix_server()
-        )
+        raw_server = str(params.get("zabbix_server") or "").strip() or _default_zabbix_server()
+        if not raw_server:
+            raise RPCExecutionError(
+                "zabbix_server is required: pass it explicitly, or configure the "
+                "netbox_rpc 'default_zabbix_server' plugin setting.",
+                code="RPC_PARAM_INVALID",
+            )
+        server = _normalize_zabbix_server(raw_server)
         normalized["zabbix_server"] = server
         normalized["command_fingerprint"]["zabbix_server"] = server
     _copy_optional_ssh_overrides(params, normalized)
@@ -1417,9 +1434,15 @@ def _normalize_proxmox_qemu_vm_lifecycle_execution(
         command_fingerprint["guest_networks"] = guest_networks
 
     if {"agent_pbs_zabbix_status", "agent_configure_zabbix_agent2"} & set(operations):
-        zabbix_server = _normalize_zabbix_server(
-            params.get("zabbix_server") or _default_zabbix_server()
-        )
+        raw_zabbix = str(params.get("zabbix_server") or "").strip() or _default_zabbix_server()
+        if not raw_zabbix:
+            raise RPCExecutionError(
+                "zabbix_server is required for the requested operation: pass it "
+                "explicitly, or configure the netbox_rpc 'default_zabbix_server' "
+                "plugin setting.",
+                code="RPC_PARAM_INVALID",
+            )
+        zabbix_server = _normalize_zabbix_server(raw_zabbix)
         normalized["zabbix_server"] = zabbix_server
         command_fingerprint["zabbix_server"] = zabbix_server
 
