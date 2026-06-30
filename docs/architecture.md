@@ -100,3 +100,37 @@ Procedure normalizers accept structured parameters only. They must not accept or
 store arbitrary SSH command text. Driver/parser selection is injected centrally
 from `RPCProcedure.transport_driver`, `output_parser`, and `output_schema`.
 
+
+## Testing
+
+The suite is two tiers:
+
+1. **Fast pure-domain unit tests** (`tests/`, run by `pytest`): they stub Django
+   and NetBox and need no database. They cover the domain logic — the projection
+   `apply`/`rebuild` fold, typed domain events and their round-trips, the
+   aggregate invariants, the value objects, the query helpers, and the
+   normalization service — plus source-level contract checks. This is the
+   `ci.yml` workflow.
+
+2. **DB-backed integration tests** (`netbox_rpc/tests/`, run by
+   `python netbox/manage.py test netbox_rpc` against a real Postgres test
+   database): they cover the parts that only exist against the ORM — the
+   `event_store` append+project path, the rebuild oracle (`rebuild_projection`
+   reproduces the live projection for every lifecycle path), the append-only
+   ledger (model guards + the database trigger; an execution with events cannot
+   be deleted), the command handlers (create/run/cancel and the cancel-vs-start
+   row-locked race), and the REST API (command-only write model: PUT/PATCH/DELETE
+   return 405; cancel is an action; the event log is read-only). This is the
+   `integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
+   with a Postgres service) workflows, using the minimal NetBox config at
+   `tests/ci/netbox_configuration.py`.
+
+Run them locally with:
+
+```bash
+# Tier 1 — fast, no database
+pytest tests/
+
+# Tier 2 — against a NetBox checkout + Postgres
+python netbox/manage.py test netbox_rpc
+```

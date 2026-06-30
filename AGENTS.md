@@ -357,17 +357,27 @@ be used autonomously on destructive procedures.
 - Tests must use mocks and fixtures only; do not connect to real Linux hosts,
   containers, VMs, or Huawei OLTs.
 
-## CI
+## CI / Testing
 
-`.gitea/workflows/ci.yml` runs on every push and pull request via the
-`mirror-host` self-hosted runner. It installs pytest (no other deps needed
-because tests stub out Django/NetBox via `monkeypatch`), runs `py_compile` on
-all Python files, and executes `pytest tests/ -q`. This is the pre-merge gate.
+Two tiers (see `docs/architecture.md` → Testing):
 
-Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs.
-Use `monkeypatch` and `SimpleNamespace` stubs as demonstrated in
-`tests/test_jobs_systemd_normalization.py` and
-`tests/test_jobs_ssh_normalization.py`.
+1. **Pure-domain unit tests** (`tests/`, `pytest`) — stub Django/NetBox, no
+   database. `.gitea/workflows/ci.yml` runs `py_compile` + `pytest tests/ -q` on
+   the `mirror-host` runner; the portable `.github/workflows/test.yml` `unit` job
+   mirrors it. Cover the domain logic (projection fold/rebuild, typed events,
+   aggregate invariants, value objects, queries, normalization). Add new
+   domain/CQRS logic here. Use `monkeypatch`/`SimpleNamespace` stubs as in
+   `tests/test_jobs_systemd_normalization.py`.
+
+2. **DB-backed integration tests** (`netbox_rpc/tests/`, `manage.py test
+   netbox_rpc`) — a real NetBox + PostgreSQL test database. Cover `event_store`,
+   the rebuild oracle, the append-only ledger, the command handlers, and the
+   command-only REST API. `.gitea/workflows/integration.yml` runs them against
+   the self-hosted NetBox; `.github/workflows/test.yml` `integration` job runs
+   them portably with a Postgres service. Config: `tests/ci/netbox_configuration.py`.
+
+Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
+the integration tests mock the RQ enqueue and the backend dispatch.
 
 ## Adding New Procedures
 

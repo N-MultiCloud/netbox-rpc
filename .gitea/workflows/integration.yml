@@ -1,0 +1,74 @@
+name: Integration tests (NetBox DB-backed)
+
+# Runs the DB-backed integration suite (netbox_rpc/tests/) against the
+# self-hosted NetBox install via `manage.py test`. The fast pure-domain suite
+# (tests/) is run separately by ci.yml.
+#
+# This job is *additive*: the authoritative, hermetic integration gate is the
+# portable .github/workflows/test.yml (it stands up its own NetBox + Postgres).
+# When this runner has no NetBox install or the DB password secret is not
+# configured, the job soft-skips with success rather than blocking merges.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: manage.py test netbox_rpc
+    runs-on: mirror-host
+    env:
+      NETBOX_ROOT: /opt/netbox
+      NETBOX_DB_NAME: netbox_rpc_citest
+      NETBOX_DB_USER: netbox
+      NETBOX_DB_PASSWORD: ${{ secrets.NETBOX_DB_PASSWORD }}
+      NETBOX_DB_HOST: localhost
+      NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight (soft-skip if unconfigured)
+        id: preflight
+        shell: bash
+        run: |
+          set -eo pipefail
+          if [ ! -x "${NETBOX_ROOT}/venv/bin/python" ]; then
+            echo "::notice::NetBox venv not found at ${NETBOX_ROOT}; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${NETBOX_DB_PASSWORD}" ]; then
+            echo "::notice::NETBOX_DB_PASSWORD secret is not configured; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Provision a UTF8 test database
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -eo pipefail
+          # NetBox's natural-sort ICU collation requires a UTF8 database. Some
+          # hosts default new databases to SQL_ASCII, so pre-create the Django
+          # test database (test_<NAME>) as UTF8 and reuse it with --keepdb.
+          if command -v sudo >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
+            sudo -n -u postgres psql -d postgres -c "ALTER ROLE ${NETBOX_DB_USER} CREATEDB" || true
+            sudo -n -u postgres psql -d postgres -c "DROP DATABASE IF EXISTS test_${NETBOX_DB_NAME}" || true
+            sudo -n -u postgres psql -d postgres -c "CREATE DATABASE test_${NETBOX_DB_NAME} OWNER ${NETBOX_DB_USER} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+          fi
+
+      - name: Run the integration suite
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -eo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/tests/ci:${NETBOX_ROOT}/netbox"
+          export NETBOX_CONFIGURATION=netbox_configuration
+          export DJANGO_SETTINGS_MODULE=netbox.settings
+          "${NETBOX_ROOT}/venv/bin/python" "${NETBOX_ROOT}/netbox/manage.py" test netbox_rpc --keepdb --verbosity 2
