@@ -3,6 +3,11 @@ name: Integration tests (NetBox DB-backed)
 # Runs the DB-backed integration suite (netbox_rpc/tests/) against the
 # self-hosted NetBox install via `manage.py test`. The fast pure-domain suite
 # (tests/) is run separately by ci.yml.
+#
+# This job is *additive*: the authoritative, hermetic integration gate is the
+# portable .github/workflows/test.yml (it stands up its own NetBox + Postgres).
+# When this runner has no NetBox install or the DB password secret is not
+# configured, the job soft-skips with success rather than blocking merges.
 
 on:
   push:
@@ -27,7 +32,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Preflight (soft-skip if unconfigured)
+        id: preflight
+        shell: bash
+        run: |
+          set -eo pipefail
+          if [ ! -x "${NETBOX_ROOT}/venv/bin/python" ]; then
+            echo "::notice::NetBox venv not found at ${NETBOX_ROOT}; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${NETBOX_DB_PASSWORD}" ]; then
+            echo "::notice::NETBOX_DB_PASSWORD secret is not configured; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
       - name: Provision a UTF8 test database
+        if: steps.preflight.outputs.run == 'true'
         shell: bash
         run: |
           set -eo pipefail
@@ -41,13 +64,10 @@ jobs:
           fi
 
       - name: Run the integration suite
+        if: steps.preflight.outputs.run == 'true'
         shell: bash
         run: |
           set -eo pipefail
-          if [ ! -x "${NETBOX_ROOT}/venv/bin/python" ]; then
-            echo "::error::NetBox venv not found at ${NETBOX_ROOT}; this job requires a self-hosted NetBox install."
-            exit 1
-          fi
           export PYTHONPATH="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/tests/ci:${NETBOX_ROOT}/netbox"
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
