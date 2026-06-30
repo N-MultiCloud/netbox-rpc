@@ -11,6 +11,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from netbox.models import NetBoxModel
 
+from .domain.value_objects import Effect, ExecutionStatus
+
 # Matches a valid systemd service unit name with an optional .service suffix.
 # Rules enforced:
 #   - no double dots anywhere (nginx..service rejected)
@@ -66,9 +68,10 @@ class RPCBackend(NetBoxModel):
 
 
 class RPCProcedure(NetBoxModel):
-    EFFECT_READ = "read"
-    EFFECT_WRITE = "write"
-    EFFECT_DESTRUCTIVE = "destructive"
+    # Effect vocabulary is single-sourced from the domain value object.
+    EFFECT_READ = Effect.READ.value
+    EFFECT_WRITE = Effect.WRITE.value
+    EFFECT_DESTRUCTIVE = Effect.DESTRUCTIVE.value
     EFFECT_CHOICES = (
         (EFFECT_READ, "Read"),
         (EFFECT_WRITE, "Write"),
@@ -240,11 +243,12 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
 
 
 class RPCExecution(NetBoxModel):
-    STATUS_QUEUED = "queued"
-    STATUS_RUNNING = "running"
-    STATUS_SUCCEEDED = "succeeded"
-    STATUS_FAILED = "failed"
-    STATUS_CANCELLED = "cancelled"
+    # Status vocabulary is single-sourced from the domain value object.
+    STATUS_QUEUED = ExecutionStatus.QUEUED.value
+    STATUS_RUNNING = ExecutionStatus.RUNNING.value
+    STATUS_SUCCEEDED = ExecutionStatus.SUCCEEDED.value
+    STATUS_FAILED = ExecutionStatus.FAILED.value
+    STATUS_CANCELLED = ExecutionStatus.CANCELLED.value
     STATUS_CHOICES = (
         (STATUS_QUEUED, "Queued"),
         (STATUS_RUNNING, "Running"),
