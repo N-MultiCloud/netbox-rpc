@@ -36,13 +36,13 @@ exemplar procedures.
 
 ## Automatic Production Deployment
 
-**Starting with the deploy-production workflow**, new commits to `main` automatically deploy to `netbox.nmulti.cloud`.
+**Starting with the deploy-production workflow**, new commits to `main` automatically deploy to the production NetBox instance (deploy target configured per-environment via the `deploy-production` workflow's `DEPLOY_*` variables/secrets).
 
 **Deploy job in `.gitea/workflows/deploy-production.yml`:**
 - Triggers on `push: [main]` branch updates
 - Also supports manual dispatch via `workflow_dispatch` with optional `ref` input
 - Runs on `prod-deploy` runner with SSH access to production host
-- Executes: `ssh nmc-prod-207 -- deploy-plugin <plugin-name> "$REF"`
+- Executes: `ssh <prod-deploy-host> -- deploy-plugin <plugin-name> "$REF"`
 
 **Deploy parameters:**
 - REF: can be a version tag (v0.1.0), branch name (main/develop), or 7+ character commit SHA
@@ -54,7 +54,7 @@ exemplar procedures.
 - StrictHostKeyChecking=accept-new prevents MITM attacks
 - Quoted variable interpolation prevents shell injection
 
-**Deployment on production server (`nmc-prod-207`):**
+**Deployment on production server (`<prod-deploy-host>`):**
 1. Git fetch/checkout of the specified ref in the plugin submodule
 2. pip install -e to refresh editable install and pick up new dependencies
 3. manage.py migrate to apply any pending migrations
@@ -66,8 +66,8 @@ exemplar procedures.
 **Monitoring and verification:**
 - Watch the `deploy-production.yml` workflow run in Gitea Actions
 - Check the `deploy` job logs for SSH output and health check results
-- Verify production is healthy: `ssh nmc-prod-207 -- health netbox`
-- Check service logs: `ssh nmc-prod-207 -- logs netbox`
+- Verify production is healthy: `ssh <prod-deploy-host> -- health netbox`
+- Check service logs: `ssh <prod-deploy-host> -- logs netbox`
 
 **Manual deployment trigger:**
 ```bash
@@ -76,7 +76,7 @@ nms git actions run <plugin> .gitea/workflows/deploy-production.yml \
   -r main -f ref=v0.1.0
 
 # Or SSH directly to production
-ssh nmc-prod-207 -- deploy-plugin <plugin-name> v0.1.0
+ssh <prod-deploy-host> -- deploy-plugin <plugin-name> v0.1.0
 ```
 
 For comprehensive deploy infrastructure documentation, see `/root/personal-context/nmulticloud-context/CLAUDE.md` section "Automatic Plugin Deployment to Production".

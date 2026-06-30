@@ -38,7 +38,7 @@ def add_pbs_zabbix_operations(apps, schema_editor):
             "minLength": 1,
             "maxLength": 253,
             "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.?$",
-            "default": "zabbix.nmulti.cloud",
+            "default": "zabbix.example.com",
             "description": "Zabbix server endpoint configured in zabbix_agent2.conf.",
         },
     )

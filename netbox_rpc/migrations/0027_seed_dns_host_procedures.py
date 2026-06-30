@@ -31,7 +31,7 @@ _SSH_HOST_OVERRIDE = {
     "type": "string",
     "minLength": 1,
     "maxLength": 255,
-    "description": "Optional SSH host override; defaults to <target>.nmulti.cloud.",
+    "description": "Optional SSH host override; if omitted, derived as <target>.<dns_host_domain plugin setting>.",
 }
 
 _SSH_PORT_OVERRIDE = {

@@ -40,7 +40,7 @@ N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
 - Network device procedures should delegate protocol execution to the
-  `network.nms.nmulti.cloud` command/query gateway as drivers migrate out of
+  network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
 ## LLM Agent Safety Guardrails
@@ -138,7 +138,7 @@ be used autonomously on destructive procedures.
   `os.linux.ubuntu.24.install_zabbix_agent2`
   (`os.linux_ubuntu_24.install_zabbix_agent2`, write, no approval, 600s)
   installs/configures Zabbix Agent 2 over SSH and defaults `zabbix_server` to
-  `zabbix.nmulti.cloud`. Their schemas accept only the standard
+  `zabbix.example.com`. Their schemas accept only the standard
   `rpc_ssh_*` connection override keys, plus `zabbix_server` for Zabbix; never
   add arbitrary package, command, or shell text parameters.
 - Mellanox NIC conversion: `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
@@ -286,7 +286,7 @@ be used autonomously on destructive procedures.
     deploys or updates the `powerdns-dns-api` Compose project. Required params:
     `target` (for example `dns01`/`dns02`) and `rpc_ssh_credential_pk`
     (`netbox-nms.DeviceCredential` PK). Optional params: `rpc_ssh_host`
-    (defaults to `<target>.nmulti.cloud`), `rpc_ssh_port` (default 22),
+    (if omitted, derived as `<target>.<dns_host_domain>` from the plugin setting), `rpc_ssh_port` (default 22),
     `rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking` (default
     true), and `force_recreate` (default false). Handler:
     `os.linux.dns_host.deploy_dns_stack`.
