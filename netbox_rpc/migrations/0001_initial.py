@@ -9,7 +9,6 @@ class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ("contenttypes", "0002_remove_content_type_name"),
-        ("netbox_nms", "0015_pfsense_service_type"),
     ]
 
     operations = [
@@ -117,7 +116,10 @@ class Migration(migrations.Migration):
                 ("created", models.DateTimeField(auto_now_add=True, null=True)),
                 ("last_updated", models.DateTimeField(auto_now=True, null=True)),
                 ("custom_field_data", models.JSONField(blank=True, default=dict)),
-                ("assigned_object_id", models.PositiveBigIntegerField(verbose_name="Target ID")),
+                (
+                    "assigned_object_id",
+                    models.PositiveBigIntegerField(verbose_name="Target ID"),
+                ),
                 (
                     "status",
                     models.CharField(
@@ -155,12 +157,11 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "backend",
-                    models.ForeignKey(
+                    models.PositiveBigIntegerField(
                         blank=True,
+                        db_column="backend_id",
+                        db_index=True,
                         null=True,
-                        on_delete=django.db.models.deletion.SET_NULL,
-                        related_name="rpc_executions",
-                        to="netbox_nms.nmsbackend",
                     ),
                 ),
                 (
@@ -242,7 +243,9 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name="rpcexecution",
-            index=models.Index(fields=["status", "created"], name="netbox_rpc_status_idx"),
+            index=models.Index(
+                fields=["status", "created"], name="netbox_rpc_status_idx"
+            ),
         ),
         migrations.AddConstraint(
             model_name="rpcexecutionevent",

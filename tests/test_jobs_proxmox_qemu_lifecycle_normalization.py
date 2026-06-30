@@ -69,7 +69,10 @@ def test_proxmox_qemu_lifecycle_normalizes_structured_payload(jobs_module) -> No
         "168.0.96.27",
         "8.8.8.8",
     ]
-    assert normalized["command_fingerprint"]["handler_id"] == "os.linux_proxmox.qemu_vm_lifecycle"
+    assert (
+        normalized["command_fingerprint"]["handler_id"]
+        == "os.linux_proxmox.qemu_vm_lifecycle"
+    )
 
 
 def test_proxmox_qemu_lifecycle_requires_node_for_start(jobs_module) -> None:
@@ -239,11 +242,11 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
     netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
     netbox_nms_proxmox_ssh = types.ModuleType("netbox_nms.proxmox_ssh")
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
     requests_mod = types.ModuleType("requests")
@@ -259,6 +262,5 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_nms.proxmox_ssh", netbox_nms_proxmox_ssh)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

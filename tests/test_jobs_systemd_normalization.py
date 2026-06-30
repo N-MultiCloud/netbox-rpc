@@ -94,7 +94,9 @@ def test_daemon_reload_skips_allowlist_lookup(jobs_module) -> None:
     filter_mock.assert_not_called()
 
 
-@pytest.mark.parametrize(("params", "expected_lines"), [({}, 100), ({"lines": 250}, 250)])
+@pytest.mark.parametrize(
+    ("params", "expected_lines"), [({}, 100), ({"lines": 250}, 250)]
+)
 def test_journal_tail_normalizes_lines(
     jobs_module,
     params: dict[str, int],
@@ -157,19 +159,21 @@ def test_call_backend_wraps_request_errors_as_backend_unreachable(
     jobs_module,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    backend = SimpleNamespace(
-        backend_url="http://nms-backend.example",
-        get_auth_headers=MagicMock(return_value={"Authorization": "Token test"}),
+    target = jobs_module.BackendTarget(
+        url="http://nms-backend.example",
+        headers={"Authorization": "Token test"},
         verify_ssl=True,
     )
     execution = SimpleNamespace(pk=123, procedure=SimpleNamespace(timeout_seconds=20))
     post_mock = MagicMock(
-        side_effect=jobs_module.requests.exceptions.ConnectionError("connection refused")
+        side_effect=jobs_module.requests.exceptions.ConnectionError(
+            "connection refused"
+        )
     )
     monkeypatch.setattr(jobs_module.requests, "post", post_mock)
 
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
-        jobs_module._call_backend(backend, execution)
+        jobs_module._call_backend(target, execution)
 
     assert exc_info.value.code == "RPC_BACKEND_UNREACHABLE"
     post_mock.assert_called_once_with(
@@ -229,12 +233,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
 
-    netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
-
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -268,6 +270,4 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "requests.exceptions", requests_exceptions)
-    monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

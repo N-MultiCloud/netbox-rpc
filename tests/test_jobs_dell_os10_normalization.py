@@ -18,7 +18,9 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
     sys.modules.pop("netbox_rpc.jobs", None)
 
 
-def test_bootstrap_normalizer_uses_credential_reference_not_password(jobs_module) -> None:
+def test_bootstrap_normalizer_uses_credential_reference_not_password(
+    jobs_module,
+) -> None:
     execution = _execution(
         "network.device.dell_os10.s5232f_on.bootstrap_restconf",
         "network.dell_os10_s5232f_on.bootstrap_restconf",
@@ -60,7 +62,9 @@ def test_bootstrap_configure_user_requires_credential(jobs_module) -> None:
     assert "restconf_credential_pk" in str(exc_info.value)
 
 
-def test_bootstrap_certificate_name_with_internal_space_is_rejected(jobs_module) -> None:
+def test_bootstrap_certificate_name_with_internal_space_is_rejected(
+    jobs_module,
+) -> None:
     execution = _execution(
         "network.device.dell_os10.s5232f_on.bootstrap_restconf",
         "network.dell_os10_s5232f_on.bootstrap_restconf",
@@ -203,12 +207,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
 
-    netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
-
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -225,6 +227,4 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
-    monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

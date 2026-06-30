@@ -17,11 +17,17 @@ from .. import models
 from ..event_store import mark_execution_failed
 from ..jobs import RPCExecutionJob
 from .serializers import (
+    RPCBackendSerializer,
     RPCLinuxServiceAllowlistSerializer,
     RPCExecutionEventSerializer,
     RPCExecutionSerializer,
     RPCProcedureSerializer,
 )
+
+
+class RPCBackendViewSet(NetBoxModelViewSet):
+    queryset = models.RPCBackend.objects.prefetch_related("tags")
+    serializer_class = RPCBackendSerializer
 
 
 class RPCProcedureViewSet(NetBoxModelViewSet):
@@ -58,7 +64,6 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "procedure",
         "assigned_object_type",
         "requested_by",
-        "backend",
     ).prefetch_related("tags")
     serializer_class = RPCExecutionSerializer
 

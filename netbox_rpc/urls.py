@@ -4,6 +4,7 @@ from utilities.urls import get_model_urls
 from . import views  # noqa: F401 — imports @register_model_view decorators
 
 _MODEL_ROUTES = (
+    ("rpcbackend", "backends"),
     ("rpcprocedure", "procedures"),
     ("rpclinuxserviceallowlist", "linux-service-allowlist"),
     ("rpcexecution", "executions"),

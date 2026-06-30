@@ -12,10 +12,26 @@ def load_constants() -> dict:
     return runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
 
 
-def test_plugin_uses_rpc_base_url_and_requires_netbox_nms() -> None:
+def test_plugin_uses_rpc_base_url_without_required_netbox_nms() -> None:
     src = read("netbox_rpc/__init__.py")
     assert 'base_url = "rpc"' in src
-    assert 'required_plugins = ["netbox_nms"]' in src
+    assert "required_plugins" not in src
+    assert "Audited RPC procedure catalog & execution framework for NetBox" in src
+
+
+def test_backend_adapter_contract_is_local_and_optional() -> None:
+    backends = read("netbox_rpc/backends.py")
+    models = read("netbox_rpc/models.py")
+    pyproject = read("pyproject.toml")
+
+    assert "class BackendTarget" in backends
+    assert "def resolve_backend" in backends
+    assert '"backend_resolver"' in backends
+    assert 'import_module("netbox_nms.backend")' in backends
+    assert "class RPCBackend" in models
+    assert "def get_auth_headers" in models
+    assert "netbox-nms" not in pyproject.split("[project.optional-dependencies]")[0]
+    assert 'nms = ["netbox-nms>=0.1.2,<0.2.0"]' in pyproject
 
 
 def test_procedure_catalog_stores_handler_ids_not_commands() -> None:
@@ -39,7 +55,17 @@ def test_procedure_exposes_driver_and_parser_selection_fields() -> None:
     assert "output_schema = models.JSONField" in models
     for driver in ("asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
         assert f'"{driver}"' in models
-    for parser in ("none", "auto", "json", "xml", "jc", "textfsm", "ttp", "genie", "regex"):
+    for parser in (
+        "none",
+        "auto",
+        "json",
+        "xml",
+        "jc",
+        "textfsm",
+        "ttp",
+        "genie",
+        "regex",
+    ):
         assert f'"{parser}"' in models
 
 
@@ -169,9 +195,10 @@ def test_dell_os10_procedure_catalog_names_are_seeded() -> None:
     assert "commands" not in migration
 
 
-def test_execution_job_delegates_to_nms_backend() -> None:
+def test_execution_job_delegates_to_resolved_backend_target() -> None:
     jobs = read("netbox_rpc/jobs.py")
-    assert "get_backend" in jobs
+    assert "resolve_backend" in jobs
+    assert "BackendTarget" in jobs
     assert "/rpc/executions/{execution.pk}/run" in jobs
     assert "normalize_execution_params" in jobs
     assert "RPCLinuxServiceAllowlist" in jobs
@@ -190,6 +217,7 @@ def test_execution_jobs_use_explicit_execution_pk_not_attached_object() -> None:
 
 def test_api_routes_are_registered() -> None:
     urls = read("netbox_rpc/api/urls.py")
+    assert 'router.register("backends"' in urls
     assert 'router.register("procedures"' in urls
     assert 'router.register("linux-service-allowlist"' in urls
     assert 'router.register("executions"' in urls
@@ -241,6 +269,20 @@ def test_allowlist_ssh_credentials_are_scoped_to_request_user() -> None:
     assert "DeviceCredential.objects.all()" not in forms
     assert 'DeviceCredential.objects.restrict(user, "view")' in forms
     assert "DeviceCredential.objects.none()" in forms
+    assert "forms.IntegerField" in forms
+    assert "clean_ssh_credential_override" in forms
+
+
+def test_netbox_nms_imports_are_not_module_level_for_standalone_boot() -> None:
+    serializers = read("netbox_rpc/api/serializers.py")
+    forms = read("netbox_rpc/forms.py")
+    jobs = read("netbox_rpc/jobs.py")
+
+    assert "from netbox_nms" not in serializers
+    assert "from netbox_nms.backend" not in jobs
+    for line in forms.splitlines():
+        if "from netbox_nms.models import DeviceCredential" in line:
+            assert line.startswith("            ")
 
 
 def test_approval_required_downgrade_requires_approve_permission() -> None:
@@ -350,11 +392,36 @@ def test_dell_os10_normalizer_branches_are_registered() -> None:
     assert "description_sha256" in jobs
 
 
-def test_install_ssh_key_migration_depends_on_netbox_nms_user_ssh_key() -> None:
+def test_install_ssh_key_migration_has_no_netbox_nms_dependency() -> None:
     migration = read("netbox_rpc/migrations/0006_seed_ssh_install_procedure.py")
-    assert "netbox_nms" in migration
-    assert "0029_user_ssh_key" in migration
+    assert "netbox_nms" not in migration
+    assert "0029_user_ssh_key" not in migration
     assert "from netbox_rpc" not in migration
+
+
+def test_decoupling_migrations_converge_fresh_and_existing_databases() -> None:
+    initial = read("netbox_rpc/migrations/0001_initial.py")
+    allowlist = read("netbox_rpc/migrations/0005_allowlist_ssh_credential_override.py")
+    merge = read(
+        "netbox_rpc/migrations/0032_merge_payload_hash_and_pipeline_exemplars.py"
+    )
+    backend = read("netbox_rpc/migrations/0033_rpcbackend.py")
+    drop_fks = read("netbox_rpc/migrations/0034_decouple_netbox_nms_fk_constraints.py")
+
+    assert '"netbox_nms"' not in initial
+    assert '"netbox_nms"' not in allowlist
+    assert "models.PositiveBigIntegerField" in initial
+    assert 'db_column="backend_id"' in initial
+    assert 'db_column="ssh_credential_override_id"' in allowlist
+    assert '"0031_rpcexecutionevent_payload_hash"' in merge
+    assert '"0031_seed_pipeline_exemplar_procedures"' in merge
+    assert "CreateModel" in backend
+    assert 'name="RPCBackend"' in backend
+    assert "SeparateDatabaseAndState" in drop_fks
+    assert "state_operations=[]" in drop_fks
+    assert "DROP CONSTRAINT IF EXISTS" in drop_fks
+    assert "netbox_rpc_rpcexecution" in drop_fks
+    assert "ssh_credential_override_id" in drop_fks
 
 
 def test_ssh_key_procedure_seeded_targets_device_and_vm() -> None:

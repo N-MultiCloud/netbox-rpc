@@ -31,6 +31,7 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
 # Happy path
 # ---------------------------------------------------------------------------
 
+
 def test_mellanox_normalizes_with_binding(jobs_module) -> None:
     _set_resolver(
         jobs_module,
@@ -125,6 +126,7 @@ def test_mellanox_bond_mtu_out_of_range_raises(jobs_module) -> None:
 # Error paths
 # ---------------------------------------------------------------------------
 
+
 def test_mellanox_missing_binding_raises(jobs_module) -> None:
     _set_resolver(jobs_module, None)
     execution = _execution(proxmox_endpoint_id=99)
@@ -158,6 +160,7 @@ def test_mellanox_missing_endpoint_id_raises(jobs_module) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _set_resolver(jobs_module, return_value) -> None:
     sys.modules["netbox_nms.proxmox_ssh"].resolve_proxmox_endpoint_ssh = MagicMock(
@@ -222,13 +225,13 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_utils.timezone = django_timezone
 
     netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
     netbox_nms_proxmox_ssh = types.ModuleType("netbox_nms.proxmox_ssh")
     netbox_nms_proxmox_ssh.resolve_proxmox_endpoint_ssh = MagicMock(return_value=None)
 
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -246,6 +249,5 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_nms.proxmox_ssh", netbox_nms_proxmox_ssh)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

@@ -4,6 +4,7 @@ This procedure is used by nms-backend to append a user's SSH public key to
 the target device's authorized_keys file using the existing DeviceService SSH
 credential, enabling key-based NMS CLI SSH access.
 """
+
 from django.db import migrations
 
 _SSH_INSTALL_KEY_PARAMS_SCHEMA = {
@@ -85,10 +86,6 @@ def _remove_ssh_procedure(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         ("netbox_rpc", "0005_allowlist_ssh_credential_override"),
-        # UserSSHKey was added in netbox-nms 0029. Pin to that migration so
-        # this migration runs after the SSH key registry table is available.
-        # Update this dependency name if netbox-nms ever squashes its migrations.
-        ("netbox_nms", "0029_user_ssh_key"),
     ]
 
     operations = [

@@ -76,9 +76,12 @@ def _execution(
 # Happy path
 # ---------------------------------------------------------------------------
 
+
 def test_packer_test_ssh_normalizes_from_proxmox_node(jobs_module, monkeypatch) -> None:
     _install_packer_stub(monkeypatch)
-    template = _packer_template_cls()(proxmox_node="10.0.30.139", proxmox_template_id=9010)
+    template = _packer_template_cls()(
+        proxmox_node="10.0.30.139", proxmox_template_id=9010
+    )
     execution = _execution(assigned_object=template, rpc_ssh_credential_pk=7)
 
     normalized = jobs_module.normalize_execution_params(execution)
@@ -98,7 +101,9 @@ def test_packer_test_ssh_normalizes_from_proxmox_node(jobs_module, monkeypatch) 
 
 def test_packer_ssh_host_and_port_override(jobs_module, monkeypatch) -> None:
     _install_packer_stub(monkeypatch)
-    template = _packer_template_cls()(proxmox_node="pve01proxbox", proxmox_template_id=1)
+    template = _packer_template_cls()(
+        proxmox_node="pve01proxbox", proxmox_template_id=1
+    )
     execution = _execution(
         assigned_object=template,
         rpc_ssh_credential_pk=3,
@@ -148,6 +153,7 @@ def test_packer_verify_services_explicit_list(jobs_module, monkeypatch) -> None:
 # Error paths
 # ---------------------------------------------------------------------------
 
+
 def test_packer_missing_plugin_raises(jobs_module, monkeypatch) -> None:
     # Ensure netbox_packer is NOT importable.
     monkeypatch.delitem(sys.modules, "netbox_packer", raising=False)
@@ -163,7 +169,9 @@ def test_packer_missing_plugin_raises(jobs_module, monkeypatch) -> None:
 def test_packer_wrong_target_raises(jobs_module, monkeypatch) -> None:
     _install_packer_stub(monkeypatch)
     # assigned_object is not a PackerTemplate instance
-    execution = _execution(assigned_object=SimpleNamespace(proxmox_node="x"), rpc_ssh_credential_pk=1)
+    execution = _execution(
+        assigned_object=SimpleNamespace(proxmox_node="x"), rpc_ssh_credential_pk=1
+    )
 
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
         jobs_module.normalize_execution_params(execution)
@@ -214,6 +222,7 @@ def test_packer_invalid_services_raises(jobs_module, monkeypatch) -> None:
 # Stubs (mirror tests/test_jobs_mellanox_normalization.py)
 # ---------------------------------------------------------------------------
 
+
 def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox = types.ModuleType("netbox")
     netbox_plugins = types.ModuleType("netbox.plugins")
@@ -242,12 +251,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
 
-    netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
-
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -264,6 +271,4 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
     monkeypatch.setitem(sys.modules, "django.utils.timezone", django_timezone)
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
-    monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

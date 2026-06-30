@@ -1,7 +1,24 @@
 # netbox-rpc Agent Notes
 
 `netbox-rpc` owns procedure policy and audit state. It must never store or
-accept arbitrary SSH command text from API clients.
+accept arbitrary SSH command text from API clients. It can boot and migrate
+without `netbox-nms`; NMS support is an optional auto-detected adapter.
+
+## Standalone Usage
+
+Install `netbox-rpc` without `netbox-nms` when only the audited RPC catalog and
+execution framework are needed. Standalone deployments use the local
+`RPCBackend` model for `base_url`, `verify_ssl`, and an optional static auth
+header. `auth_token` is plaintext storage; security-conscious deployments
+should configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` to resolve a
+`netbox_rpc.backends.BackendTarget` from an external secret store or service
+registry.
+
+When no custom resolver is configured and `netbox-nms` is importable,
+`netbox-rpc` adapts `netbox_nms.backend.get_backend(pk)` to the tiny backend
+runtime contract: `backend_url`, `get_auth_headers()`, and `verify_ssl`. When
+`netbox-nms` is absent, `RPCBackend` is the default backend source. The
+N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
 
 ## DDD / CQRS / Event Sourcing
 
@@ -111,8 +128,8 @@ be used autonomously on destructive procedures.
   DeviceService SSH credential. Handler ID: `os.linux_ubuntu_24.install_ssh_key`.
   Approval not required; the procedure is initiated automatically during NMS CLI
   key registration. Target models: `dcim.device` and
-  `virtualization.virtualmachine`. Migration `0006` depends on
-  `netbox_nms.0029_user_ssh_key`.
+  `virtualization.virtualmachine`. Migration `0006` is standalone and has no
+  `netbox_nms` migration dependency.
 - Direct-SSH Ubuntu 24 agent installers are seeded by migration `0028` and
   target `dcim.device` plus `virtualization.virtualmachine`.
   `os.linux.ubuntu.24.install_qemu_guest_agent`
@@ -426,12 +443,12 @@ from `approval_required=True` to `False` unless the user has
 
 - Seed data migrations inline their data directly; they must not import live
   Python modules such as `netbox_rpc.constants`.
-- The initial migration depends on `netbox_nms` migration `0015` — verify this
-  if `netbox-nms` adds new migrations.
-- Migration `0005` depends on `netbox_nms.0027_device_credential_ssh_key_auth`.
-  Migration `0006` depends on `netbox_nms.0029_user_ssh_key`.
-  When `netbox-nms` squashes its migrations, update both dependency names before
-  running `migrate`.
+- Fresh installs must not depend on `netbox-nms`. Historical migrations `0001`,
+  `0005`, and `0006` intentionally have no `netbox_nms` dependency.
+- Production databases that already applied the historical `netbox_nms` FKs are
+  reconciled by forward migration `0034_decouple_netbox_nms_fk_constraints`,
+  which drops only stale PostgreSQL foreign-key constraints and preserves the
+  populated integer columns and indexes.
 
 ## Event Sequence Integrity
 

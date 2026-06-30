@@ -1,10 +1,19 @@
 # netbox-rpc
 
-`netbox-rpc` is the NetBox source of truth for N-MultiCloud RPC procedures.
-It stores procedure policy, JSON schemas, execution records, and audit events.
-The plugin does not open SSH sessions directly; execution is delegated to
-`nms-backend`, which runs hard-coded handler IDs against credentials owned by
-`netbox-nms`.
+License note: this repository currently includes Apache-2.0; final license
+choice remains operator-confirmable.
+
+`netbox-rpc` is an audited RPC procedure catalog and execution framework for
+NetBox. It stores procedure policy, JSON schemas, execution records, and audit
+events. The plugin does not open SSH sessions directly; execution is delegated
+to a backend target that exposes `backend_url`, `get_auth_headers()`, and
+`verify_ssl`.
+
+The in-repo N-MultiCloud procedure catalog remains available as an optional,
+guarded layer. `netbox-nms` is one supported integration: when installed,
+`netbox-rpc` auto-detects `netbox_nms.backend.get_backend()` and preserves the
+existing nms-backend dispatch URL, auth headers, TLS verification flag, and
+empty `{}` POST body.
 
 The procedure catalog is intentionally narrow:
 
@@ -29,6 +38,34 @@ The procedure catalog is intentionally narrow:
 - `services.pterodactyl.container_logs`
 
 Operators call named procedures, not arbitrary SSH commands.
+
+## Standalone usage
+
+`netbox-rpc` can be installed without `netbox-nms`. In standalone deployments,
+create an `RPCBackend` object in NetBox and set:
+
+- `name`: operator-facing backend name.
+- `base_url`: backend service base URL; dispatch uses
+  `<base_url>/rpc/executions/<execution_id>/run`.
+- `verify_ssl`: whether `requests.post()` verifies the backend TLS certificate.
+- `auth_header_name` and `auth_token`: optional static auth header. The token is
+  stored in plaintext, so security-conscious deployments should prefer a custom
+  resolver.
+
+For external secret stores or non-NMS backend discovery, set:
+
+```python
+PLUGINS_CONFIG = {
+    "netbox_rpc": {
+        "backend_resolver": "my_package.rpc.resolve_backend",
+    }
+}
+```
+
+The resolver is called as `resolver(pk)` and must return
+`netbox_rpc.backends.BackendTarget` or `None`. If no custom resolver is set and
+`netbox-nms` is installed, the NMS adapter is used automatically. If
+`netbox-nms` is absent, `RPCBackend` is used as the self-contained default.
 
 ## DDD / CQRS / Event Sourcing
 
@@ -274,14 +311,16 @@ body is unchanged. The transport → parse → normalize → validate → store 
 itself lives in `nms-backend automation/rpc/`; this plugin only chooses which
 driver and parser a procedure uses.
 
-`netbox-nms` owns SSH connection material through `DeviceService` rows with
-`service_type="ssh"`. Those rows provide the management host, port, linked
-`DeviceCredential`, `ssh_known_hosts_entry`, and
-`ssh_strict_host_key_checking` values consumed by `nms-backend`.
-Per-service Linux allowlist entries may set `ssh_credential_override` to a
-`netbox-nms.DeviceCredential`; when present, the normalized execution params
+In the optional `netbox-nms` integration, SSH connection material comes from
+`DeviceService` rows with `service_type="ssh"`. Those rows provide the
+management host, port, linked `DeviceCredential`, `ssh_known_hosts_entry`, and
+`ssh_strict_host_key_checking` values consumed by `nms-backend`. Per-service
+Linux allowlist entries may set `ssh_credential_override` to a
+`netbox-nms.DeviceCredential` PK; when present, the normalized execution params
 include `rpc_ssh_credential_pk` so `nms-backend` fetches that credential by PK
-instead of resolving SSH credentials by device name.
+instead of resolving SSH credentials by device name. Standalone deployments can
+submit the same structured credential-reference params to a backend that
+understands them.
 
 For the authoring decision matrix, production dependency table, inline template
 rules, and deploy ordering for new exemplars, see
@@ -322,8 +361,8 @@ clients must not submit arbitrary SSH command text.
   `normalized_params` or `command_fingerprint`.
 - Prefer enum or allowlist parameters for command fragments such as service
   names, board/slot identifiers, or ONT IDs.
-- Keep SSH credentials in `netbox-nms`; this plugin stores execution metadata,
-  not private keys or passwords.
+- Keep SSH credentials outside `netbox-rpc`; this plugin stores execution
+  metadata and credential references, not private keys or passwords.
 - Keep strict host-key checking enabled unless an operator explicitly disables
   it for a lab or migration case.
 - Treat stdout and stderr as audit data. Store full output only where policy
