@@ -416,11 +416,23 @@ queryset if no request context is available.
 
 ## Testing
 
-Default tests are static or mocked:
+The suite is two tiers (see `docs/architecture.md` → Testing):
 
 ```bash
+# Tier 1 — fast pure-domain unit tests; stub Django/NetBox, no database
 python -m pytest tests
+
+# Tier 2 — DB-backed integration tests against a NetBox checkout + Postgres
+python netbox/manage.py test netbox_rpc
 ```
+
+Tier 1 (`tests/`) covers the domain logic (projection fold/rebuild, typed
+events, aggregate invariants, value objects, queries, normalization) and runs in
+the `ci.yml` workflow. Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound
+behavior — `event_store`, the rebuild oracle, the append-only ledger, the
+command handlers, and the command-only REST API — and runs in the
+`integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
+Postgres-service) workflows using `tests/ci/netbox_configuration.py`.
 
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is

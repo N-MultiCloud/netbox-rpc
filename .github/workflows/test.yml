@@ -1,0 +1,80 @@
+name: Tests
+
+# Portable CI for the public repository: runs the fast pure-domain suite and the
+# DB-backed integration suite against a real NetBox + PostgreSQL.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Pure-domain unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pytest-asyncio requests ruff
+      - run: ruff check netbox_rpc tests
+      - run: python -m compileall netbox_rpc tests
+      - run: pytest tests/ -q
+
+  integration:
+    name: NetBox DB-backed integration tests (manage.py test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NETBOX_VERSION: v4.6.2
+      NETBOX_DB_NAME: netbox
+      NETBOX_DB_USER: netbox
+      NETBOX_DB_PASSWORD: netbox
+      NETBOX_DB_HOST: localhost
+      NETBOX_REDIS_HOST: localhost
+      NETBOX_SECRET_KEY: github-actions-integration-secret-key-0123456789
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+          POSTGRES_DB: netbox
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check out NetBox
+        run: git clone --depth 1 -b "${NETBOX_VERSION}" https://github.com/netbox-community/netbox.git netbox
+
+      - name: Install NetBox + plugin
+        run: |
+          set -eo pipefail
+          python -m pip install --upgrade pip
+          pip install -r netbox/requirements.txt
+          pip install -e ./plugin
+
+      - name: Run the integration suite
+        run: |
+          set -eo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
+          export NETBOX_CONFIGURATION=netbox_configuration
+          export DJANGO_SETTINGS_MODULE=netbox.settings
+          python netbox/netbox/manage.py test netbox_rpc --verbosity 2
