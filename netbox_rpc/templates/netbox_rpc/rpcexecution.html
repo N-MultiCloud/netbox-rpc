@@ -32,10 +32,10 @@
             <td>{{ object.requested_by|placeholder }}</td>
           </tr>
           <tr>
-            <th scope="row">Backend</th>
+            <th scope="row">Backend ID</th>
             <td>
               {% if object.backend %}
-                <a href="{{ object.backend.get_absolute_url }}">{{ object.backend }}</a>
+                {{ object.backend }}
               {% else %}
                 {{ ''|placeholder }}
               {% endif %}

@@ -12,8 +12,7 @@ import requests
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
 
-from netbox_nms.backend import get_backend
-
+from .backends import BackendTarget, resolve_backend
 from .constants import (
     DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
@@ -73,7 +72,6 @@ from .event_store import (
 from .models import RPCLinuxServiceAllowlist, RPCExecution
 
 if TYPE_CHECKING:
-    from netbox_nms.models import NMSBackend
     from rq.job import Job
 
 logger = logging.getLogger(__name__)
@@ -196,8 +194,8 @@ class RPCExecutionJob(JobRunner):
             or (self.job.data or {}).get("backend_pk")
             or execution.backend_id
         )
-        backend = get_backend(backend_pk)
-        if backend is None:
+        target = resolve_backend(backend_pk)
+        if target is None:
             self._mark_failed(
                 execution,
                 "No NMSBackend configured for RPC execution.",
@@ -216,7 +214,7 @@ class RPCExecutionJob(JobRunner):
                 _hash_json(normalized.get("command_fingerprint")),
             )
 
-            response = _call_backend(backend, execution)
+            response = _call_backend(target, execution)
             _store_backend_response(execution, response)
         except Exception as exc:
             code = getattr(exc, "code", "RPC_EXECUTION_FAILED")
@@ -242,7 +240,6 @@ class RPCExecutionJob(JobRunner):
         return RPCExecution.objects.select_related(
             "procedure",
             "assigned_object_type",
-            "backend",
         ).get(pk=pk)
 
     def _mark_running(self, execution: RPCExecution) -> None:
@@ -257,6 +254,35 @@ class RPCExecutionJob(JobRunner):
 # params, keeping legacy payloads byte-for-byte identical.
 _DEFAULT_TRANSPORT_DRIVER = "asyncssh"
 _DEFAULT_OUTPUT_PARSER = "none"
+_DEFAULT_DNS_HOST_DOMAIN = "nmulti.cloud"
+_DEFAULT_ZABBIX_SERVER = "zabbix.nmulti.cloud"
+
+
+def _netbox_rpc_plugin_setting(key: str, default: str) -> str:
+    try:
+        from django.conf import settings
+    except ImportError:
+        return default
+    try:
+        plugin_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
+    except Exception:
+        return default
+    value = (plugin_config.get("netbox_rpc") or {}).get(key, default)
+    return str(value or default)
+
+
+def _default_dns_host_domain() -> str:
+    return _netbox_rpc_plugin_setting(
+        "dns_host_domain",
+        _DEFAULT_DNS_HOST_DOMAIN,
+    ).strip(".")
+
+
+def _default_zabbix_server() -> str:
+    return _netbox_rpc_plugin_setting(
+        "default_zabbix_server",
+        _DEFAULT_ZABBIX_SERVER,
+    )
 
 
 def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
@@ -1137,7 +1163,9 @@ def _normalize_dns_host_execution(execution: RPCExecution) -> dict[str, Any]:
         )
 
     credential_pk = _int_range(params, "rpc_ssh_credential_pk", 1, None)
-    host = str(params.get("rpc_ssh_host") or "").strip() or f"{target}.nmulti.cloud"
+    host = str(params.get("rpc_ssh_host") or "").strip() or (
+        f"{target}.{_default_dns_host_domain()}"
+    )
     _validate_dns_host_ssh_host(host)
     ssh_port = _optional_int_range(params, "rpc_ssh_port", 1, 65535) or 22
     known_hosts_entry = str(params.get("rpc_ssh_known_hosts_entry") or "")
@@ -1204,7 +1232,7 @@ def _normalize_linux_agent_install_execution(
     }
     if zabbix_server:
         server = _normalize_zabbix_server(
-            params.get("zabbix_server") or "zabbix.nmulti.cloud"
+            params.get("zabbix_server") or _default_zabbix_server()
         )
         normalized["zabbix_server"] = server
         normalized["command_fingerprint"]["zabbix_server"] = server
@@ -1390,7 +1418,7 @@ def _normalize_proxmox_qemu_vm_lifecycle_execution(
 
     if {"agent_pbs_zabbix_status", "agent_configure_zabbix_agent2"} & set(operations):
         zabbix_server = _normalize_zabbix_server(
-            params.get("zabbix_server") or "zabbix.nmulti.cloud"
+            params.get("zabbix_server") or _default_zabbix_server()
         )
         normalized["zabbix_server"] = zabbix_server
         command_fingerprint["zabbix_server"] = zabbix_server
@@ -1939,15 +1967,15 @@ def _int_range(
     return value
 
 
-def _call_backend(backend: NMSBackend, execution: RPCExecution) -> dict[str, Any]:
-    url = f"{backend.backend_url.rstrip('/')}/rpc/executions/{execution.pk}/run"
+def _call_backend(target: BackendTarget, execution: RPCExecution) -> dict[str, Any]:
+    url = f"{target.url.rstrip('/')}/rpc/executions/{execution.pk}/run"
     timeout = (10, max(execution.procedure.timeout_seconds + 10, 30))
     try:
         resp = requests.post(
             url,
-            headers=backend.get_auth_headers(),
+            headers=target.headers,
             json={},
-            verify=backend.verify_ssl,
+            verify=target.verify_ssl,
             timeout=timeout,
         )
     except requests.exceptions.RequestException as exc:

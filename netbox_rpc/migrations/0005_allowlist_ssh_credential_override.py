@@ -1,31 +1,25 @@
 from django.db import migrations, models
-import django.db.models.deletion
 
 
 class Migration(migrations.Migration):
     dependencies = [
         ("netbox_rpc", "0004_seed_systemd_management_procedures"),
-        # DeviceCredential was added in an early netbox-nms migration.
-        # Pin to 0027 (the latest at the time this migration was written).
-        # When netbox-nms squashes its migrations, update this name to match
-        # the squash replacement before running migrate.
-        ("netbox_nms", "0027_device_credential_ssh_key_auth"),
     ]
 
     operations = [
         migrations.AddField(
             model_name="rpclinuxserviceallowlist",
             name="ssh_credential_override",
-            field=models.ForeignKey(
+            field=models.PositiveBigIntegerField(
                 blank=True,
+                db_column="ssh_credential_override_id",
+                db_index=True,
                 help_text=(
                     "Override the device-level DeviceService SSH credential for RPC jobs "
-                    "targeting this service."
+                    "targeting this service. Leave blank to use the target device's default "
+                    "SSH DeviceService credential resolved by device name."
                 ),
                 null=True,
-                on_delete=django.db.models.deletion.SET_NULL,
-                related_name="rpc_allowlist_entries",
-                to="netbox_nms.devicecredential",
             ),
         ),
     ]

@@ -100,7 +100,9 @@ def test_apply_overrides_tolerates_missing_attributes(jobs_module) -> None:
     }
 
 
-def test_apply_overrides_without_command_fingerprint_does_not_crash(jobs_module) -> None:
+def test_apply_overrides_without_command_fingerprint_does_not_crash(
+    jobs_module,
+) -> None:
     procedure = _procedure(transport_driver="netmiko", output_parser="json")
     normalized: dict[str, object] = {"target": "edge-01"}
 
@@ -187,12 +189,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
 
-    netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
-
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -221,6 +221,4 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
     monkeypatch.setitem(sys.modules, "requests.exceptions", requests_exceptions)
-    monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

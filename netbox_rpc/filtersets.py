@@ -1,7 +1,21 @@
 import django_filters
 from netbox.filtersets import NetBoxModelFilterSet
 
-from .models import RPCExecution, RPCExecutionEvent, RPCLinuxServiceAllowlist, RPCProcedure
+from .models import (
+    RPCBackend,
+    RPCExecution,
+    RPCExecutionEvent,
+    RPCLinuxServiceAllowlist,
+    RPCProcedure,
+)
+
+
+class RPCBackendFilterSet(NetBoxModelFilterSet):
+    name = django_filters.CharFilter()
+
+    class Meta:
+        model = RPCBackend
+        fields = ("name",)
 
 
 class RPCProcedureFilterSet(NetBoxModelFilterSet):
@@ -39,7 +53,7 @@ class RPCExecutionFilterSet(NetBoxModelFilterSet):
         label="Procedure",
     )
     status = django_filters.CharFilter()
-    backend_id = django_filters.NumberFilter(field_name="backend_id", label="Backend ID")
+    backend_id = django_filters.NumberFilter(field_name="backend", label="Backend ID")
 
     class Meta:
         model = RPCExecution

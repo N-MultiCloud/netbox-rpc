@@ -4,7 +4,13 @@ from django import forms
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
 from utilities.forms.fields import CommentField, DynamicModelChoiceField
 
-from .models import RPCExecution, RPCExecutionEvent, RPCLinuxServiceAllowlist, RPCProcedure
+from .models import (
+    RPCBackend,
+    RPCExecution,
+    RPCExecutionEvent,
+    RPCLinuxServiceAllowlist,
+    RPCProcedure,
+)
 
 REQUEST_ATTR = "_netbox_rpc_request"
 
@@ -73,12 +79,35 @@ class RPCProcedureForm(NetBoxModelForm):
         )
 
 
+class RPCBackendForm(NetBoxModelForm):
+    comments = CommentField()
+
+    class Meta:
+        model = RPCBackend
+        fields = (
+            "name",
+            "base_url",
+            "verify_ssl",
+            "auth_header_name",
+            "auth_token",
+            "tags",
+            "comments",
+        )
+
+
 class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
     comments = CommentField()
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
-        from netbox_nms.models import DeviceCredential
+        try:
+            from netbox_nms.models import DeviceCredential
+        except ImportError:
+            self.fields["ssh_credential_override"] = forms.IntegerField(
+                required=False,
+                label="SSH Credential Override (DeviceCredential PK)",
+            )
+            return
 
         user = _request_user(self.instance)
         credential_queryset = (
@@ -91,6 +120,12 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
             required=False,
             label="SSH Credential Override",
         )
+
+    def clean_ssh_credential_override(self) -> int | None:
+        value = self.cleaned_data.get("ssh_credential_override")
+        if value in (None, ""):
+            return None
+        return int(getattr(value, "pk", value))
 
     class Meta:
         model = RPCLinuxServiceAllowlist
@@ -113,6 +148,11 @@ class RPCProcedureFilterForm(NetBoxModelFilterSetForm):
     model = RPCProcedure
     enabled = forms.NullBooleanField(required=False)
     approval_required = forms.NullBooleanField(required=False)
+
+
+class RPCBackendFilterForm(NetBoxModelFilterSetForm):
+    model = RPCBackend
+    name = forms.CharField(required=False)
 
 
 class RPCLinuxServiceAllowlistFilterForm(NetBoxModelFilterSetForm):

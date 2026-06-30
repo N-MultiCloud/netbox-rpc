@@ -5,6 +5,7 @@ from . import views
 app_name = "netbox_rpc"
 
 router = NetBoxRouter()
+router.register("backends", views.RPCBackendViewSet)
 router.register("procedures", views.RPCProcedureViewSet)
 router.register("linux-service-allowlist", views.RPCLinuxServiceAllowlistViewSet)
 router.register("executions", views.RPCExecutionViewSet)

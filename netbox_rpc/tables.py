@@ -1,7 +1,32 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 
-from .models import RPCExecution, RPCExecutionEvent, RPCLinuxServiceAllowlist, RPCProcedure
+from .models import (
+    RPCBackend,
+    RPCExecution,
+    RPCExecutionEvent,
+    RPCLinuxServiceAllowlist,
+    RPCProcedure,
+)
+
+
+class RPCBackendTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+    verify_ssl = columns.BooleanColumn()
+
+    class Meta(NetBoxTable.Meta):
+        model = RPCBackend
+        fields = (
+            "pk",
+            "id",
+            "name",
+            "base_url",
+            "verify_ssl",
+            "auth_header_name",
+            "tags",
+            "actions",
+        )
+        default_columns = ("name", "base_url", "verify_ssl", "auth_header_name")
 
 
 class RPCProcedureTable(NetBoxTable):
@@ -43,7 +68,7 @@ class RPCProcedureTable(NetBoxTable):
 class RPCLinuxServiceAllowlistTable(NetBoxTable):
     slug = tables.Column(linkify=True)
     enabled = columns.BooleanColumn()
-    ssh_credential_override = tables.Column(linkify=True)
+    ssh_credential_override = tables.Column(verbose_name="SSH Credential Override")
 
     class Meta(NetBoxTable.Meta):
         model = RPCLinuxServiceAllowlist
@@ -65,7 +90,7 @@ class RPCExecutionTable(NetBoxTable):
     id = tables.Column(linkify=True, verbose_name="ID")
     procedure = tables.Column(linkify=True)
     status = columns.ChoiceFieldColumn()
-    backend = tables.Column(linkify=True)
+    backend = tables.Column(verbose_name="Backend ID")
 
     class Meta(NetBoxTable.Meta):
         model = RPCExecution

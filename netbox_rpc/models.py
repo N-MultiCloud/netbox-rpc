@@ -28,6 +28,43 @@ SYSTEMD_UNIT_RE = re.compile(
 )
 
 
+class RPCBackend(NetBoxModel):
+    """Standalone backend target.
+
+    auth_token is stored in plaintext. Security-conscious deployments should
+    provide a custom PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"] instead.
+    """
+
+    name = models.CharField(max_length=255, unique=True)
+    base_url = models.URLField(max_length=500)
+    verify_ssl = models.BooleanField(default=True)
+    auth_header_name = models.CharField(max_length=100, default="Authorization")
+    auth_token = models.CharField(max_length=4096, blank=True)
+    comments = models.TextField(blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("name",)
+        verbose_name = "RPC Backend"
+
+    def __str__(self) -> str:
+        return self.name
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpcbackend", args=[self.pk])
+
+    @property
+    def backend_url(self) -> str:
+        return self.base_url
+
+    def get_auth_headers(self) -> dict[str, str]:
+        if not self.auth_token:
+            return {}
+        return {self.auth_header_name: self.auth_token}
+
+
 class RPCProcedure(NetBoxModel):
     EFFECT_READ = "read"
     EFFECT_WRITE = "write"
@@ -89,7 +126,9 @@ class RPCProcedure(NetBoxModel):
         blank=True,
         help_text="Allowed target model labels such as dcim.device or netbox_gpon.olt.",
     )
-    effect = models.CharField(max_length=20, choices=EFFECT_CHOICES, default=EFFECT_READ)
+    effect = models.CharField(
+        max_length=20, choices=EFFECT_CHOICES, default=EFFECT_READ
+    )
     timeout_seconds = models.PositiveIntegerField(default=30)
     approval_required = models.BooleanField(default=False)
     params_schema = models.JSONField(default=dict, blank=True)
@@ -139,6 +178,7 @@ class RPCProcedure(NetBoxModel):
 
     def get_absolute_url(self) -> str:
         from django.urls import reverse
+
         return reverse("plugins:netbox_rpc:rpcprocedure", args=[self.pk])
 
 
@@ -153,12 +193,11 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
     )
     description = models.CharField(max_length=255, blank=True)
     comments = models.TextField(blank=True)
-    ssh_credential_override = models.ForeignKey(
-        "netbox_nms.DeviceCredential",
-        on_delete=models.SET_NULL,
+    ssh_credential_override = models.PositiveBigIntegerField(
         null=True,
         blank=True,
-        related_name="rpc_allowlist_entries",
+        db_column="ssh_credential_override_id",
+        db_index=True,
         help_text=(
             "Override the device-level DeviceService SSH credential for RPC jobs "
             "targeting this service. Leave blank to use the target device's default "
@@ -176,7 +215,16 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
 
     def get_absolute_url(self) -> str:
         from django.urls import reverse
+
         return reverse("plugins:netbox_rpc:rpclinuxserviceallowlist", args=[self.pk])
+
+    @property
+    def ssh_credential_override_id(self) -> int | None:
+        return self.ssh_credential_override
+
+    @ssh_credential_override_id.setter
+    def ssh_credential_override_id(self, value: int | None) -> None:
+        self.ssh_credential_override = value
 
     def clean(self) -> None:
         super().clean()
@@ -228,14 +276,15 @@ class RPCExecution(NetBoxModel):
         blank=True,
         related_name="+",
     )
-    backend = models.ForeignKey(
-        "netbox_nms.NMSBackend",
-        on_delete=models.SET_NULL,
+    backend = models.PositiveBigIntegerField(
         null=True,
         blank=True,
-        related_name="rpc_executions",
+        db_column="backend_id",
+        db_index=True,
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED
+    )
     params = models.JSONField(default=dict, blank=True)
     normalized_params = models.JSONField(default=dict, blank=True)
     result = models.JSONField(default=dict, blank=True)
@@ -263,11 +312,22 @@ class RPCExecution(NetBoxModel):
 
     def get_absolute_url(self) -> str:
         from django.urls import reverse
+
         return reverse("plugins:netbox_rpc:rpcexecution", args=[self.pk])
 
     @property
+    def backend_id(self) -> int | None:
+        return self.backend
+
+    @backend_id.setter
+    def backend_id(self, value: int | None) -> None:
+        self.backend = value
+
+    @property
     def target_model_label(self) -> str:
-        return f"{self.assigned_object_type.app_label}.{self.assigned_object_type.model}"
+        return (
+            f"{self.assigned_object_type.app_label}.{self.assigned_object_type.model}"
+        )
 
     @property
     def target_display(self) -> str:

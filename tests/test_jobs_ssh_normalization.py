@@ -38,6 +38,7 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
 # Happy-path tests
 # ---------------------------------------------------------------------------
 
+
 def test_install_ssh_key_normalizes_ed25519_key(jobs_module) -> None:
     public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbc123xyz ops@host"
     execution = _execution("install_ssh_key", public_key=public_key)
@@ -48,7 +49,10 @@ def test_install_ssh_key_normalizes_ed25519_key(jobs_module) -> None:
     assert normalized["public_key"] == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbc123xyz"
     assert normalized["target"] == "edge-01"
     assert "command_fingerprint" in normalized
-    assert normalized["command_fingerprint"]["handler_id"] == "os.linux_ubuntu_24.install_ssh_key"
+    assert (
+        normalized["command_fingerprint"]["handler_id"]
+        == "os.linux_ubuntu_24.install_ssh_key"
+    )
     # Without username param, username key must not be present
     assert "username" not in normalized
 
@@ -75,7 +79,9 @@ def test_install_ssh_key_normalizes_rsa_key(jobs_module) -> None:
 
 
 def test_install_ssh_key_normalizes_ecdsa_key(jobs_module) -> None:
-    public_key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBTest"
+    public_key = (
+        "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBTest"
+    )
     execution = _execution("install_ssh_key", public_key=public_key)
 
     normalized = jobs_module.normalize_execution_params(execution)
@@ -117,6 +123,7 @@ def test_install_ssh_key_command_fingerprint_includes_key_prefix(jobs_module) ->
 # Rejection tests
 # ---------------------------------------------------------------------------
 
+
 def test_install_ssh_key_rejects_missing_public_key(jobs_module) -> None:
     execution = _execution("install_ssh_key", public_key="")
 
@@ -146,12 +153,17 @@ def test_install_ssh_key_rejects_unknown_key_type_prefix(jobs_module) -> None:
         jobs_module.normalize_execution_params(execution)
 
     assert exc_info.value.code == "RPC_PARAM_INVALID"
-    assert "key type" in str(exc_info.value).lower() or "prefix" in str(exc_info.value).lower()
+    assert (
+        "key type" in str(exc_info.value).lower()
+        or "prefix" in str(exc_info.value).lower()
+    )
 
 
 def test_install_ssh_key_rejects_username_with_spaces(jobs_module) -> None:
     public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"
-    execution = _execution("install_ssh_key", public_key=public_key, username="bad user")
+    execution = _execution(
+        "install_ssh_key", public_key=public_key, username="bad user"
+    )
 
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
         jobs_module.normalize_execution_params(execution)
@@ -171,7 +183,9 @@ def test_install_ssh_key_rejects_username_starting_with_dash(jobs_module) -> Non
 
 def test_install_ssh_key_rejects_username_with_semicolons(jobs_module) -> None:
     public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"
-    execution = _execution("install_ssh_key", public_key=public_key, username="root;rm -rf")
+    execution = _execution(
+        "install_ssh_key", public_key=public_key, username="root;rm -rf"
+    )
 
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
         jobs_module.normalize_execution_params(execution)
@@ -192,6 +206,7 @@ def test_install_ssh_key_rejects_username_with_uppercase(jobs_module) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _execution(
     procedure_suffix: str,
@@ -240,12 +255,10 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_timezone.now = MagicMock(return_value=None)
     django_utils.timezone = django_timezone
 
-    netbox_nms = types.ModuleType("netbox_nms")
-    netbox_nms_backend = types.ModuleType("netbox_nms.backend")
-    netbox_nms_backend.get_backend = MagicMock(return_value=None)
-
     netbox_rpc_models = types.ModuleType("netbox_rpc.models")
-    netbox_rpc_models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    netbox_rpc_models.RPCLinuxServiceAllowlist = type(
+        "RPCLinuxServiceAllowlist", (), {}
+    )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
@@ -269,6 +282,4 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     monkeypatch.setitem(sys.modules, "requests", requests_mod)
-    monkeypatch.setitem(sys.modules, "netbox_nms", netbox_nms)
-    monkeypatch.setitem(sys.modules, "netbox_nms.backend", netbox_nms_backend)
     monkeypatch.setitem(sys.modules, "netbox_rpc.models", netbox_rpc_models)

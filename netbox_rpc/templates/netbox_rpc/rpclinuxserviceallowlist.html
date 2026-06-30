@@ -21,10 +21,10 @@
             <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-muted">No</span>{% endif %}</td>
           </tr>
           <tr>
-            <th scope="row">SSH Credential Override</th>
+            <th scope="row">SSH Credential Override ID</th>
             <td>
               {% if object.ssh_credential_override %}
-                <a href="{{ object.ssh_credential_override.get_absolute_url }}">{{ object.ssh_credential_override }}</a>
+                {{ object.ssh_credential_override }}
               {% else %}
                 {{ ''|placeholder }}
               {% endif %}
