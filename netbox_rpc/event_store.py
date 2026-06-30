@@ -8,6 +8,8 @@ from typing import Any
 from django.db import IntegrityError
 from django.utils import timezone
 
+from .domain import events as domain_events
+from .domain.projection import ProjectionState, apply, rebuild
 from .models import RPCExecution, RPCExecutionEvent
 
 try:
@@ -31,6 +33,12 @@ SENSITIVE_KEY_FRAGMENTS = (
     "secret",
     "token",
 )
+SAFE_REFERENCE_KEYS = {
+    "credential_pk",
+    "guest_credential_pk",
+    "restconf_credential_pk",
+    "rpc_ssh_credential_pk",
+}
 MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
@@ -50,6 +58,8 @@ def _stable_hash(value: object) -> str:
 
 def _is_sensitive_key(key: str) -> bool:
     normalized = key.lower()
+    if normalized in SAFE_REFERENCE_KEYS or normalized.endswith("_credential_pk"):
+        return False
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
 
 
@@ -136,19 +146,55 @@ def append_execution_event(
     )
 
 
+def _append_and_project(
+    execution: RPCExecution,
+    event: domain_events.DomainEvent,
+) -> RPCExecutionEvent:
+    record = append_execution_event(
+        execution,
+        event.level,
+        event.event_name,
+        event.message,
+        event.data,
+    )
+    projected = apply(ProjectionState.from_execution(execution), event)
+    _write_projection(execution, projected)
+    return record
+
+
+def _write_projection(execution: RPCExecution, state: ProjectionState) -> None:
+    update_fields = []
+    for field_name, value in state.as_update_dict().items():
+        if getattr(execution, field_name) != value:
+            setattr(execution, field_name, value)
+            update_fields.append(field_name)
+    if update_fields:
+        execution.save(update_fields=update_fields)
+
+
+def record_execution_queued(execution: RPCExecution) -> None:
+    requested_by = getattr(execution, "requested_by", None)
+    requested_by_id = getattr(requested_by, "pk", None) or getattr(
+        execution,
+        "requested_by_id",
+        None,
+    )
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionQueued(requested_by_id=requested_by_id),
+        )
+
+
+def record_execution_enqueued(execution: RPCExecution, job_id: object) -> None:
+    with transaction.atomic():
+        _append_and_project(execution, domain_events.JobEnqueued(job_id=job_id))
+
+
 def mark_execution_running(execution: RPCExecution) -> None:
     now = timezone.now()
     with transaction.atomic():
-        append_execution_event(
-            execution,
-            "info",
-            "ExecutionStarted",
-            "RPC execution started.",
-            {"status": RPCExecution.STATUS_RUNNING, "started_at": now.isoformat()},
-        )
-        execution.status = RPCExecution.STATUS_RUNNING
-        execution.started_at = now
-        execution.save(update_fields=["status", "started_at"])
+        _append_and_project(execution, domain_events.ExecutionStarted(started_at=now))
 
 
 def mark_execution_failed(
@@ -159,25 +205,20 @@ def mark_execution_failed(
     event_name: str = "ExecutionFailed",
 ) -> None:
     now = timezone.now()
+    if event_name == domain_events.ExecutionEnqueueFailed.EVENT_NAME:
+        event: domain_events.DomainEvent = domain_events.ExecutionEnqueueFailed(
+            error_message=message,
+            code=code,
+            finished_at=now,
+        )
+    else:
+        event = domain_events.ExecutionFailed(
+            error_message=message,
+            code=code,
+            finished_at=now,
+        )
     with transaction.atomic():
-        append_execution_event(
-            execution,
-            "error",
-            event_name,
-            message,
-            {
-                "status": RPCExecution.STATUS_FAILED,
-                "code": code,
-                "finished_at": now.isoformat(),
-            },
-        )
-        execution.status = RPCExecution.STATUS_FAILED
-        execution.error_code = code
-        execution.error_message = message
-        execution.finished_at = now
-        execution.save(
-            update_fields=["status", "error_code", "error_message", "finished_at"]
-        )
+        _append_and_project(execution, event)
 
 
 def record_execution_normalized(
@@ -186,19 +227,47 @@ def record_execution_normalized(
     resolved_command_hash: str,
 ) -> None:
     with transaction.atomic():
-        append_execution_event(
+        _append_and_project(
             execution,
-            "info",
-            "ParametersNormalized",
-            "Execution parameters normalized by NetBox.",
-            {
-                "command_hash": resolved_command_hash,
-                "normalized_params": normalized_params,
-            },
+            domain_events.ParametersNormalized(
+                normalized_params=normalized_params,
+                resolved_command_hash=resolved_command_hash,
+            ),
         )
-        execution.normalized_params = normalized_params
-        execution.resolved_command_hash = resolved_command_hash
-        execution.save(update_fields=["normalized_params", "resolved_command_hash"])
+
+
+def record_execution_succeeded(
+    execution: RPCExecution,
+    result: dict[str, Any],
+) -> None:
+    finished_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionSucceeded(
+                result=redact_event_data(result),
+                finished_at=finished_at,
+            ),
+        )
+
+
+def record_execution_cancelled(
+    execution: RPCExecution,
+    *,
+    user: object | None = None,
+    reason: str = "",
+) -> None:
+    finished_at = timezone.now()
+    cancelled_by_id = getattr(user, "pk", None)
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionCancelled(
+                finished_at=finished_at,
+                cancelled_by_id=cancelled_by_id,
+                reason=reason,
+            ),
+        )
 
 
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
@@ -211,50 +280,46 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     finished_at = timezone.now()
     with transaction.atomic():
         for item in response.get("events") or []:
-            append_execution_event(
+            _append_and_project(
                 execution,
-                str(item.get("level") or "info"),
-                str(item.get("event") or "BackendEventRecorded"),
-                str(item.get("message") or ""),
-                item.get("data") if isinstance(item.get("data"), dict) else {},
+                domain_events.BackendEventRecorded(
+                    event_level=str(item.get("level") or "info"),
+                    backend_event=str(item.get("event") or "BackendEventRecorded"),
+                    event_message=str(item.get("message") or ""),
+                    backend_data=item.get("data")
+                    if isinstance(item.get("data"), dict)
+                    else {},
+                ),
             )
         if ok:
-            append_execution_event(
+            _append_and_project(
                 execution,
-                "info",
-                "ExecutionSucceeded",
-                "RPC execution completed.",
-                {
-                    "status": RPCExecution.STATUS_SUCCEEDED,
-                    "result": result,
-                    "finished_at": finished_at.isoformat(),
-                },
+                domain_events.ExecutionSucceeded(
+                    result=result,
+                    finished_at=finished_at,
+                ),
             )
         else:
-            append_execution_event(
+            _append_and_project(
                 execution,
-                "error",
-                "ExecutionFailed",
-                error_message or "RPC execution failed.",
-                {
-                    "status": RPCExecution.STATUS_FAILED,
-                    "code": error_code or "RPC_EXECUTION_FAILED",
-                    "finished_at": finished_at.isoformat(),
-                },
+                domain_events.ExecutionFailed(
+                    error_message=error_message or "RPC execution failed.",
+                    code=error_code or "RPC_EXECUTION_FAILED",
+                    finished_at=finished_at,
+                ),
             )
-        execution.result = result
-        execution.error_code = error_code
-        execution.error_message = error_message
-        execution.status = (
-            RPCExecution.STATUS_SUCCEEDED if ok else RPCExecution.STATUS_FAILED
-        )
-        execution.finished_at = finished_at
-        execution.save(
-            update_fields=[
-                "result",
-                "error_code",
-                "error_message",
-                "status",
-                "finished_at",
-            ]
-        )
+
+
+def rebuild_projection(execution: RPCExecution) -> ProjectionState:
+    events = (
+        domain_events.from_record(record.event, record.data or {})
+        for record in execution.events.all().order_by("sequence", "created")
+    )
+    return rebuild(events)
+
+
+def reproject(execution: RPCExecution) -> ProjectionState:
+    state = rebuild_projection(execution)
+    with transaction.atomic():
+        _write_projection(execution, state)
+    return state

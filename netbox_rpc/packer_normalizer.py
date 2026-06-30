@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .constants import PACKER_VM_VERIFY_SERVICES
-from .jobs import RPCExecutionError, _int_range, _optional_int_range
+from .domain.normalization import RPCExecutionError, _int_range, _optional_int_range
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .models import RPCExecution
