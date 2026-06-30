@@ -81,8 +81,8 @@ is treated as a read projection for NetBox API compatibility.
 - **CQRS**: execution creation, job enqueue, job execution, and cancellation are
   command-side handlers in `netbox_rpc.application.command_handlers`;
   execution list/detail and `/events` endpoints are query-side projections. API
-  clients may create and cancel queued executions, but PUT/PATCH are disabled
-  for executions and event history is exposed read-only.
+  clients may create and cancel queued executions, but PUT/PATCH and DELETE are
+  disabled for executions (immutable history) and event history is read-only.
 - **Event Sourcing**: `netbox_rpc.event_store` appends ordered
   `RPCExecutionEvent` rows, folds typed domain events through
   `netbox_rpc.domain.projection.apply()`, and updates the projection in the

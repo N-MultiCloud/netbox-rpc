@@ -82,8 +82,11 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
 
 Query-side helpers live in `netbox_rpc.application.queries`. Execution list,
 detail, and event endpoints read projections. The execution API is
-command-only for writes: create and cancel are explicit commands, PUT/PATCH are
-disabled, and DELETE remains available as NetBox-idiomatic object deletion.
+command-only for writes: create and cancel are explicit commands. PUT/PATCH are
+disabled (state is derived from the event log, never edited), and DELETE is
+disabled too — an execution and its append-only event ledger are immutable
+history once created (a cascading delete would be rejected by the ledger's
+append-only trigger). Execution records are retained, not deleted, by design.
 
 ## Normalization Boundary
 

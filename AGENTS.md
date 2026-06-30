@@ -39,8 +39,9 @@ N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
   event after sequence collisions or database errors.
 - API create/enqueue/cancel paths and RQ execution dispatch are command-side
   behavior in `netbox_rpc.application.command_handlers`. Execution detail/list
-  and execution-events endpoints are query-side behavior, PUT/PATCH are disabled
-  for `RPCExecutionViewSet`, and the event API must remain read-only.
+  and execution-events endpoints are query-side behavior, PUT/PATCH and DELETE
+  are disabled for `RPCExecutionViewSet` (the aggregate and its append-only
+  ledger are immutable history), and the event API must remain read-only.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
