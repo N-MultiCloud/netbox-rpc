@@ -1,0 +1,41 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-6">
+    <div class="card">
+      <h5 class="card-header">RPC Backend</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Name</th>
+            <td>{{ object.name }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Base URL</th>
+            <td>{{ object.base_url }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Verify SSL</th>
+            <td>{% if object.verify_ssl %}<span class="text-success">Yes</span>{% else %}<span class="text-warning">No</span>{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">Auth Header</th>
+            <td>{{ object.auth_header_name|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Auth Token</th>
+            <td>{% if object.auth_token %}<span class="text-muted">Configured</span>{% else %}{{ ''|placeholder }}{% endif %}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/tags.html' %}
+  </div>
+  <div class="col col-md-6">
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+{% endblock content %}

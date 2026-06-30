@@ -6,6 +6,19 @@ sync when architecture, commands, or workflows change.
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
 
+## Standalone usage
+
+`netbox-rpc` must boot and migrate without `netbox-nms`. Standalone installs use
+the local `RPCBackend` model for backend URL, TLS verification, and an optional
+static auth header. Deployments that should not store an auth token in NetBox
+should configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` and return a
+`netbox_rpc.backends.BackendTarget`.
+
+When `netbox-nms` is installed and no custom resolver is configured,
+`netbox-rpc` auto-detects `netbox_nms.backend.get_backend(pk)` and adapts it to
+the same tiny runtime contract. Treat netbox-nms as one optional integration,
+not as a required plugin dependency.
+
 ## Transport-driver & output-parser selection
 
 Use [`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md)

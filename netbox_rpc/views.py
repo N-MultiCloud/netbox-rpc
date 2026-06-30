@@ -23,6 +23,41 @@ class RequestAwareObjectEditView(generic.ObjectEditView):
         return super().alter_object(obj, request, url_args, url_kwargs)
 
 
+# ── RPCBackend ───────────────────────────────────────────────────────────────
+
+
+@register_model_view(models.RPCBackend, "list", path="", detail=False)
+class RPCBackendListView(generic.ObjectListView):
+    queryset = models.RPCBackend.objects.all()
+    table = tables.RPCBackendTable
+    filterset = filtersets.RPCBackendFilterSet
+    filterset_form = forms.RPCBackendFilterForm
+    actions = LIST_ACTIONS
+
+
+@register_model_view(models.RPCBackend)
+class RPCBackendView(generic.ObjectView):
+    queryset = models.RPCBackend.objects.all()
+
+
+@register_model_view(models.RPCBackend, "add", detail=False)
+@register_model_view(models.RPCBackend, "edit")
+class RPCBackendEditView(generic.ObjectEditView):
+    queryset = models.RPCBackend.objects.all()
+    form = forms.RPCBackendForm
+
+
+@register_model_view(models.RPCBackend, "delete")
+class RPCBackendDeleteView(generic.ObjectDeleteView):
+    queryset = models.RPCBackend.objects.all()
+
+
+@register_model_view(models.RPCBackend, "bulk_delete", path="delete", detail=False)
+class RPCBackendBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.RPCBackend.objects.all()
+    table = tables.RPCBackendTable
+
+
 # ── RPCProcedure ─────────────────────────────────────────────────────────────
 
 
@@ -104,7 +139,7 @@ class RPCLinuxServiceAllowlistBulkDeleteView(generic.BulkDeleteView):
 @register_model_view(models.RPCExecution, "list", path="", detail=False)
 class RPCExecutionListView(generic.ObjectListView):
     queryset = models.RPCExecution.objects.select_related(
-        "procedure", "assigned_object_type", "requested_by", "backend"
+        "procedure", "assigned_object_type", "requested_by"
     )
     table = tables.RPCExecutionTable
     filterset = filtersets.RPCExecutionFilterSet
@@ -115,7 +150,7 @@ class RPCExecutionListView(generic.ObjectListView):
 @register_model_view(models.RPCExecution)
 class RPCExecutionView(generic.ObjectView):
     queryset = models.RPCExecution.objects.select_related(
-        "procedure", "assigned_object_type", "requested_by", "backend"
+        "procedure", "assigned_object_type", "requested_by"
     )
 
     def get_extra_context(self, request, instance):

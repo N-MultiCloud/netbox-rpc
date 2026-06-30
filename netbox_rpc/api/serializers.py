@@ -6,9 +6,43 @@ from netbox.api.gfk_fields import GFKSerializerField
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
-from netbox_nms.models import NMSBackend
+from ..models import (
+    RPCBackend,
+    RPCExecution,
+    RPCExecutionEvent,
+    RPCLinuxServiceAllowlist,
+    RPCProcedure,
+)
 
-from ..models import RPCLinuxServiceAllowlist, RPCExecution, RPCExecutionEvent, RPCProcedure
+
+class RPCBackendSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpcbackend-detail",
+    )
+    auth_token = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        write_only=True,
+    )
+
+    class Meta:
+        model = RPCBackend
+        fields = (
+            "id",
+            "url",
+            "display",
+            "name",
+            "base_url",
+            "verify_ssl",
+            "auth_header_name",
+            "auth_token",
+            "comments",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name", "base_url")
 
 
 class RPCProcedureSerializer(NetBoxModelSerializer):
@@ -110,12 +144,11 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
     )
     assigned_object_type = ContentTypeField(queryset=ContentType.objects.all())
     assigned_object = GFKSerializerField(read_only=True)
-    backend_id = serializers.PrimaryKeyRelatedField(
-        queryset=NMSBackend.objects.all(),
+    backend_id = serializers.IntegerField(
         source="backend",
-        write_only=True,
         required=False,
         allow_null=True,
+        write_only=True,
     )
     target_display = serializers.CharField(read_only=True)
     target_model_label = serializers.CharField(read_only=True)
