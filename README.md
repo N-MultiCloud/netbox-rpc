@@ -29,6 +29,11 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.restart_service`
 - `os.linux.dns_host.deploy_dns_stack`
 - `os.linux.dns_host.status_dns_stack`
+- `os.linux.ubuntu.24.ookla.diagnose`
+- `os.linux.ubuntu.24.ookla.check_service`
+- `os.linux.ubuntu.24.ookla.check_listeners`
+- `os.linux.ubuntu.24.ookla.check_tls`
+- `os.linux.ubuntu.24.ookla.check_firewall`
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`
@@ -129,6 +134,33 @@ The normalizer emits only structured fields: the `rpc_ssh_*` host-override
 keys, `target`, `compose_project="powerdns-dns-api"`, deploy-only
 `force_recreate`, and an audit `command_fingerprint`. It does not accept raw
 SSH command text.
+
+### `os.linux.ubuntu.24.ookla.*`
+
+Five **read-only** procedures diagnose a self-hosted OoklaServer (Ookla
+Speedtest custom server) on Ubuntu over SSH. They are seeded by migration
+`0035`, target `dcim.device` / `virtualization.virtualmachine`, are all
+`effect="read"` with `approval_required=False`, and their handler IDs equal the
+procedure names (handlers live in nms-backend).
+
+- **`os.linux.ubuntu.24.ookla.diagnose`** (180s) — comprehensive run covering
+  service/config, IPv4/IPv6 listeners, TLS certificate, and firewall.
+- **`os.linux.ubuntu.24.ookla.check_service`** (60s) — OoklaServer
+  process/service, binary + `OoklaServer.properties`, parsed ports, `useIPv6`,
+  `allowedDomains`, and version.
+- **`os.linux.ubuntu.24.ookla.check_listeners`** (60s) — actual IPv4 and IPv6
+  listeners on the configured/discovered ports.
+- **`os.linux.ubuntu.24.ookla.check_tls`** (60s) — TLS certificate validity,
+  CN/SAN, issuer/chain, and live HTTPS on the SSL port.
+- **`os.linux.ubuntu.24.ookla.check_firewall`** (60s) — ufw and
+  iptables/nftables rules against the ookla ports.
+
+SSH resolves from the target device's DeviceService **or**, for an ad-hoc/saved
+speedtest server, from the `rpc_ssh_host` + `rpc_ssh_credential_pk` overrides
+(the same override contract used by the agent installers). The normalizer also
+forwards only validated `install_dir` / `config_path` (absolute-path charset)
+and `ports` (integer list, at most 16) hints, plus an audit
+`command_fingerprint`. No procedure accepts raw SSH command text.
 
 ### Direct-SSH Ubuntu agent installers
 

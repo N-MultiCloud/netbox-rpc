@@ -39,6 +39,7 @@ from ..constants import (
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
+    OOKLA_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
     PTERODACTYL_ARTISAN,
     PTERODACTYL_BOOTSTRAP_API_KEY,
@@ -279,6 +280,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == LINUX_COLLECT_FACTS:
         return _normalize_pipeline_fixed_execution(execution, target)
+
+    if procedure_name in OOKLA_PROCEDURE_NAMES:
+        return _normalize_ookla_execution(execution, target)
 
     if procedure_name in PACKER_PROCEDURE_NAMES:
         # Function-local import keeps the netbox-packer reference lazy: this
@@ -1108,6 +1112,82 @@ def _validate_dns_host_ssh_host(host: str) -> None:
             "rpc_ssh_host must not contain whitespace or control characters.",
             code="RPC_PARAM_INVALID",
         )
+
+
+_OOKLA_ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,255}$")
+
+
+def _normalize_ookla_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize a read-only Ookla/Speedtest diagnostic execution.
+
+    Targets a registered device/VM (SSH resolved from its DeviceService) or an
+    ad-hoc/saved host via the ``rpc_ssh_host`` + ``rpc_ssh_credential_pk``
+    overrides. Only structured, validated fields are emitted; there is never any
+    arbitrary SSH command text.
+    """
+    params = execution.params or {}
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": execution.procedure.name,
+        },
+    }
+
+    install_dir = str(params.get("install_dir") or "").strip()
+    if install_dir:
+        if not _OOKLA_ABS_PATH_RE.fullmatch(install_dir):
+            raise RPCExecutionError(
+                "install_dir must be an absolute path (/... up to 255 safe chars).",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["install_dir"] = install_dir
+        normalized["command_fingerprint"]["install_dir"] = install_dir
+
+    config_path = str(params.get("config_path") or "").strip()
+    if config_path:
+        if not _OOKLA_ABS_PATH_RE.fullmatch(config_path):
+            raise RPCExecutionError(
+                "config_path must be an absolute path (/... up to 255 safe chars).",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["config_path"] = config_path
+        normalized["command_fingerprint"]["config_path"] = config_path
+
+    if "ports" in params and params.get("ports") is not None:
+        raw_ports = params.get("ports")
+        if not isinstance(raw_ports, (list, tuple)):
+            raise RPCExecutionError(
+                "ports must be a list of integers.",
+                code="RPC_PARAM_INVALID",
+            )
+        if len(raw_ports) > 16:
+            raise RPCExecutionError(
+                "ports may contain at most 16 entries.",
+                code="RPC_PARAM_INVALID",
+            )
+        ports: list[int] = []
+        for value in raw_ports:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise RPCExecutionError(
+                    "ports entries must be integers.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if not 1 <= value <= 65535:
+                raise RPCExecutionError(
+                    "ports entries must be between 1 and 65535.",
+                    code="RPC_PARAM_INVALID",
+                )
+            ports.append(value)
+        if ports:
+            normalized["ports"] = ports
+            normalized["command_fingerprint"]["ports"] = ports
+
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
 
 
 def _normalize_linux_agent_install_execution(

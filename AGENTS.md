@@ -306,6 +306,26 @@ be used autonomously on destructive procedures.
   Target models for both: `[]`. The normalizer emits only structured
   `rpc_ssh_*` host-override keys, `target`, `compose_project`, and
   deploy-only `force_recreate`; it must never accept arbitrary SSH command text.
+- Ookla / Speedtest server diagnostics are seeded by migration `0035`. Five
+  **read-only** procedures (`effect="read"`, `approval_required=False`,
+  `target_models = ["dcim.device", "virtualization.virtualmachine"]`) diagnose a
+  self-hosted OoklaServer over SSH; handler IDs equal the procedure names and
+  the handlers live in nms-backend:
+  - `os.linux.ubuntu.24.ookla.diagnose` (180s) — comprehensive: service/config,
+    IPv4/IPv6 listeners, TLS certificate, and firewall in one run.
+  - `os.linux.ubuntu.24.ookla.check_service` (60s) — process/service, binary +
+    `OoklaServer.properties`, parsed ports, `useIPv6`, `allowedDomains`, version.
+  - `os.linux.ubuntu.24.ookla.check_listeners` (60s) — actual IPv4/IPv6 listeners.
+  - `os.linux.ubuntu.24.ookla.check_tls` (60s) — cert validity/CN/SAN/issuer +
+    live HTTPS on the SSL port.
+  - `os.linux.ubuntu.24.ookla.check_firewall` (60s) — ufw + iptables/nftables vs
+    the ookla ports.
+  Their normalizer (`_normalize_ookla_execution`) resolves SSH from the target
+  device's DeviceService **or** from the ad-hoc/saved `rpc_ssh_host` +
+  `rpc_ssh_credential_pk` overrides (the same override contract used by the
+  agent-install procedures), and forwards only validated `install_dir` /
+  `config_path` (absolute-path charset) and `ports` (int list, ≤16) hints. It
+  must never accept arbitrary SSH command text.
 - Dell OS10 third-party optical module unlock is seeded by migration `0017`. One write procedure
   for enabling non-Dell QSFP28-SR4 (and similar) transceivers on S5232F-ON switches:
   - `network.device.dell_os10.s5232f_on.allow_third_party_transceiver` (write, 45s, approval required):
