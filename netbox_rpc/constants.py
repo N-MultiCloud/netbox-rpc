@@ -109,6 +109,23 @@ LINUX_INSTALL_ZABBIX_AGENT2_HANDLER = "os.linux_ubuntu_24.install_zabbix_agent2"
 LINUX_COLLECT_FACTS = "os.linux.collect_facts"
 LINUX_COLLECT_FACTS_HANDLER = "os.linux.collect_facts"
 
+# Ookla / Speedtest server read-only diagnostics (Ubuntu 24). Handler IDs equal
+# the procedure names. All read-only; no approval; no arbitrary command text.
+OOKLA_DIAGNOSE = "os.linux.ubuntu.24.ookla.diagnose"
+OOKLA_CHECK_SERVICE = "os.linux.ubuntu.24.ookla.check_service"
+OOKLA_CHECK_LISTENERS = "os.linux.ubuntu.24.ookla.check_listeners"
+OOKLA_CHECK_TLS = "os.linux.ubuntu.24.ookla.check_tls"
+OOKLA_CHECK_FIREWALL = "os.linux.ubuntu.24.ookla.check_firewall"
+OOKLA_PROCEDURE_NAMES = frozenset(
+    {
+        OOKLA_DIAGNOSE,
+        OOKLA_CHECK_SERVICE,
+        OOKLA_CHECK_LISTENERS,
+        OOKLA_CHECK_TLS,
+        OOKLA_CHECK_FIREWALL,
+    }
+)
+
 # Mellanox ConnectX-3 (mlx4) InfiniBand -> Ethernet conversion on a Proxmox host.
 # Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
 # through the netbox-nms ProxmoxEndpointSSHBinding (see jobs.py normalizer).
@@ -586,6 +603,155 @@ DNS_HOST_PROCEDURES = (
         "params_schema": _DNS_HOST_STATUS_PARAMS_SCHEMA,
         "result_schema": _DNS_HOST_RESULT_SCHEMA,
     },
+)
+
+_OOKLA_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": (
+        "netbox-nms DeviceCredential PK for the ad-hoc/saved SSH target; "
+        "nms-backend decrypts it at execution time. Omit for a device-targeted "
+        "execution that resolves SSH from the device's DeviceService."
+    ),
+}
+
+_OOKLA_ABS_PATH = "^/[A-Za-z0-9/._-]{1,255}$"
+
+_OOKLA_BASE_PARAMS_PROPERTIES = {
+    "rpc_ssh_credential_pk": _OOKLA_CREDENTIAL_REF,
+    "rpc_ssh_host": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255,
+        "description": (
+            "Optional SSH host override (the speedtest server IP/hostname) for the "
+            "ad-hoc/saved target. Omit when targeting a registered device."
+        ),
+    },
+    "rpc_ssh_port": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 22,
+        "description": "Optional SSH port override.",
+    },
+    "rpc_ssh_known_hosts_entry": {
+        "type": "string",
+        "maxLength": 8192,
+        "description": "Optional single-line OpenSSH known_hosts entry for the target.",
+    },
+    "rpc_ssh_strict_host_key_checking": {
+        "type": "boolean",
+        "default": True,
+        "description": "Require host-key verification when connecting over SSH.",
+    },
+    "install_dir": {
+        "type": "string",
+        "pattern": _OOKLA_ABS_PATH,
+        "description": (
+            "Optional absolute-path hint for the OoklaServer install directory; "
+            "the handler still auto-discovers it from the running process."
+        ),
+    },
+    "config_path": {
+        "type": "string",
+        "pattern": _OOKLA_ABS_PATH,
+        "description": (
+            "Optional absolute-path hint for OoklaServer.properties; the handler "
+            "still auto-discovers it when omitted."
+        ),
+    },
+    "ports": {
+        "type": "array",
+        "maxItems": 16,
+        "items": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "description": (
+            "Optional explicit port list to check when the server uses non-default "
+            "ports; merged with the ports parsed from OoklaServer.properties."
+        ),
+    },
+}
+
+_OOKLA_PARAMS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": _OOKLA_BASE_PARAMS_PROPERTIES,
+}
+
+_OOKLA_SECTION_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["ok", "warning", "error", "unknown"],
+        },
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "details": {"type": "object"},
+    },
+}
+
+_OOKLA_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "status": {
+            "type": "string",
+            "enum": ["ok", "warning", "error", "unknown"],
+        },
+        "summary": {"type": "string"},
+        "service": _OOKLA_SECTION_RESULT_SCHEMA,
+        "listeners": _OOKLA_SECTION_RESULT_SCHEMA,
+        "tls": _OOKLA_SECTION_RESULT_SCHEMA,
+        "firewall": _OOKLA_SECTION_RESULT_SCHEMA,
+    },
+}
+
+
+def _ookla_procedure(name: str, timeout_seconds: int, description: str) -> dict:
+    return {
+        "name": name,
+        "handler_id": name,
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "effect": "read",
+        "timeout_seconds": timeout_seconds,
+        "approval_required": False,
+        "description": description,
+        "params_schema": _OOKLA_PARAMS_SCHEMA,
+        "result_schema": _OOKLA_RESULT_SCHEMA,
+    }
+
+
+OOKLA_DIAGNOSTIC_PROCEDURES = (
+    _ookla_procedure(
+        OOKLA_DIAGNOSE,
+        180,
+        "Comprehensive read-only diagnosis of a self-hosted OoklaServer "
+        "(service/config, IPv4/IPv6 listeners, TLS certificate, and firewall).",
+    ),
+    _ookla_procedure(
+        OOKLA_CHECK_SERVICE,
+        60,
+        "Check the OoklaServer process/service, binary and OoklaServer.properties, "
+        "parsed ports, IPv6 setting, allowedDomains, and version.",
+    ),
+    _ookla_procedure(
+        OOKLA_CHECK_LISTENERS,
+        60,
+        "Check that OoklaServer is actually listening on its ports over IPv4 and IPv6.",
+    ),
+    _ookla_procedure(
+        OOKLA_CHECK_TLS,
+        60,
+        "Inspect the OoklaServer TLS certificate (validity, CN/SAN, issuer/chain) "
+        "and confirm HTTPS serves it on the SSL port.",
+    ),
+    _ookla_procedure(
+        OOKLA_CHECK_FIREWALL,
+        60,
+        "Check ufw and iptables/nftables rules against the OoklaServer ports.",
+    ),
 )
 
 LINUX_AGENT_INSTALL_PROCEDURES = (
