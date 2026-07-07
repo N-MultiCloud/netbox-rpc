@@ -305,7 +305,9 @@ be used autonomously on destructive procedures.
     `os.linux.dns_host.status_dns_stack`.
   Target models for both: `[]`. The normalizer emits only structured
   `rpc_ssh_*` host-override keys, `target`, `compose_project`, and
-  deploy-only `force_recreate`; it must never accept arbitrary SSH command text.
+  deploy-only `force_recreate`; shared `rpc_ssh_host` overrides are trimmed,
+  capped at 255 characters, and reject whitespace/control characters. It must
+  never accept arbitrary SSH command text.
 - Ookla / Speedtest server diagnostics are seeded by migration `0035`. Five
   **read-only** procedures (`effect="read"`, `approval_required=False`,
   `target_models = ["dcim.device", "virtualization.virtualmachine"]`) diagnose a

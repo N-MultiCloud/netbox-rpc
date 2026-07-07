@@ -41,7 +41,7 @@ They are seeded by `netbox_rpc/migrations/0029_seed_minecraft_stack_procedures.p
 These optional fields may be emitted into `normalized_params`:
 
 - `rpc_ssh_credential_pk`
-- `rpc_ssh_host`
+- `rpc_ssh_host` (trimmed, max 255 characters, no whitespace or control characters)
 - `rpc_ssh_port`
 - `rpc_ssh_known_hosts_entry`
 - `rpc_ssh_strict_host_key_checking`
@@ -181,7 +181,6 @@ Before adding or changing a Minecraft stack procedure:
 |---|---|
 | Procedure names and migration seed data stay aligned | `tests/test_static_contract.py` |
 | Schemas remain closed and command-free | `tests/test_static_contract.py` |
-| URL, UUID, filename, enum, and project validation | `tests/test_jobs_pterodactyl_normalization.py` |
-| Source URL is hashed in the fingerprint | `tests/test_jobs_pterodactyl_normalization.py` |
+| URL, UUID, filename, enum, and project validation | `tests/test_jobs_minecraft_normalization.py` |
+| Source URL is hashed in the fingerprint | `tests/test_jobs_minecraft_normalization.py` |
 | Wings restart remains approval-gated | `tests/test_static_contract.py` |
-
