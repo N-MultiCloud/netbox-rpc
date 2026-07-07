@@ -399,6 +399,37 @@ Two tiers (see `docs/architecture.md` → Testing):
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.
 
+## Continuous-Improvement Charter
+
+`netbox-rpc` is the audited, ever-growing procedure catalog for every command
+that must run on a managed host. **The catalog is meant to expand
+continuously.** Whenever an agent needs a host operation (Proxmox, Linux,
+network device, service) that has no procedure yet, treat that gap as the next
+unit of work rather than reaching for ad-hoc SSH:
+
+- Add the capability as a new `RPCProcedure` — seed migration (inline data, no
+  live imports), `params_schema`, correct `effect`/`approval_required` gating,
+  `target_models`, `transport_driver`/`output_parser` selection, and (for
+  Linux service control) the `RPCLinuxServiceAllowlist` entry — plus the
+  matching `@rpc_handler` in `nms-backend`, via `feature-workflow`.
+- Prefer **fixed-argv, structured-param** handlers. Caller input must never
+  reach a shell; never add a procedure that accepts arbitrary command text.
+- Mark anything that mutates production infrastructure `effect="write"` (or
+  `destructive`) with `approval_required=True` where warranted, so it is never
+  dispatched autonomously.
+- Surface every new procedure through `nms rpc procedures …` /
+  `nms rpc executions …` so future agents **discover and reuse** it instead of
+  re-deriving SSH.
+
+The command surface should grow monotonically and auditably — the more agents
+need, the richer this catalog becomes, never a pile of one-off SSH one-liners.
+
+**Client-side rule:** agents interact with managed hosts and Proxmox **only
+through `nms-cli`** (`nms rpc` for host operations, `nms virt`/`nms cloud` for
+Proxmox/Proxbox data and lifecycle) — never ad-hoc `ssh`/`pvesh`/`qm` or direct
+NetBox/Proxmox API calls. This mirrors the estate-wide policy in
+`/root/personal-context/CLAUDE.md`.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in
