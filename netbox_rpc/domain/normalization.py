@@ -1096,10 +1096,10 @@ def _normalize_dns_host_execution(execution: RPCExecution) -> dict[str, Any]:
     }
 
 
-def _validate_dns_host_ssh_host(host: str) -> None:
+def _validate_ssh_host(host: str, *, empty_message: str) -> None:
     if not host:
         raise RPCExecutionError(
-            "rpc_ssh_host could not be resolved from params.",
+            empty_message,
             code="RPC_PARAM_INVALID",
         )
     if len(host) > 255:
@@ -1112,6 +1112,13 @@ def _validate_dns_host_ssh_host(host: str) -> None:
             "rpc_ssh_host must not contain whitespace or control characters.",
             code="RPC_PARAM_INVALID",
         )
+
+
+def _validate_dns_host_ssh_host(host: str) -> None:
+    _validate_ssh_host(
+        host,
+        empty_message="rpc_ssh_host could not be resolved from params.",
+    )
 
 
 _OOKLA_ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,255}$")
@@ -1861,11 +1868,10 @@ def _copy_optional_ssh_overrides(
 
     if "rpc_ssh_host" in params:
         host = str(params.get("rpc_ssh_host") or "").strip()
-        if not host:
-            raise RPCExecutionError(
-                "rpc_ssh_host must be a non-empty string.",
-                code="RPC_PARAM_INVALID",
-            )
+        _validate_ssh_host(
+            host,
+            empty_message="rpc_ssh_host must be a non-empty string.",
+        )
         normalized["rpc_ssh_host"] = host
         normalized["command_fingerprint"]["rpc_ssh_host"] = host
 

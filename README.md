@@ -133,7 +133,9 @@ project with the same SSH params minus `force_recreate`. `effect="read"` and
 The normalizer emits only structured fields: the `rpc_ssh_*` host-override
 keys, `target`, `compose_project="powerdns-dns-api"`, deploy-only
 `force_recreate`, and an audit `command_fingerprint`. It does not accept raw
-SSH command text.
+SSH command text. Shared `rpc_ssh_host` overrides are trimmed, capped at 255
+characters, and reject whitespace or control characters before backend dispatch
+or normalized-parameter event recording.
 
 ### `os.linux.ubuntu.24.ookla.*`
 

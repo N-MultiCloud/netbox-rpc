@@ -213,13 +213,19 @@ _RPC_SSH_CREDENTIAL_REF = {
     "description": "DeviceCredential primary key; nms-backend decrypts it at execution time.",
 }
 
+_RPC_SSH_HOST_PATTERN = r"^[^\s\x00-\x1f]{1,255}$"
+
 _RPC_SSH_OVERRIDE_PROPERTIES = {
     "rpc_ssh_credential_pk": _RPC_SSH_CREDENTIAL_REF,
     "rpc_ssh_host": {
         "type": "string",
         "minLength": 1,
         "maxLength": 255,
-        "description": "Optional SSH host override consumed by nms-backend.",
+        "pattern": _RPC_SSH_HOST_PATTERN,
+        "description": (
+            "Optional SSH host override consumed by nms-backend. Must not contain "
+            "whitespace or control characters."
+        ),
     },
     "rpc_ssh_port": {
         "type": "integer",
