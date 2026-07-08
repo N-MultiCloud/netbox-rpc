@@ -43,6 +43,43 @@ The procedure catalog is intentionally narrow:
 
 Operators call named procedures, not arbitrary SSH commands.
 
+## Procedure command source of truth
+
+Each `RPCProcedure` can own ordered `RPCProcedureCommand` rows. These rows are
+the database source of truth for the fixed command or device-CLI steps that
+nms-backend may run for a procedure. They are structured tokens, never arbitrary
+shell text:
+
+```json
+{
+  "sequence": 1,
+  "step_type": "shell_argv",
+  "device_cli_mode": null,
+  "argv": ["sudo", "/bin/systemctl", "status", "--no-pager", "{service_slug}"],
+  "description": "Read systemd status",
+  "condition_param": "",
+  "condition_negate": false,
+  "for_each_param": "",
+  "continue_on_error": false
+}
+```
+
+The serializer embeds `commands` on procedure responses, including the nested
+`procedure` object inside execution responses. API clients can manage command
+rows through `/api/plugins/rpc/procedure-commands/` or list/create rows for a
+single procedure with `/api/plugins/rpc/procedures/{id}/commands/`. The NetBox
+procedure object page renders the same data in a "Commands" card.
+
+Literal argv tokens are validated by `netbox_rpc.command_contract.SAFE_TOKEN_RE`;
+dynamic values must be explicit `{placeholders}` backed by the procedure params
+schema or the documented runtime keys. Handlers that cannot be represented
+faithfully as fixed argv/device-CLI rows remain backend-orchestrated and are
+listed in `EXEMPT_HANDLER_RATIONALE`. Current exemptions include destructive
+Proxmox workflows, stdin-backed install/config scripts, URL-download
+installers, Ookla diagnostic probe scripts, and enum branches that the current
+truthy-only condition fields cannot express. Exempt procedures still get one
+representative command row for API/UI discoverability.
+
 ## Standalone usage
 
 `netbox-rpc` can be installed without `netbox-nms`. In standalone deployments,

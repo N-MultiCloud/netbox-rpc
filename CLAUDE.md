@@ -28,6 +28,13 @@ for driver/parser authoring rules, production parser availability, inline
 template guidance, security boundaries, and deploy ordering for new pipeline
 exemplar procedures.
 
+## RPC Procedure Commands
+
+`AGENTS.md` is the source for the command source-of-truth contract. Keep its
+`RPCProcedureCommand` model/API/object-view guidance, command payload shape, and
+`EXEMPT_HANDLER_RATIONALE` notes synchronized with README whenever procedure
+command behavior changes.
+
 > **LLM Agent Safety:** Before creating any `RPCExecution` record, read the
 > **LLM Agent Safety Guardrails** section in `AGENTS.md`. Destructive Proxmox
 > procedures (`os.linux.proxmox.convert_mellanox_nic_to_ethernet`) MUST NOT be

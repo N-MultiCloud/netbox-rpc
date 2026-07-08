@@ -18,6 +18,7 @@ from .serializers import (
     RPCLinuxServiceAllowlistSerializer,
     RPCExecutionEventSerializer,
     RPCExecutionSerializer,
+    RPCProcedureCommandSerializer,
     RPCProcedureSerializer,
 )
 
@@ -28,7 +29,7 @@ class RPCBackendViewSet(NetBoxModelViewSet):
 
 
 class RPCProcedureViewSet(NetBoxModelViewSet):
-    queryset = models.RPCProcedure.objects.prefetch_related("tags")
+    queryset = models.RPCProcedure.objects.prefetch_related("commands", "tags")
     serializer_class = RPCProcedureSerializer
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
@@ -50,6 +51,55 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
 
+    @extend_schema(
+        request=RPCProcedureCommandSerializer,
+        responses={
+            200: RPCProcedureCommandSerializer(many=True),
+            201: RPCProcedureCommandSerializer,
+        },
+    )
+    @action(detail=True, methods=["get", "post"], url_path="commands")
+    def commands(self, request: Request, pk: str | None = None) -> Response:
+        procedure = self.get_object()
+        if request.method == "POST":
+            payload = request.data.copy()
+            payload["procedure"] = procedure.pk
+            serializer = RPCProcedureCommandSerializer(
+                data=payload,
+                context={"request": request},
+            )
+            serializer.is_valid(raise_exception=True)
+            command = serializer.save()
+            output = RPCProcedureCommandSerializer(
+                command, context={"request": request}
+            )
+            return Response(output.data, status=status.HTTP_201_CREATED)
+
+        qs = procedure.commands.all().prefetch_related("tags")
+        page = self.paginate_queryset(qs)
+        serializer = RPCProcedureCommandSerializer(
+            page if page is not None else qs,
+            many=True,
+            context={"request": request},
+        )
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+
+class RPCProcedureCommandViewSet(NetBoxModelViewSet):
+    queryset = models.RPCProcedureCommand.objects.select_related(
+        "procedure"
+    ).prefetch_related("tags")
+    serializer_class = RPCProcedureCommandSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        procedure_id = self.request.query_params.get("procedure_id")
+        if procedure_id:
+            qs = qs.filter(procedure_id=procedure_id)
+        return qs
+
 
 class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
     queryset = models.RPCLinuxServiceAllowlist.objects.prefetch_related("tags")
@@ -68,7 +118,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "procedure",
         "assigned_object_type",
         "requested_by",
-    ).prefetch_related("tags")
+    ).prefetch_related("procedure__commands", "tags")
     serializer_class = RPCExecutionSerializer
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:

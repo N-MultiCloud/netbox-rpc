@@ -8,6 +8,7 @@ from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
+    RPCProcedureCommand,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
 )
@@ -95,6 +96,24 @@ class RPCBackendForm(NetBoxModelForm):
         )
 
 
+class RPCProcedureCommandForm(NetBoxModelForm):
+    class Meta:
+        model = RPCProcedureCommand
+        fields = (
+            "procedure",
+            "sequence",
+            "step_type",
+            "device_cli_mode",
+            "argv",
+            "description",
+            "condition_param",
+            "condition_negate",
+            "for_each_param",
+            "continue_on_error",
+            "tags",
+        )
+
+
 class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
     comments = CommentField()
 
@@ -153,6 +172,19 @@ class RPCProcedureFilterForm(NetBoxModelFilterSetForm):
 class RPCBackendFilterForm(NetBoxModelFilterSetForm):
     model = RPCBackend
     name = forms.CharField(required=False)
+
+
+class RPCProcedureCommandFilterForm(NetBoxModelFilterSetForm):
+    model = RPCProcedureCommand
+    procedure_id = DynamicModelChoiceField(
+        queryset=RPCProcedure.objects.all(),
+        required=False,
+        label="Procedure",
+    )
+    step_type = forms.ChoiceField(
+        choices=[("", "---------")] + list(RPCProcedureCommand.STEP_TYPE_CHOICES),
+        required=False,
+    )
 
 
 class RPCLinuxServiceAllowlistFilterForm(NetBoxModelFilterSetForm):

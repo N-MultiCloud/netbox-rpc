@@ -20,6 +20,46 @@ runtime contract: `backend_url`, `get_auth_headers()`, and `verify_ssl`. When
 `netbox-nms` is absent, `RPCBackend` is the default backend source. The
 N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
 
+## RPC Procedure Commands
+
+`netbox-rpc` is now the database source of truth for the structured command
+steps attached to each `RPCProcedure`. The `RPCProcedureCommand` model stores
+ordered, fixed-token command definitions; it must never store arbitrary shell
+text. The command contract served to nms-backend is stable:
+
+```python
+procedure.commands[] = {
+    "sequence": int,
+    "step_type": "shell_argv" | "device_cli",
+    "device_cli_mode": "exec" | "config" | None,
+    "argv": ["token", "{param}", "..."],
+    "description": str,
+    "condition_param": str,
+    "condition_negate": bool,
+    "for_each_param": str,
+    "continue_on_error": bool,
+}
+```
+
+`argv` is an ordered token list, not a command string. Literal token characters
+are constrained by `netbox_rpc.command_contract.SAFE_TOKEN_RE`; placeholders
+are extracted with `extract_placeholders()` and may reference procedure
+`params_schema.properties` or the runtime keys documented in
+`COMMAND_RUNTIME_KEYS`. The API embeds `commands` on `RPCProcedureSerializer`,
+so `RPCExecutionSerializer.procedure.commands` is present in the execution
+payload nms-backend fetches. CRUD is available at
+`/api/plugins/rpc/procedure-commands/`, and procedure-scoped list/create is
+available at `/api/plugins/rpc/procedures/{id}/commands/`. The procedure object
+page renders the same rows in the "Commands" card.
+
+Handlers that cannot be represented faithfully as fixed argv or device-CLI rows
+must be listed in `EXEMPT_HANDLER_RATIONALE` in
+`netbox_rpc.command_contract` and seeded with exactly one representative command
+row. Current exemptions cover backend-orchestrated scripts, URL-download
+installers, destructive Proxmox workflows, and command branches that the
+truthy-only condition contract cannot express. Do not remove an exemption until
+the backend command executor can consume an exact row-level representation.
+
 ## DDD / CQRS / Event Sourcing
 
 - Treat `RPCExecution` as the command aggregate and current-state read
