@@ -9,7 +9,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from netbox.models import NetBoxModel
 
@@ -57,7 +57,38 @@ class RPCBackend(NetBoxModel):
     """
 
     name = models.CharField(max_length=255, unique=True)
-    base_url = models.URLField(max_length=500)
+    ip_address = models.ForeignKey(
+        to="ipam.IPAddress",
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+        verbose_name="IP address",
+        help_text="Fallback backend address used when no domain name is set.",
+    )
+    domain = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Domain name of the netbox-rpc-backend service.",
+    )
+    port = models.PositiveIntegerField(
+        default=8000,
+        validators=[MinValueValidator(1), MaxValueValidator(65535)],
+        help_text="TCP port of the netbox-rpc-backend service.",
+    )
+    use_https = models.BooleanField(
+        default=False,
+        verbose_name="Use HTTPS",
+        help_text="Compose the backend URL with https instead of http.",
+    )
+    base_url = models.URLField(
+        max_length=500,
+        blank=True,
+        help_text=(
+            "Optional explicit URL override. When set it wins; when empty the URL "
+            "is composed from the IP address / domain, port, and HTTPS flag above."
+        ),
+    )
     verify_ssl = models.BooleanField(default=True)
     auth_header_name = models.CharField(max_length=100, default="Authorization")
     auth_token = models.CharField(max_length=4096, blank=True)
@@ -77,8 +108,28 @@ class RPCBackend(NetBoxModel):
         return reverse("plugins:netbox_rpc:rpcbackend", args=[self.pk])
 
     @property
+    def ip(self) -> str:
+        """The backend IP address without any CIDR mask, or empty string."""
+        if not self.ip_address_id:
+            return ""
+        return str(self.ip_address.address).split("/")[0]
+
+    @property
+    def url(self) -> str:
+        """URL composed from the structured domain/IP + port + scheme fields."""
+        host = (self.domain or "").strip() or self.ip
+        if not host:
+            return ""
+        scheme = "https" if self.use_https else "http"
+        return f"{scheme}://{host}:{self.port}"
+
+    @property
     def backend_url(self) -> str:
-        return self.base_url
+        # An explicit base_url wins as an override; otherwise compose the URL from
+        # the structured IP/domain + port + scheme (FastAPIEndpoint-style), so an
+        # operator can point at the backend by IP or domain without hand-typing a
+        # full URL. Existing rows that only set base_url keep working unchanged.
+        return self.base_url or self.url
 
     def get_auth_headers(self) -> dict[str, str]:
         if not self.auth_token:

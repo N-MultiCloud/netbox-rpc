@@ -15,6 +15,7 @@ from .models import (
 class RPCBackendTable(NetBoxTable):
     name = tables.Column(linkify=True)
     verify_ssl = columns.BooleanColumn()
+    use_https = columns.BooleanColumn()
 
     class Meta(NetBoxTable.Meta):
         model = RPCBackend
@@ -22,13 +23,17 @@ class RPCBackendTable(NetBoxTable):
             "pk",
             "id",
             "name",
+            "ip_address",
+            "domain",
+            "port",
+            "use_https",
             "base_url",
             "verify_ssl",
             "auth_header_name",
             "tags",
             "actions",
         )
-        default_columns = ("name", "base_url", "verify_ssl", "auth_header_name")
+        default_columns = ("name", "domain", "port", "use_https", "verify_ssl")
 
 
 class RPCProcedureTable(NetBoxTable):

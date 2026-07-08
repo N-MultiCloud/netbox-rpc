@@ -1,6 +1,7 @@
 from typing import Protocol, cast
 
 from django import forms
+from ipam.models import IPAddress
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
 from utilities.forms.fields import (
     CommentField,
@@ -89,11 +90,20 @@ class RPCProcedureForm(NetBoxModelForm):
 
 class RPCBackendForm(NetBoxModelForm):
     comments = CommentField()
+    ip_address = DynamicModelChoiceField(
+        queryset=IPAddress.objects.all(),
+        required=False,
+        label="IP address",
+    )
 
     class Meta:
         model = RPCBackend
         fields = (
             "name",
+            "ip_address",
+            "domain",
+            "port",
+            "use_https",
             "base_url",
             "verify_ssl",
             "auth_header_name",

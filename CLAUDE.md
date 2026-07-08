@@ -11,8 +11,10 @@ The DDD/CQRS/Event Sourcing architecture contract lives in
 ## Standalone usage
 
 `netbox-rpc` must boot and migrate without `netbox-nms`. Standalone installs use
-the local `RPCBackend` model for backend URL, TLS verification, and an optional
-static auth header. Deployments that should not store an auth token in NetBox
+the local `RPCBackend` model to reach the execution backend — point it at the
+backend by IP address or domain (plus `port` / `use_https`, composed into the
+URL, à la netbox-proxbox `FastAPIEndpoint`), or set an explicit `base_url`
+override — with TLS verification and an optional static auth header. Deployments that should not store an auth token in NetBox
 should configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` and return a
 `netbox_rpc.backends.BackendTarget`.
 
