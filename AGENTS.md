@@ -85,12 +85,38 @@ the backend command executor can consume an exact row-level representation.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
-- `RPCProcedure`, `RPCLinuxServiceAllowlist`, and `RPCBackend` are intentional
+- `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
+  (with its `RPCIntentProcedure` through model) are intentional
   reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
   audited, and not event-sourced.
 - Network device procedures should delegate protocol execution to the
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
+
+## Intents
+
+`RPCIntent` groups one or more `RPCProcedure`s and declares *what* needs to be
+done; the procedures (with their commands) declare *how*. See
+[`docs/intents.md`](docs/intents.md) for the full model and API.
+
+- `execution_mode` (`sequential`/`parallel`) is single-sourced from
+  `ExecutionMode` in `netbox_rpc.domain.value_objects` (like `Effect`/
+  `ExecutionStatus`). `sequential` = nested, ordered by the `RPCIntentProcedure.sequence`;
+  `parallel` = concurrent, no nesting (sequence informational).
+- Grouping is an ordered M2M through `RPCIntentProcedure`
+  (`intent` CASCADE, `procedure` PROTECT, `sequence`), unique `(intent, procedure)`.
+  The form and the API write channel (`procedure_ids`) both renumber `sequence`
+  from 1 in submitted order.
+- Intents are declarative reference-data (plain CRUD, not event-sourced). This
+  model layer only **declares** intents; it does not execute them.
+- **Execution is out of scope for the model and must stay gated.** A future
+  intent executor MUST create each child run through
+  `create_execution()` (so it is event-sourced) and MUST keep enforcing every
+  grouped procedure's `approval_required`/`effect` gating and the LLM Agent
+  Safety Guardrails below. An intent must never bypass approval on a destructive
+  procedure. Seeded by additive migration `0039_rpcintent` (depends on the
+  `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
+  dependency).
 
 ## LLM Agent Safety Guardrails
 

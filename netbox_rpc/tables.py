@@ -5,9 +5,10 @@ from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
-    RPCProcedureCommand,
+    RPCIntent,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
+    RPCProcedureCommand,
 )
 
 
@@ -98,6 +99,41 @@ class RPCProcedureCommandTable(NetBoxTable):
             "argv",
             "condition_param",
             "for_each_param",
+        )
+
+
+class RPCIntentTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+    execution_mode = columns.ChoiceFieldColumn()
+    enabled = columns.BooleanColumn()
+    procedure_count = tables.Column(
+        empty_values=(),
+        orderable=False,
+        verbose_name="Procedures",
+    )
+
+    def render_procedure_count(self, record: RPCIntent) -> int:
+        # Uses the list view's prefetch_related("procedures") cache.
+        return len(record.procedures.all())
+
+    class Meta(NetBoxTable.Meta):
+        model = RPCIntent
+        fields = (
+            "pk",
+            "id",
+            "name",
+            "execution_mode",
+            "enabled",
+            "procedure_count",
+            "description",
+            "tags",
+            "actions",
+        )
+        default_columns = (
+            "name",
+            "execution_mode",
+            "enabled",
+            "procedure_count",
         )
 
 

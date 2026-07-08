@@ -5,9 +5,10 @@ from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
-    RPCProcedureCommand,
+    RPCIntent,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
+    RPCProcedureCommand,
 )
 
 
@@ -65,6 +66,20 @@ class RPCLinuxServiceAllowlistFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = RPCLinuxServiceAllowlist
         fields = ("slug", "systemd_unit", "enabled")
+
+
+class RPCIntentFilterSet(NetBoxModelFilterSet):
+    enabled = django_filters.BooleanFilter()
+    execution_mode = django_filters.CharFilter()
+    procedure_id = django_filters.ModelMultipleChoiceFilter(
+        field_name="procedures",
+        queryset=RPCProcedure.objects.all(),
+        label="Procedures",
+    )
+
+    class Meta:
+        model = RPCIntent
+        fields = ("name", "enabled", "execution_mode", "procedure_id")
 
 
 class RPCExecutionFilterSet(NetBoxModelFilterSet):

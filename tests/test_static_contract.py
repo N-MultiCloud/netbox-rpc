@@ -907,3 +907,62 @@ def test_netbox_packer_does_not_reference_netbox_rpc() -> None:
         src = py_file.read_text(encoding="utf-8")
         assert "netbox_rpc" not in src, f"{py_file} references netbox_rpc"
         assert "netbox-rpc" not in src, f"{py_file} references netbox-rpc"
+
+
+# ---------------------------------------------------------------------------
+# RPCIntent — declarative grouping of procedures (sequential/parallel modes)
+# ---------------------------------------------------------------------------
+
+
+def test_intent_models_are_declared() -> None:
+    models = read("netbox_rpc/models.py")
+    value_objects = read("netbox_rpc/domain/value_objects.py")
+
+    assert "class RPCIntent(NetBoxModel)" in models
+    assert "class RPCIntentProcedure(models.Model)" in models
+    # Execution mode is single-sourced from the domain value object.
+    assert "class ExecutionMode(StrEnum)" in value_objects
+    assert 'SEQUENTIAL = "sequential"' in value_objects
+    assert 'PARALLEL = "parallel"' in value_objects
+    assert "MODE_SEQUENTIAL = ExecutionMode.SEQUENTIAL.value" in models
+    assert "MODE_PARALLEL = ExecutionMode.PARALLEL.value" in models
+    assert "execution_mode = models.CharField" in models
+    # Grouping is an ordered M2M through the RPCIntentProcedure model.
+    assert 'through="RPCIntentProcedure"' in models
+    assert "sequence = models.PositiveIntegerField" in models
+    assert "netbox_rpc_intent_unique_procedure" in models
+
+
+def test_intent_migration_is_additive_and_standalone() -> None:
+    migration = read("netbox_rpc/migrations/0039_rpcintent.py")
+
+    assert '"0038_merge_rpc_procedure_commands"' in migration
+    assert 'name="RPCIntent"' in migration
+    assert 'name="RPCIntentProcedure"' in migration
+    assert "ManyToManyField" in migration
+    assert "netbox_rpc_intent_unique_procedure" in migration
+    # Seed/data-free, no live imports, and no netbox_nms dependency (standalone).
+    assert "from netbox_rpc" not in migration
+    assert '"netbox_nms"' not in migration  # no netbox_nms migration dependency
+
+
+def test_intent_api_route_is_registered() -> None:
+    urls = read("netbox_rpc/api/urls.py")
+    serializers = read("netbox_rpc/api/serializers.py")
+    views = read("netbox_rpc/api/views.py")
+
+    assert 'router.register("intents"' in urls
+    assert "class RPCIntentSerializer" in serializers
+    # procedure_ids is the ordered write channel; procedures is the read repr.
+    assert "procedure_ids" in serializers
+    assert "class RPCIntentViewSet" in views
+
+
+def test_intent_is_reference_data_not_event_sourced() -> None:
+    # RPCIntent is plain NetBox CRUD (like RPCProcedure/RPCBackend), so it is a
+    # full read/write viewset — NOT the command-only, immutable execution model.
+    views = read("netbox_rpc/api/views.py")
+    intent_view_start = views.index("class RPCIntentViewSet")
+    intent_view = views[intent_view_start : intent_view_start + 400]
+    assert "NetBoxModelViewSet" in intent_view
+    assert "http_method_names" not in intent_view

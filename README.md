@@ -80,6 +80,44 @@ installers, Ookla diagnostic probe scripts, and enum branches that the current
 truthy-only condition fields cannot express. Exempt procedures still get one
 representative command row for API/UI discoverability.
 
+## Intents
+
+An **intent** groups one or more procedures under a single declarative record.
+Where a procedure (with its commands) declares *how* something is done, an
+`RPCIntent` declares *what* needs to be done and how the grouped procedures are
+triggered:
+
+- **sequential** — the grouped procedures are nested and triggered one after
+  another, in the declared `sequence` order;
+- **parallel** — the grouped procedures are triggered concurrently, with no
+  nesting at all (the per-procedure `sequence` is then informational).
+
+Create intents at **RPC → Intents** (or `POST /api/plugins/rpc/intents/`),
+selecting multiple procedures and choosing the execution mode. Ordering is
+captured by the `RPCIntentProcedure` through model (`intent`, `procedure`,
+`sequence`), with `(intent, procedure)` unique per intent.
+
+Intents are declarative reference-data — plain NetBox CRUD, `ObjectChange`
+audited, and not event-sourced. An intent only *declares* work; actually
+executing it (fanning out one `RPCExecution` per grouped procedure) is a
+separate, future capability. Any such executor MUST continue to honour each
+procedure's `approval_required` / `effect` gating and the LLM Agent Safety
+Guardrails — an intent must never be a way to bypass approval on a destructive
+procedure.
+
+### Intent API
+
+- `GET`/`POST /api/plugins/rpc/intents/` — list/create intents.
+- `GET`/`PATCH`/`PUT`/`DELETE /api/plugins/rpc/intents/{id}/` — retrieve, update,
+  delete.
+- On write, send an ordered `procedure_ids` list; the list order becomes the
+  through `sequence`. The read representation returns `procedures` as an ordered
+  list of `{id, name, handler_id, effect, approval_required, sequence}`.
+- Filter with `?execution_mode=`, `?enabled=`, and `?procedure_id=`.
+
+See [`docs/intents.md`](docs/intents.md) for the full model, ordering semantics,
+and worked API examples.
+
 ## Standalone usage
 
 `netbox-rpc` can be installed without `netbox-nms`. In standalone deployments,
@@ -144,7 +182,8 @@ instead of silently dropping audit history. The execution-event API is read-only
 model saves reject normal update/delete, and the migration installs PostgreSQL
 triggers so the event ledger remains append-only below the ORM.
 
-`RPCProcedure`, `RPCLinuxServiceAllowlist`, and `RPCBackend` are deliberate
+`RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
+(with its `RPCIntentProcedure` through model) are deliberate
 reference-data/configuration entities. They remain ordinary NetBox CRUD models,
 audited by NetBox `ObjectChange`, and are not event-sourced.
 

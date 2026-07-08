@@ -2,15 +2,21 @@ from typing import Protocol, cast
 
 from django import forms
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
-from utilities.forms.fields import CommentField, DynamicModelChoiceField
+from utilities.forms.fields import (
+    CommentField,
+    DynamicModelChoiceField,
+    DynamicModelMultipleChoiceField,
+)
 
 from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
-    RPCProcedureCommand,
+    RPCIntent,
+    RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
+    RPCProcedureCommand,
 )
 
 REQUEST_ATTR = "_netbox_rpc_request"
@@ -160,6 +166,76 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
         )
 
 
+class RPCIntentForm(NetBoxModelForm):
+    """Create/edit an intent: pick procedures + declare the execution mode.
+
+    ``procedures`` is a declared form field (not a Meta model field) because the
+    M2M uses a ``through`` model with an extra ``sequence`` column, which Django's
+    default ``_save_m2m`` cannot populate. The through rows are reconciled in
+    ``save()``, renumbering ``sequence`` from 1 in the submitted selection order
+    so sequential/nested intents run in the operator's chosen order.
+    """
+
+    procedures = DynamicModelMultipleChoiceField(
+        queryset=RPCProcedure.objects.all(),
+        required=False,
+        label="Procedures",
+        help_text=(
+            "Procedures grouped by this intent. In sequential mode they are "
+            "nested and triggered one after another in selection order; in "
+            "parallel mode they are triggered concurrently."
+        ),
+    )
+    comments = CommentField()
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields["procedures"].initial = [
+                ip.procedure_id for ip in self.instance.intent_procedures.all()
+            ]
+
+    def _save_intent_procedures(self) -> None:
+        selected = list(self.cleaned_data.get("procedures") or [])
+        # Preserve the submitted selection order (when the widget provides it) so
+        # the through `sequence` reflects the operator's ordering.
+        getlist = getattr(self.data, "getlist", None)
+        submitted = getlist(self.add_prefix("procedures")) if getlist else []
+        if submitted:
+            order = {str(pk): index for index, pk in enumerate(submitted)}
+            selected.sort(key=lambda proc: order.get(str(proc.pk), len(order)))
+        # Reconcile the through rows to exactly the selected set and renumber
+        # `sequence` from 1 in the resolved order.
+        self.instance.intent_procedures.all().delete()
+        RPCIntentProcedure.objects.bulk_create(
+            [
+                RPCIntentProcedure(
+                    intent=self.instance, procedure=proc, sequence=index
+                )
+                for index, proc in enumerate(selected, start=1)
+            ]
+        )
+
+    def save(self, *args: object, **kwargs: object) -> RPCIntent:
+        instance = super().save(*args, **kwargs)
+        # NetBox's ObjectEditView always commits (instance has a pk here); only
+        # then can we attach the ordered through rows.
+        if instance.pk:
+            self._save_intent_procedures()
+        return instance
+
+    class Meta:
+        model = RPCIntent
+        fields = (
+            "name",
+            "execution_mode",
+            "enabled",
+            "description",
+            "tags",
+            "comments",
+        )
+
+
 # ── Filter forms ─────────────────────────────────────────────────────────────
 
 
@@ -190,6 +266,20 @@ class RPCProcedureCommandFilterForm(NetBoxModelFilterSetForm):
 class RPCLinuxServiceAllowlistFilterForm(NetBoxModelFilterSetForm):
     model = RPCLinuxServiceAllowlist
     enabled = forms.NullBooleanField(required=False)
+
+
+class RPCIntentFilterForm(NetBoxModelFilterSetForm):
+    model = RPCIntent
+    enabled = forms.NullBooleanField(required=False)
+    execution_mode = forms.ChoiceField(
+        choices=[("", "---------")] + list(RPCIntent.EXECUTION_MODE_CHOICES),
+        required=False,
+    )
+    procedure_id = DynamicModelMultipleChoiceField(
+        queryset=RPCProcedure.objects.all(),
+        required=False,
+        label="Procedures",
+    )
 
 
 class RPCExecutionFilterForm(NetBoxModelFilterSetForm):
