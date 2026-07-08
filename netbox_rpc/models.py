@@ -11,6 +11,12 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from netbox.models import NetBoxModel
 
+from .command_contract import (
+    COMMAND_RUNTIME_KEYS,
+    extract_placeholders,
+    token_has_balanced_placeholders,
+    token_is_safe,
+)
 from .domain.value_objects import Effect, ExecutionStatus
 
 # Matches a valid systemd service unit name with an optional .service suffix.
@@ -183,6 +189,124 @@ class RPCProcedure(NetBoxModel):
         from django.urls import reverse
 
         return reverse("plugins:netbox_rpc:rpcprocedure", args=[self.pk])
+
+    @property
+    def ordered_commands(self):
+        """Return this procedure's command steps in execution order."""
+
+        return self.commands.all().order_by("sequence")
+
+
+class RPCProcedureCommand(NetBoxModel):
+    """Structured command step owned by an RPC procedure.
+
+    Commands are fixed argv/CLI token lists. Caller input may only flow through
+    declared placeholders; arbitrary shell text is never accepted here.
+    """
+
+    STEP_TYPE_SHELL_ARGV = "shell_argv"
+    STEP_TYPE_DEVICE_CLI = "device_cli"
+    STEP_TYPE_CHOICES = (
+        (STEP_TYPE_SHELL_ARGV, "Shell argv"),
+        (STEP_TYPE_DEVICE_CLI, "Device CLI"),
+    )
+
+    DEVICE_CLI_EXEC = "exec"
+    DEVICE_CLI_CONFIG = "config"
+    DEVICE_CLI_MODE_CHOICES = (
+        (DEVICE_CLI_EXEC, "Exec"),
+        (DEVICE_CLI_CONFIG, "Config"),
+    )
+
+    procedure = models.ForeignKey(
+        RPCProcedure,
+        related_name="commands",
+        on_delete=models.CASCADE,
+    )
+    sequence = models.PositiveIntegerField()
+    step_type = models.CharField(
+        max_length=20,
+        choices=STEP_TYPE_CHOICES,
+        default=STEP_TYPE_SHELL_ARGV,
+    )
+    device_cli_mode = models.CharField(
+        max_length=20,
+        choices=DEVICE_CLI_MODE_CHOICES,
+        blank=True,
+    )
+    argv = models.JSONField(default=list)
+    description = models.CharField(max_length=255, blank=True)
+    condition_param = models.CharField(max_length=100, blank=True)
+    condition_negate = models.BooleanField(default=False)
+    for_each_param = models.CharField(max_length=100, blank=True)
+    continue_on_error = models.BooleanField(default=False)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("procedure", "sequence")
+        unique_together = (("procedure", "sequence"),)
+        verbose_name = "RPC Procedure Command"
+
+    def __str__(self) -> str:
+        return f"{self.procedure.name}#{self.sequence}"
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpcprocedurecommand", args=[self.pk])
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, object] = {}
+        allowed_placeholders = self._allowed_placeholder_names()
+
+        if self.step_type != self.STEP_TYPE_DEVICE_CLI and self.device_cli_mode:
+            errors["device_cli_mode"] = (
+                "device_cli_mode is only valid for device_cli steps."
+            )
+
+        if not isinstance(self.argv, list) or not self.argv:
+            errors["argv"] = "argv must be a non-empty list of non-empty string tokens."
+        else:
+            token_errors = []
+            for index, token in enumerate(self.argv, start=1):
+                if not isinstance(token, str) or not token:
+                    token_errors.append(f"token {index} must be a non-empty string")
+                    continue
+                if not token_is_safe(token):
+                    token_errors.append(f"{token!r} contains unsafe characters")
+                    continue
+                placeholders = extract_placeholders(token)
+                if len(placeholders) > 1:
+                    token_errors.append(f"{token!r} contains more than one placeholder")
+                if not token_has_balanced_placeholders(token):
+                    token_errors.append(
+                        f"{token!r} contains malformed placeholder braces"
+                    )
+                for placeholder in placeholders:
+                    if placeholder not in allowed_placeholders:
+                        token_errors.append(
+                            f"{token!r} references unknown placeholder {placeholder!r}"
+                        )
+            if token_errors:
+                errors["argv"] = token_errors
+
+        for field_name in ("condition_param", "for_each_param"):
+            value = getattr(self, field_name)
+            if value and value not in allowed_placeholders:
+                errors[field_name] = (
+                    f"{value!r} is not declared in the procedure params schema."
+                )
+
+        if errors:
+            raise ValidationError(errors)
+
+    def _allowed_placeholder_names(self) -> set[str]:
+        schema = self.procedure.params_schema if self.procedure_id else {}
+        properties = schema.get("properties") if isinstance(schema, dict) else {}
+        names = set(properties) if isinstance(properties, dict) else set()
+        names.update(COMMAND_RUNTIME_KEYS)
+        return names
 
 
 class RPCLinuxServiceAllowlist(NetBoxModel):

@@ -73,6 +73,57 @@
     {% include 'inc/panels/tags.html' %}
   </div>
   <div class="col col-md-6">
+    <div class="card">
+      <h5 class="card-header">Commands</h5>
+      <div class="card-body">
+        {% if object.ordered_commands %}
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">Type</th>
+                <th scope="col">Argv</th>
+                <th scope="col">Description</th>
+                <th scope="col">Condition</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for command in object.ordered_commands %}
+                <tr>
+                  <td>{{ command.sequence }}</td>
+                  <td>
+                    {{ command.step_type }}
+                    {% if command.device_cli_mode %}
+                      <span class="text-muted">({{ command.device_cli_mode }})</span>
+                    {% endif %}
+                  </td>
+                  <td><code>{{ command.argv|join:" " }}</code></td>
+                  <td>{{ command.description|placeholder }}</td>
+                  <td>
+                    {% if command.condition_param %}
+                      {% if command.condition_negate %}not {% endif %}<code>{{ command.condition_param }}</code>
+                    {% endif %}
+                    {% if command.for_each_param %}
+                      {% if command.condition_param %}<br>{% endif %}
+                      for each <code>{{ command.for_each_param }}</code>
+                    {% endif %}
+                    {% if command.continue_on_error %}
+                      {% if command.condition_param or command.for_each_param %}<br>{% endif %}
+                      continue on error
+                    {% endif %}
+                    {% if not command.condition_param and not command.for_each_param and not command.continue_on_error %}
+                      {{ ''|placeholder }}
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <span class="text-muted">{{ ''|placeholder }}</span>
+        {% endif %}
+      </div>
+    </div>
     {% include 'inc/panels/comments.html' %}
   </div>
 </div>

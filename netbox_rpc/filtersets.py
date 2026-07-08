@@ -5,6 +5,7 @@ from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
+    RPCProcedureCommand,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
 )
@@ -35,6 +36,26 @@ class RPCProcedureFilterSet(NetBoxModelFilterSet):
             "approval_required",
             "transport_driver",
             "output_parser",
+        )
+
+
+class RPCProcedureCommandFilterSet(NetBoxModelFilterSet):
+    procedure_id = django_filters.ModelChoiceFilter(
+        field_name="procedure",
+        queryset=RPCProcedure.objects.all(),
+        label="Procedure",
+    )
+    step_type = django_filters.CharFilter()
+
+    class Meta:
+        model = RPCProcedureCommand
+        fields = (
+            "procedure_id",
+            "sequence",
+            "step_type",
+            "device_cli_mode",
+            "condition_param",
+            "for_each_param",
         )
 
 

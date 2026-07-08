@@ -93,6 +93,43 @@ class RPCProcedureBulkDeleteView(generic.BulkDeleteView):
     table = tables.RPCProcedureTable
 
 
+# ── RPCProcedureCommand ─────────────────────────────────────────────────────
+
+
+@register_model_view(models.RPCProcedureCommand, "list", path="", detail=False)
+class RPCProcedureCommandListView(generic.ObjectListView):
+    queryset = models.RPCProcedureCommand.objects.select_related("procedure")
+    table = tables.RPCProcedureCommandTable
+    filterset = filtersets.RPCProcedureCommandFilterSet
+    filterset_form = forms.RPCProcedureCommandFilterForm
+    actions = LIST_ACTIONS
+
+
+@register_model_view(models.RPCProcedureCommand)
+class RPCProcedureCommandView(generic.ObjectView):
+    queryset = models.RPCProcedureCommand.objects.select_related("procedure")
+
+
+@register_model_view(models.RPCProcedureCommand, "add", detail=False)
+@register_model_view(models.RPCProcedureCommand, "edit")
+class RPCProcedureCommandEditView(generic.ObjectEditView):
+    queryset = models.RPCProcedureCommand.objects.select_related("procedure")
+    form = forms.RPCProcedureCommandForm
+
+
+@register_model_view(models.RPCProcedureCommand, "delete")
+class RPCProcedureCommandDeleteView(generic.ObjectDeleteView):
+    queryset = models.RPCProcedureCommand.objects.select_related("procedure")
+
+
+@register_model_view(
+    models.RPCProcedureCommand, "bulk_delete", path="delete", detail=False
+)
+class RPCProcedureCommandBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.RPCProcedureCommand.objects.select_related("procedure")
+    table = tables.RPCProcedureCommandTable
+
+
 # ── RPCLinuxServiceAllowlist ──────────────────────────────────────────────────
 
 
