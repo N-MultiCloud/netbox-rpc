@@ -591,8 +591,18 @@ normalizer, executions will fail at runtime with
 execution pipeline. **Never encode the driver inside `handler_id`** — it is its
 own model data:
 
-- `transport_driver` — `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
-  `napalm`. AsyncSSH reproduces the legacy single-/multi-command SSH behaviour.
+- `transport_driver` — the single default driver: `asyncssh` (default),
+  `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or `scrapli`, `netmiko`,
+  `napalm`, `nornir` (network CLI). AsyncSSH reproduces the legacy
+  single-/multi-command SSH behaviour.
+- `transport_driver_chain` — an ordered **priority + fallback chain** of the
+  same driver names (index 0 tried first), configured on the `RPCProcedure`
+  page. `_apply_driver_pipeline_overrides()` injects it into
+  `normalized_params["transport_driver_chain"]` (and `command_fingerprint`)
+  **only when non-empty**, so legacy procedures keep a byte-for-byte identical
+  payload. The `netbox-rpc-backend` executor tries the drivers in order, skips
+  capability-mismatched entries, advances on an unavailable/connection error,
+  and stops on a command-level result.
 - `output_parser` — `none` (default, raw), `auto` (native JSON/XML → jc →
   TextFSM → TTP → Genie → regex chain), or a pinned backend (`json`, `xml`,
   `jc`, `textfsm`, `ttp`, `genie`, `regex`).

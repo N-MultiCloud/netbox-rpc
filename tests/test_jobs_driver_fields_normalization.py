@@ -159,6 +159,49 @@ def test_normalize_threads_driver_selection_end_to_end(jobs_module) -> None:
     assert "output_schema_sha256" in fingerprint
 
 
+# --- Driver priority + fallback chain -------------------------------------------
+
+
+def test_apply_overrides_injects_transport_driver_chain(jobs_module) -> None:
+    chain = ["asyncssh", "paramiko", "subprocess"]
+    procedure = _procedure(transport_driver_chain=chain)
+    normalized = {"target": "edge-01", "command_fingerprint": {"handler_id": "h"}}
+
+    jobs_module._apply_driver_pipeline_overrides(_execution(procedure), normalized)
+
+    assert normalized["transport_driver_chain"] == chain
+    assert normalized["command_fingerprint"]["transport_driver_chain"] == chain
+
+
+def test_apply_overrides_skips_empty_chain(jobs_module) -> None:
+    # An empty chain injects nothing, keeping legacy payloads byte-for-byte.
+    procedure = _procedure(transport_driver_chain=[])
+    normalized = {"target": "edge-01", "command_fingerprint": {"handler_id": "h"}}
+
+    jobs_module._apply_driver_pipeline_overrides(_execution(procedure), normalized)
+
+    assert "transport_driver_chain" not in normalized
+    assert normalized["command_fingerprint"] == {"handler_id": "h"}
+
+
+def test_apply_overrides_strips_blank_chain_entries(jobs_module) -> None:
+    procedure = _procedure(transport_driver_chain=[" asyncssh ", "", "  ", "netmiko"])
+    normalized = {"target": "edge-01", "command_fingerprint": {"handler_id": "h"}}
+
+    jobs_module._apply_driver_pipeline_overrides(_execution(procedure), normalized)
+
+    assert normalized["transport_driver_chain"] == ["asyncssh", "netmiko"]
+
+
+def test_normalize_threads_driver_chain_end_to_end(jobs_module) -> None:
+    procedure = _procedure(transport_driver_chain=["scrapli", "netmiko", "napalm"])
+    normalized = jobs_module.normalize_execution_params(_execution(procedure))
+
+    assert normalized["transport_driver_chain"] == ["scrapli", "netmiko", "napalm"]
+    fingerprint = normalized["command_fingerprint"]
+    assert fingerprint["transport_driver_chain"] == ["scrapli", "netmiko", "napalm"]
+
+
 def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox = types.ModuleType("netbox")
     netbox_plugins = types.ModuleType("netbox.plugins")

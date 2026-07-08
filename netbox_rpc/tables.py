@@ -52,6 +52,7 @@ class RPCProcedureTable(NetBoxTable):
             "timeout_seconds",
             "approval_required",
             "transport_driver",
+            "transport_driver_chain",
             "output_parser",
             "description",
             "tags",

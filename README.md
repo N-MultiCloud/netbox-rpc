@@ -459,8 +459,15 @@ Each `RPCProcedure` declares a pluggable **transport driver** and **output
 parser** for the nms-backend execution pipeline as explicit model fields (never
 encoded in `handler_id`):
 
-- `transport_driver`: `asyncssh` (default), `scrapli`, `netmiko`, `paramiko`,
-  `napalm`. `asyncssh` preserves the historical SSH behaviour.
+- `transport_driver`: the single default driver — `asyncssh` (default),
+  `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or `scrapli`, `netmiko`,
+  `napalm`, `nornir` (network CLI). `asyncssh` preserves the historical SSH
+  behaviour.
+- `transport_driver_chain`: an ordered priority + fallback chain of the same
+  driver names (index 0 tried first). Injected into
+  `normalized_params["transport_driver_chain"]` only when non-empty (legacy
+  procedures keep an identical payload); the netbox-rpc-backend executor tries
+  them in order, advancing on an unavailable/connection error.
 - `output_parser`: `none` (default, raw), `auto` (native JSON/XML → jc →
   TextFSM → TTP → Genie → regex fallback chain), or a pinned backend (`json`,
   `xml`, `jc`, `textfsm`, `ttp`, `genie`, `regex`).

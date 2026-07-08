@@ -78,6 +78,7 @@ class RPCProcedureForm(NetBoxModelForm):
             "params_schema",
             "result_schema",
             "transport_driver",
+            "transport_driver_chain",
             "output_parser",
             "output_schema",
             "description",
