@@ -7,6 +7,10 @@ CommandStepType = Literal["shell_argv", "device_cli"]
 DeviceCliMode = Literal["exec", "config"]
 
 
+RenderMode = Literal["literal", "jinja"]
+CaptureKind = Literal["", "stdout", "stdout_stripped", "json", "regex", "line"]
+
+
 class CommandStep(TypedDict):
     """Serialized command step served to nms-backend."""
 
@@ -19,6 +23,13 @@ class CommandStep(TypedDict):
     condition_negate: bool
     for_each_param: str
     continue_on_error: bool
+    # Templating + output-capture contract (see ``command_templating``). The
+    # nms-backend executor renders ``argv`` per ``render_mode`` and captures this
+    # command's output into ``produces_var`` for later ``{{ vars.<name> }}`` use.
+    render_mode: RenderMode
+    produces_var: str
+    capture_kind: CaptureKind
+    capture_expression: str
 
 
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_@%+=:,./{}-]+$")

@@ -110,7 +110,11 @@ class RPCProcedureCommandForm(NetBoxModelForm):
             "sequence",
             "step_type",
             "device_cli_mode",
+            "render_mode",
             "argv",
+            "produces_var",
+            "capture_kind",
+            "capture_expression",
             "description",
             "condition_param",
             "condition_negate",
@@ -118,6 +122,18 @@ class RPCProcedureCommandForm(NetBoxModelForm):
             "continue_on_error",
             "tags",
         )
+        help_texts = {
+            "argv": (
+                "JSON list of tokens. In 'literal' mode each token may carry one "
+                "{param} placeholder. In 'jinja' mode each token is a Jinja2 "
+                'expression, e.g. ["--id", "{{ vars.vmid }}", "--host", '
+                '"{{ target.name }}"]. Reference declared params as '
+                "{{ params.x }}, the NetBox target object as {{ target.field }}, "
+                "an earlier command's captured output as {{ vars.name }}, the SSH "
+                "runtime keys as {{ runtime.rpc_ssh_host }}, and the for-each "
+                "element as {{ item }}."
+            ),
+        }
 
 
 class RPCLinuxServiceAllowlistForm(NetBoxModelForm):

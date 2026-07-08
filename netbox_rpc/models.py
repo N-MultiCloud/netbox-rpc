@@ -18,6 +18,17 @@ from .command_contract import (
     token_has_balanced_placeholders,
     token_is_safe,
 )
+from .command_templating import (
+    CAPTURE_KIND_CHOICES,
+    RENDER_JINJA,
+    RENDER_LITERAL,
+    RENDER_MODE_CHOICES,
+    RENDER_MODES,
+    ROOT_VARS,
+    analyze_token,
+    validate_capture,
+    validate_jinja_argv,
+)
 from .domain.value_objects import Effect, ExecutionMode, ExecutionStatus
 
 # Matches a valid systemd service unit name with an optional .service suffix.
@@ -219,6 +230,14 @@ class RPCProcedureCommand(NetBoxModel):
         (DEVICE_CLI_CONFIG, "Config"),
     )
 
+    # Render mode: how the ``argv`` tokens are turned into a command. ``literal``
+    # is the historical fixed-token / ``{param}`` substitution behaviour;
+    # ``jinja`` renders each token as a sandboxed Jinja2 expression against the
+    # run context (params / target NetBox object / earlier-command output vars /
+    # runtime keys / for-each item). Vocabulary lives in ``command_templating``.
+    RENDER_MODE_LITERAL = RENDER_LITERAL
+    RENDER_MODE_JINJA = RENDER_JINJA
+
     procedure = models.ForeignKey(
         RPCProcedure,
         related_name="commands",
@@ -241,6 +260,43 @@ class RPCProcedureCommand(NetBoxModel):
     condition_negate = models.BooleanField(default=False)
     for_each_param = models.CharField(max_length=100, blank=True)
     continue_on_error = models.BooleanField(default=False)
+    render_mode = models.CharField(
+        max_length=20,
+        choices=RENDER_MODE_CHOICES,
+        default=RENDER_LITERAL,
+        help_text=(
+            "How argv tokens become a command. 'literal' keeps the fixed-token "
+            "{param} substitution; 'jinja' renders each token as a sandboxed "
+            "Jinja2 expression against params / target / vars / runtime / item."
+        ),
+    )
+    produces_var = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text=(
+            "Optional snake_case name to capture this command's output into, so a "
+            "later command can reference it as {{ vars.<name> }} (output-based "
+            "variable chaining). Must be unique within the procedure."
+        ),
+    )
+    capture_kind = models.CharField(
+        max_length=20,
+        choices=CAPTURE_KIND_CHOICES,
+        blank=True,
+        help_text=(
+            "How to extract the value for produces_var from this command's output: "
+            "full/stripped stdout, a JSON path, a one-group regex, or a line index."
+        ),
+    )
+    capture_expression = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text=(
+            "Expression for capture_kind json/regex/line (a dotted JSON path, a "
+            "regex with exactly one capturing group, or an integer line index). "
+            "Leave blank for stdout/stdout_stripped."
+        ),
+    )
 
     class Meta:
         app_label = "netbox_rpc"
@@ -260,14 +316,43 @@ class RPCProcedureCommand(NetBoxModel):
         super().clean()
         errors: dict[str, object] = {}
         allowed_placeholders = self._allowed_placeholder_names()
+        render_mode = self.render_mode or self.RENDER_MODE_LITERAL
 
         if self.step_type != self.STEP_TYPE_DEVICE_CLI and self.device_cli_mode:
             errors["device_cli_mode"] = (
                 "device_cli_mode is only valid for device_cli steps."
             )
 
+        if render_mode not in RENDER_MODES:
+            errors["render_mode"] = f"{render_mode!r} is not a valid render mode."
+
+        # Sibling commands are needed both for the jinja output-variable
+        # resolution (only vars produced by an EARLIER command are referenceable)
+        # and for capture-name uniqueness. Fetch once.
+        siblings = self._sibling_commands()
+        other_var_names = frozenset(
+            var for sibling in siblings if (var := (sibling.produces_var or "").strip())
+        )
+        produced_before = frozenset(
+            var
+            for sibling in siblings
+            if (var := (sibling.produces_var or "").strip())
+            and sibling.sequence is not None
+            and self.sequence is not None
+            and sibling.sequence < self.sequence
+        )
+
         if not isinstance(self.argv, list) or not self.argv:
             errors["argv"] = "argv must be a non-empty list of non-empty string tokens."
+        elif render_mode == self.RENDER_MODE_JINJA:
+            jinja_errors = validate_jinja_argv(
+                self.argv,
+                param_names=self._param_names(),
+                produced_vars=produced_before,
+                for_each_present=bool(self.for_each_param),
+            )
+            if jinja_errors:
+                errors["argv"] = jinja_errors
         else:
             token_errors = []
             for index, token in enumerate(self.argv, start=1):
@@ -299,15 +384,116 @@ class RPCProcedureCommand(NetBoxModel):
                     f"{value!r} is not declared in the procedure params schema."
                 )
 
+        capture_errors = validate_capture(
+            produces_var=self.produces_var,
+            capture_kind=self.capture_kind,
+            capture_expression=self.capture_expression,
+            other_var_names=other_var_names,
+        )
+        if capture_errors:
+            errors["produces_var"] = capture_errors
+
+        chain_errors = self._chain_consistency_errors(siblings)
+        if chain_errors:
+            errors["__all__"] = chain_errors
+
         if errors:
             raise ValidationError(errors)
 
+    def _procedure_or_none(self) -> "RPCProcedure | None":
+        """Resolve the FK safely (a dangling ``procedure_id`` is reported as a
+        field error by ``clean_fields()``, so validators must not raise here)."""
+
+        if not self.procedure_id:
+            return None
+        try:
+            return self.procedure
+        except RPCProcedure.DoesNotExist:
+            return None
+
     def _allowed_placeholder_names(self) -> set[str]:
-        schema = self.procedure.params_schema if self.procedure_id else {}
+        procedure = self._procedure_or_none()
+        schema = procedure.params_schema if procedure is not None else {}
         properties = schema.get("properties") if isinstance(schema, dict) else {}
         names = set(properties) if isinstance(properties, dict) else set()
         names.update(COMMAND_RUNTIME_KEYS)
         return names
+
+    def _param_names(self) -> frozenset[str]:
+        """Declared ``params_schema.properties`` names for jinja ``params.*``."""
+
+        procedure = self._procedure_or_none()
+        schema = procedure.params_schema if procedure is not None else {}
+        properties = schema.get("properties") if isinstance(schema, dict) else {}
+        return frozenset(properties) if isinstance(properties, dict) else frozenset()
+
+    def _sibling_commands(self) -> list["RPCProcedureCommand"]:
+        """The procedure's other command rows (excluding this one)."""
+
+        procedure = self._procedure_or_none()
+        if procedure is None:
+            return []
+        siblings = procedure.commands.all()
+        if self.pk:
+            siblings = siblings.exclude(pk=self.pk)
+        return list(siblings)
+
+    def _chain_consistency_errors(
+        self, siblings: list["RPCProcedureCommand"]
+    ) -> list[str]:
+        """Whole-procedure check: applying this row's pending values must not
+        leave any OTHER command's ``{{ vars.x }}`` reference unresolved.
+
+        ``clean()`` only validates the row being saved, so without this a
+        producer edit (renaming ``produces_var`` or moving to a later
+        ``sequence``) could silently orphan a downstream consumer. Reported as a
+        non-field error on the edited row.
+        """
+
+        # (sequence, render_mode, argv, produces_var) for every command, with
+        # this row's pending values applied.
+        rows = [
+            (
+                sib.sequence,
+                sib.render_mode or self.RENDER_MODE_LITERAL,
+                sib.argv,
+                (sib.produces_var or "").strip(),
+            )
+            for sib in siblings
+        ]
+        self_row = (
+            self.sequence,
+            self.render_mode or self.RENDER_MODE_LITERAL,
+            self.argv,
+            (self.produces_var or "").strip(),
+        )
+        errors: list[str] = []
+        for seq, mode, argv, _produces in rows:
+            if mode != self.RENDER_MODE_JINJA or not isinstance(argv, list):
+                continue
+            if seq is None:
+                continue
+            produced_before = frozenset(
+                produces
+                for s, _m, _a, produces in (*rows, self_row)
+                if produces and s is not None and s < seq
+            )
+            referenced: set[str] = set()
+            for token in argv:
+                if isinstance(token, str):
+                    referenced.update(
+                        ref.attr
+                        for ref in analyze_token(token).refs
+                        if ref.root == ROOT_VARS and ref.attr
+                    )
+            missing = sorted(referenced - produced_before)
+            if missing:
+                errors.append(
+                    f"This change leaves command #{seq}'s output variable "
+                    f"reference(s) {', '.join(missing)} unresolved (no earlier "
+                    "command produces them)."
+                )
+        return errors
 
 
 class RPCLinuxServiceAllowlist(NetBoxModel):

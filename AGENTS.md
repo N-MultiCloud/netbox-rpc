@@ -38,19 +38,56 @@ procedure.commands[] = {
     "condition_negate": bool,
     "for_each_param": str,
     "continue_on_error": bool,
+    # Templating + output-capture contract (see docs/command-templating.md).
+    "render_mode": "literal" | "jinja",
+    "produces_var": str,        # "" = captures nothing
+    "capture_kind": "" | "stdout" | "stdout_stripped" | "json" | "regex" | "line",
+    "capture_expression": str,  # regex (one group) / JSON path / line index
 }
 ```
 
-`argv` is an ordered token list, not a command string. Literal token characters
-are constrained by `netbox_rpc.command_contract.SAFE_TOKEN_RE`; placeholders
-are extracted with `extract_placeholders()` and may reference procedure
-`params_schema.properties` or the runtime keys documented in
-`COMMAND_RUNTIME_KEYS`. The API embeds `commands` on `RPCProcedureSerializer`,
-so `RPCExecutionSerializer.procedure.commands` is present in the execution
-payload nms-backend fetches. CRUD is available at
+`argv` is an ordered token list, not a command string. In `render_mode="literal"`
+(default, unchanged) literal token characters are constrained by
+`netbox_rpc.command_contract.SAFE_TOKEN_RE`; placeholders are extracted with
+`extract_placeholders()` and may reference procedure `params_schema.properties`
+or the runtime keys documented in `COMMAND_RUNTIME_KEYS`. The API embeds
+`commands` on `RPCProcedureSerializer`, so `RPCExecutionSerializer.procedure.commands`
+is present in the execution payload nms-backend fetches. CRUD is available at
 `/api/plugins/rpc/procedure-commands/`, and procedure-scoped list/create is
 available at `/api/plugins/rpc/procedures/{id}/commands/`. The procedure object
 page renders the same rows in the "Commands" card.
+
+### Command templating & output-variable chaining
+
+`render_mode="jinja"` makes each `argv` token a sandboxed Jinja2 *expression*
+rendered — by the future nms-backend executor, at run time — against a fixed
+context: `params.<name>` (declared params), `target.<field>` (the run's NetBox
+target object, "NetBox objects as variables"), `vars.<name>` (a value captured
+from an **earlier** command's output, the nesting chain), `runtime.<key>` (the
+`rpc_ssh_*` connection keys), and `item` (the `for_each` element). Validation
+lives in `netbox_rpc.command_templating` and is enforced in
+`RPCProcedureCommand.clean()`:
+
+- statement/comment blocks (`{% %}`/`{# #}`) and function/method calls are
+  rejected — tokens are expressions, not programs;
+- literal text outside `{{ }}` must use the conservative argv charset;
+- every reference must resolve — `params.*` to a declared param, `runtime.*` to
+  a known key, `vars.*` to a variable produced by a command with a strictly
+  smaller `sequence` (referencing an output before it is produced is an error),
+  and `target.*` to any non-dunder field;
+- `produces_var` must be a unique snake_case name; `capture_kind`/`capture_expression`
+  are validated (regex compiles with exactly one group, line index is an int, …).
+
+netbox-rpc owns the NetBox target object, so when a procedure has any jinja
+command the normalizer serializes a bounded, redacted, JSON-safe snapshot of the
+target into `normalized_params["_target_object"]` (the `{{ target.* }}` context)
+and adds `command_fingerprint["target_object_sha256"]`. This is gated on the
+presence of a jinja command, so **legacy/literal procedures keep a byte-for-byte
+identical normalized payload**. **Security boundary for the executor:** the
+render context values are still substituted into a shell string over SSH, so the
+executor MUST sandbox-render, shell-quote every rendered token, and re-validate
+captured values before reuse — never store or accept arbitrary shell text here.
+Full contract in [`docs/command-templating.md`](docs/command-templating.md).
 
 Handlers that cannot be represented faithfully as fixed argv or device-CLI rows
 must be listed in `EXEMPT_HANDLER_RATIONALE` in

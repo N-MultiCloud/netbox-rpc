@@ -9,6 +9,9 @@ requires-python = ">=3.12.0"
 dependencies = [
     "jsonschema>=4.0",
     "requests>=2.32",
+    # Jinja2 backs command-template validation (render_mode="jinja"). NetBox
+    # already ships it; declared explicitly so standalone/CI installs have it.
+    "Jinja2>=3.1",
 ]
 authors = [
     {name = "Emerson Felipe", email = "emerson.felipe@nmultifibra.com.br"},

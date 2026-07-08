@@ -72,6 +72,8 @@ class RPCProcedureCommandTable(NetBoxTable):
     sequence = tables.Column(linkify=True)
     step_type = columns.ChoiceFieldColumn()
     device_cli_mode = columns.ChoiceFieldColumn()
+    render_mode = columns.ChoiceFieldColumn()
+    capture_kind = columns.ChoiceFieldColumn()
 
     class Meta(NetBoxTable.Meta):
         model = RPCProcedureCommand
@@ -82,7 +84,11 @@ class RPCProcedureCommandTable(NetBoxTable):
             "sequence",
             "step_type",
             "device_cli_mode",
+            "render_mode",
             "argv",
+            "produces_var",
+            "capture_kind",
+            "capture_expression",
             "description",
             "condition_param",
             "condition_negate",
@@ -95,8 +101,9 @@ class RPCProcedureCommandTable(NetBoxTable):
             "procedure",
             "sequence",
             "step_type",
-            "device_cli_mode",
+            "render_mode",
             "argv",
+            "produces_var",
             "condition_param",
             "for_each_param",
         )

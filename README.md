@@ -60,7 +60,11 @@ shell text:
   "condition_param": "",
   "condition_negate": false,
   "for_each_param": "",
-  "continue_on_error": false
+  "continue_on_error": false,
+  "render_mode": "literal",
+  "produces_var": "",
+  "capture_kind": "",
+  "capture_expression": ""
 }
 ```
 
@@ -93,6 +97,22 @@ Proxmox workflows, stdin-backed install/config scripts, URL-download
 installers, Ookla diagnostic probe scripts, and enum branches that the current
 truthy-only condition fields cannot express. Exempt procedures still get one
 representative command row for API/UI discoverability.
+
+### Command templating & output-variable chaining
+
+A command can opt into **Jinja2 templating** (`render_mode="jinja"`) so each
+`argv` token is a sandboxed Jinja2 expression rendered against the run's declared
+`params`, the NetBox `target` object ("NetBox objects as variables"), an earlier
+command's captured output `vars`, the `runtime` SSH keys, and the `for_each`
+`item`. A command can also **capture** a value from its output into a named
+variable (`produces_var` + `capture_kind` + `capture_expression`) that a later
+command references as `{{ vars.<name> }}` — so command 2 can consume a value that
+only exists in command 1's output, which command 1 derived from a NetBox object.
+`RPCProcedureCommand.clean()` validates the templates (sandboxed, expression-only,
+safe literals, no dunder access) and the chain ordering (an output variable must
+be produced by a command with a smaller `sequence`). Legacy `literal` commands are
+unchanged. Full contract — including the executor's shell-quoting/redaction
+obligations — is in [`docs/command-templating.md`](docs/command-templating.md).
 
 ## Intents
 

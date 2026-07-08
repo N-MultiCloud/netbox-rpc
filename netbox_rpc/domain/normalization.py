@@ -57,6 +57,7 @@ from ..constants import (
     UBUNTU_24_STATUS_SERVICE,
     UBUNTU_24_STOP_SERVICE,
 )
+from ..command_templating import RENDER_JINJA
 from ..models import RPCLinuxServiceAllowlist, RPCExecution
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -181,6 +182,7 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     """
     normalized = _dispatch_normalize_execution_params(execution)
     _apply_driver_pipeline_overrides(execution, normalized)
+    _apply_target_object_context(execution, normalized)
     return normalized
 
 
@@ -207,6 +209,130 @@ def _apply_driver_pipeline_overrides(
         normalized["output_schema"] = schema
         if isinstance(fingerprint, dict):
             fingerprint["output_schema_sha256"] = _hash_json(schema)
+
+
+# ── Target-object context for Jinja command templating ───────────────────────
+#
+# netbox-rpc owns the NetBox target object; the nms-backend executor only sees
+# the serialized execution payload. So when a procedure has a Jinja command
+# (``render_mode="jinja"``), netbox-rpc serializes a bounded, redacted snapshot
+# of the target object into ``normalized_params["_target_object"]`` — that is the
+# ``{{ target.* }}`` render context ("NetBox objects as variables"). This is
+# gated on the procedure actually having a Jinja command, so every legacy /
+# literal procedure keeps a byte-for-byte identical normalized payload.
+
+_TARGET_SNAPSHOT_MAX_FIELDS = 100
+_TARGET_SNAPSHOT_MAX_VALUE_LEN = 1024
+# Field/custom-field names whose values must never be serialized into the
+# snapshot. Biased toward over-redaction (omitting a field is safe; leaking a
+# secret is not).
+_SENSITIVE_FIELD_RE = re.compile(
+    r"pass|secret|token|credential|community|psk|passphrase"
+    r"|private[_-]?key|api[_-]?key|ssh[_-]?key|auth[_-]?key"
+    r"|access[_-]?key|encryption[_-]?key|secret[_-]?key",
+    re.IGNORECASE,
+)
+
+
+def _has_jinja_command(procedure: Any) -> bool:
+    """True when the procedure has at least one ``render_mode="jinja"`` command.
+
+    Uses a single ``EXISTS`` query for a real related manager; falls back to
+    iterating a plain list (test stubs). Returns False when no command relation
+    is present.
+    """
+
+    manager = getattr(procedure, "commands", None)
+    if manager is None:
+        return False
+    filter_fn = getattr(manager, "filter", None)
+    if callable(filter_fn):
+        return filter_fn(render_mode=RENDER_JINJA).exists()
+    all_fn = getattr(manager, "all", None)
+    commands = all_fn() if callable(all_fn) else manager
+    return any(
+        (getattr(command, "render_mode", "") or "") == RENDER_JINJA
+        for command in commands
+    )
+
+
+def _json_safe_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        safe = value
+    else:
+        safe = str(value)
+    if isinstance(safe, str) and len(safe) > _TARGET_SNAPSHOT_MAX_VALUE_LEN:
+        safe = safe[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]
+    return safe
+
+
+def _target_field_items(obj: Any):
+    """Yield ``(name, value)`` for the object's concrete fields.
+
+    Prefers a Django model's concrete local fields (``_meta.fields``); falls
+    back to the object's public ``__dict__`` entries for plain objects/stubs.
+    """
+
+    meta = getattr(obj, "_meta", None)
+    fields = getattr(meta, "fields", None) if meta is not None else None
+    if fields:
+        for field in fields:
+            attname = getattr(field, "attname", None) or getattr(field, "name", None)
+            if attname:
+                yield attname, getattr(obj, attname, None)
+        return
+    data = getattr(obj, "__dict__", None)
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if not key.startswith("_"):
+                yield key, value
+
+
+def _build_target_object_snapshot(obj: Any) -> dict[str, Any] | None:
+    """Bounded, redacted, JSON-safe snapshot of the run's NetBox target object."""
+
+    if obj is None:
+        return None
+    snapshot: dict[str, Any] = {}
+    for name, value in _target_field_items(obj):
+        if name.startswith("_") or _SENSITIVE_FIELD_RE.search(name):
+            continue
+        if len(snapshot) >= _TARGET_SNAPSHOT_MAX_FIELDS:
+            break
+        snapshot[name] = _json_safe_scalar(value)
+
+    pk = getattr(obj, "pk", None)
+    snapshot.setdefault("id", pk if pk is not None else getattr(obj, "id", None))
+    snapshot["display"] = _json_safe_scalar(str(obj))
+    if "name" not in snapshot:
+        name_value = getattr(obj, "name", None)
+        if name_value is not None:
+            snapshot["name"] = _json_safe_scalar(name_value)
+
+    custom_fields = getattr(obj, "custom_field_data", None)
+    if isinstance(custom_fields, dict) and custom_fields:
+        redacted_cf = {
+            key: _json_safe_scalar(value)
+            for key, value in list(custom_fields.items())[:_TARGET_SNAPSHOT_MAX_FIELDS]
+            if not _SENSITIVE_FIELD_RE.search(str(key))
+        }
+        if redacted_cf:
+            snapshot["custom_fields"] = redacted_cf
+    return snapshot
+
+
+def _apply_target_object_context(
+    execution: RPCExecution, normalized: dict[str, Any]
+) -> None:
+    if not _has_jinja_command(execution.procedure):
+        return
+    snapshot = _build_target_object_snapshot(getattr(execution, "assigned_object", None))
+    if not snapshot:
+        return
+    normalized["_target_object"] = snapshot
+    fingerprint = normalized.get("command_fingerprint")
+    if isinstance(fingerprint, dict):
+        fingerprint["target_object_sha256"] = _hash_json(snapshot)
 
 
 def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:

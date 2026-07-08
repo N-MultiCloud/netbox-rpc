@@ -47,6 +47,7 @@ class RPCProcedureCommandFilterSet(NetBoxModelFilterSet):
         label="Procedure",
     )
     step_type = django_filters.CharFilter()
+    render_mode = django_filters.CharFilter()
 
     class Meta:
         model = RPCProcedureCommand
@@ -55,6 +56,8 @@ class RPCProcedureCommandFilterSet(NetBoxModelFilterSet):
             "sequence",
             "step_type",
             "device_cli_mode",
+            "render_mode",
+            "produces_var",
             "condition_param",
             "for_each_param",
         )

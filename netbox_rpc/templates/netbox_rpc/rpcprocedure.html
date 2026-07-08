@@ -81,10 +81,10 @@
             <thead>
               <tr>
                 <th scope="col">#</th>
-                <th scope="col">Type</th>
-                <th scope="col">Argv</th>
-                <th scope="col">Description</th>
-                <th scope="col">Condition</th>
+                <th scope="col">Step</th>
+                <th scope="col">Command (argv)</th>
+                <th scope="col">Produces</th>
+                <th scope="col">Control</th>
               </tr>
             </thead>
             <tbody>
@@ -96,9 +96,22 @@
                     {% if command.device_cli_mode %}
                       <span class="text-muted">({{ command.device_cli_mode }})</span>
                     {% endif %}
+                    {% if command.render_mode == 'jinja' %}
+                      <span class="badge text-bg-purple" title="argv tokens are rendered as Jinja2 templates">jinja</span>
+                    {% endif %}
+                    {% if command.description %}
+                      <div class="text-muted small">{{ command.description }}</div>
+                    {% endif %}
                   </td>
                   <td><code>{{ command.argv|join:" " }}</code></td>
-                  <td>{{ command.description|placeholder }}</td>
+                  <td>
+                    {% if command.produces_var %}
+                      <code>{{ command.produces_var }}</code>
+                      <span class="text-muted small">&larr; {{ command.capture_kind|default:"stdout_stripped" }}{% if command.capture_expression %}: <code>{{ command.capture_expression }}</code>{% endif %}</span>
+                    {% else %}
+                      {{ ''|placeholder }}
+                    {% endif %}
+                  </td>
                   <td>
                     {% if command.condition_param %}
                       {% if command.condition_negate %}not {% endif %}<code>{{ command.condition_param }}</code>
@@ -119,6 +132,14 @@
               {% endfor %}
             </tbody>
           </table>
+          <p class="text-muted small mb-0">
+            Jinja commands render each argv token against
+            <code>params</code>, the NetBox <code>target</code> object,
+            earlier commands' output <code>vars</code>,
+            <code>runtime</code> SSH keys, and the for-each <code>item</code>.
+            A command's <em>Produces</em> variable is referenceable as
+            <code>{{ '{{ vars.<name> }}' }}</code> by any later command.
+          </p>
         {% else %}
           <span class="text-muted">{{ ''|placeholder }}</span>
         {% endif %}
