@@ -96,10 +96,13 @@ def local_rpcbackend_resolver(pk: object) -> BackendTarget | None:
     given ``pk``; when none is supplied it falls back to the single configured
     ``RPCBackend`` so a one-backend deployment needs no per-execution selection.
     """
-    target = _resolve_local_backend(pk)
-    if target is not None:
-        return target
+    # A specific backend was requested: resolve exactly it. Fail closed if it is
+    # missing — never silently reroute the execution to a different backend.
+    if pk not in (None, ""):
+        return _resolve_local_backend(pk)
 
+    # No backend was specified: use the single configured RPCBackend when
+    # unambiguous, so a one-backend deployment needs no per-execution selection.
     from .models import RPCBackend
 
     rows = list(RPCBackend.objects.all()[:2])
