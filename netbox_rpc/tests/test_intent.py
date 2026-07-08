@@ -139,6 +139,50 @@ class IntentApiTests(TestCase):
         assert "intent.par" in names
         assert "intent.seq" not in names
 
+    def test_list_filter_by_enabled(self):
+        RPCIntent.objects.create(name="intent.on", enabled=True)
+        RPCIntent.objects.create(name="intent.off", enabled=False)
+        resp = self.client.get(self._list_url(), {"enabled": "false"})
+        assert resp.status_code == 200
+        names = [r["name"] for r in resp.data["results"]]
+        assert "intent.off" in names
+        assert "intent.on" not in names
+
+    def test_list_filter_by_procedure_id(self):
+        a = make_procedure("os.linux.api.f.a")
+        b = make_procedure("os.linux.api.f.b")
+        with_a = RPCIntent.objects.create(name="intent.with.a")
+        RPCIntentProcedure.objects.create(intent=with_a, procedure=a, sequence=1)
+        without_a = RPCIntent.objects.create(name="intent.without.a")
+        RPCIntentProcedure.objects.create(intent=without_a, procedure=b, sequence=1)
+        resp = self.client.get(self._list_url(), {"procedure_id": a.pk})
+        assert resp.status_code == 200
+        names = [r["name"] for r in resp.data["results"]]
+        assert "intent.with.a" in names
+        assert "intent.without.a" not in names
+
+    def test_create_rejects_duplicate_procedure_ids(self):
+        a = make_procedure("os.linux.api.dup")
+        resp = self.client.post(
+            self._list_url(),
+            {"name": "intent.api.dup", "procedure_ids": [a.pk, a.pk]},
+            format="json",
+        )
+        assert resp.status_code == 400, resp.content
+        assert "procedure_ids" in resp.data
+        # No partial intent should have been created.
+        assert not RPCIntent.objects.filter(name="intent.api.dup").exists()
+
+    def test_update_rejects_duplicate_procedure_ids(self):
+        a = make_procedure("os.linux.api.dup.u")
+        intent = RPCIntent.objects.create(name="intent.api.dup.u")
+        resp = self.client.patch(
+            self._detail_url(intent.pk),
+            {"procedure_ids": [a.pk, a.pk]},
+            format="json",
+        )
+        assert resp.status_code == 400, resp.content
+
 
 class IntentFormTests(TestCase):
     def test_form_reconciles_through_rows_in_submitted_order(self):
@@ -185,3 +229,28 @@ class IntentFormTests(TestCase):
             intent.intent_procedures.values_list("procedure_id", flat=True)
         ) == [b.pk]
         assert intent.execution_mode == "parallel"
+
+    def test_form_commit_false_defers_through_rows_to_save_m2m(self):
+        from netbox_rpc.forms import RPCIntentForm
+
+        a = make_procedure("os.linux.form.cf.a")
+        b = make_procedure("os.linux.form.cf.b")
+        data = QueryDict(mutable=True)
+        data["name"] = "intent.form.commitfalse"
+        data["execution_mode"] = "sequential"
+        data["enabled"] = "on"
+        data.setlist("procedures", [str(b.pk), str(a.pk)])
+
+        form = RPCIntentForm(data=data)
+        assert form.is_valid(), form.errors
+        # Standard commit=False pattern: no through rows until save_m2m().
+        instance = form.save(commit=False)
+        instance.save()
+        assert not instance.intent_procedures.exists()
+        form.save_m2m()
+        rows = list(
+            instance.intent_procedures.order_by("sequence").values_list(
+                "procedure_id", "sequence"
+            )
+        )
+        assert rows == [(b.pk, 1), (a.pk, 2)]

@@ -203,9 +203,28 @@ class RPCIntentSerializer(NetBoxModelSerializer):
         )
         brief_fields = ("id", "url", "display", "name", "execution_mode", "enabled")
 
+    def validate_procedure_ids(self, value: list) -> list:
+        # Reject duplicate procedures up front with a 400; otherwise the
+        # bulk_create in _set_procedures() violates the (intent, procedure)
+        # unique constraint and surfaces as an opaque 500.
+        seen: set[int] = set()
+        for procedure in value:
+            if procedure.pk in seen:
+                raise serializers.ValidationError(
+                    "Duplicate procedure IDs are not allowed; each procedure may "
+                    "appear at most once per intent."
+                )
+            seen.add(procedure.pk)
+        return value
+
     @extend_schema_field(RPCIntentProcedureSerializer(many=True))
     def get_procedures(self, obj: RPCIntent) -> list[dict]:
-        rows = obj.intent_procedures.select_related("procedure").all()
+        # Read through the viewset's
+        # prefetch_related("intent_procedures__procedure") cache; ordering comes
+        # from RPCIntentProcedure.Meta (sequence). Calling select_related() here
+        # would issue a fresh query and defeat that prefetch (one extra query per
+        # intent on list responses).
+        rows = obj.intent_procedures.all()
         return RPCIntentProcedureSerializer(rows, many=True).data
 
     def _set_procedures(self, intent: RPCIntent, procedures: list) -> None:
