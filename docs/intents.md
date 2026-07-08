@@ -8,7 +8,12 @@ needs to be done; the grouped `RPCProcedure`s (with their commands) answer *how*
 | Model | Fields | Notes |
 |---|---|---|
 | `RPCIntent` | `name` (unique), `execution_mode` (`sequential` / `parallel`, default `sequential`), `enabled`, `description`, `comments`, `procedures` (M2M → `RPCProcedure` through `RPCIntentProcedure`), tags | Declarative reference-data: plain NetBox CRUD, `ObjectChange`-audited, **not** event-sourced. Custom permission `execute_rpcintent` is reserved for the future executor. |
-| `RPCIntentProcedure` | FK `intent` (CASCADE), FK `procedure` (PROTECT), `sequence` (PositiveInteger) | Ordered through model. `sequence` orders the procedures for sequential/nested execution; it is informational in parallel mode. Unique `(intent, procedure)`; ordering `(intent, sequence, id)`. |
+| `RPCIntentProcedure` | FK `intent` (CASCADE), FK `procedure` (PROTECT), `sequence` (PositiveInteger, **≥ 1** — `MinValueValidator` + DB `CheckConstraint`) | Ordered through model. `sequence` orders the procedures for sequential/nested execution; it is informational in parallel mode. Unique `(intent, procedure)`; ordering `(intent, sequence, id)`. |
+
+Changes to the grouped procedures (add / remove / reorder) are captured in the
+intent's changelog: `RPCIntent.serialize_object()` includes the ordered
+`intent_procedures`, and the form / API reconcile the through rows *before* the
+model save on the update path so the `ObjectChange` diff reflects the new order.
 
 `execution_mode` is single-sourced from the `ExecutionMode` domain value object
 (`netbox_rpc/domain/value_objects.py`), mirroring `Effect` / `ExecutionStatus`.
@@ -93,3 +98,9 @@ Seeded by `netbox_rpc/migrations/0039_rpcintent.py` — an additive migration
 (two `CreateModel`s + the ordered M2M + a unique constraint) depending on the
 `0038_merge_rpc_procedure_commands` leaf. It has no live imports and no
 `netbox_nms` dependency, so standalone boot is preserved.
+`0040_rpcintentprocedure_sequence_min.py` adds the `sequence >= 1` validator and
+DB `CheckConstraint` (normalizing any existing sub-1 rows first, so it is safe on
+populated databases).
+
+Requires NetBox **4.6.0+** (`min_version = "4.6.0"`): the migration graph depends
+on `extras.0138`, which ships with NetBox 4.6.

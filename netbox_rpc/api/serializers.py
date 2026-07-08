@@ -247,10 +247,12 @@ class RPCIntentSerializer(NetBoxModelSerializer):
 
     def update(self, instance: RPCIntent, validated_data: dict) -> RPCIntent:
         procedures = validated_data.pop("procedure_ids", None)
-        intent = super().update(instance, validated_data)
         if procedures is not None:
-            self._set_procedures(intent, procedures)
-        return intent
+            # Reconcile the ordered through rows BEFORE the model save so the
+            # changelog postchange (serialize_object) reflects the new
+            # membership/order — otherwise a reorder is not captured in the diff.
+            self._set_procedures(instance, procedures)
+        return super().update(instance, validated_data)
 
 
 class RPCExecutionEventSerializer(NetBoxModelSerializer):

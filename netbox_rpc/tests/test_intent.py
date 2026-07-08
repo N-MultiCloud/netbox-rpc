@@ -64,6 +64,28 @@ class IntentModelTests(TestCase):
         assert not RPCIntentProcedure.objects.filter(procedure=a).exists()
         assert RPCProcedure.objects.filter(pk=a.pk).exists()
 
+    def test_sequence_zero_rejected_by_check_constraint(self):
+        a = make_procedure("os.linux.test.seqzero")
+        intent = RPCIntent.objects.create(name="intent.seqzero")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                RPCIntentProcedure.objects.create(
+                    intent=intent, procedure=a, sequence=0
+                )
+
+    def test_serialize_object_includes_ordered_procedures(self):
+        a = make_procedure("os.linux.test.ser.a")
+        b = make_procedure("os.linux.test.ser.b")
+        intent = RPCIntent.objects.create(name="intent.serialize")
+        # Insert out of order; serialize_object must return sequence order.
+        RPCIntentProcedure.objects.create(intent=intent, procedure=b, sequence=2)
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        data = intent.serialize_object()
+        assert data["intent_procedures"] == [
+            {"procedure": a.pk, "sequence": 1},
+            {"procedure": b.pk, "sequence": 2},
+        ]
+
 
 class IntentApiTests(TestCase):
     def setUp(self):
@@ -182,6 +204,41 @@ class IntentApiTests(TestCase):
             format="json",
         )
         assert resp.status_code == 400, resp.content
+
+    def test_reorder_is_captured_in_object_changelog(self):
+        from django.contrib.contenttypes.models import ContentType
+
+        from core.models import ObjectChange
+
+        a = make_procedure("os.linux.api.cl.a")
+        b = make_procedure("os.linux.api.cl.b")
+        resp = self.client.post(
+            self._list_url(),
+            {"name": "intent.changelog", "procedure_ids": [a.pk, b.pk]},
+            format="json",
+        )
+        assert resp.status_code == 201, resp.content
+        pk = resp.data["id"]
+        # Reorder to [b, a]; the through rows are reconciled before the model save
+        # so the ObjectChange postchange must reflect the new order.
+        resp = self.client.patch(
+            self._detail_url(pk),
+            {"procedure_ids": [b.pk, a.pk]},
+            format="json",
+        )
+        assert resp.status_code == 200, resp.content
+        ct = ContentType.objects.get_for_model(RPCIntent)
+        change = (
+            ObjectChange.objects.filter(changed_object_type=ct, changed_object_id=pk)
+            .order_by("-time")
+            .first()
+        )
+        assert change is not None
+        ordered = [
+            (row["procedure"], row["sequence"])
+            for row in change.postchange_data.get("intent_procedures", [])
+        ]
+        assert ordered == [(b.pk, 1), (a.pk, 2)]
 
 
 class IntentFormTests(TestCase):
