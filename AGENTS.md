@@ -17,7 +17,10 @@ static auth header (`auth_header_name` / `auth_token`) round out the target.
 `auth_token` is plaintext storage; security-conscious deployments should
 configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` to resolve a
 `netbox_rpc.backends.BackendTarget` from an external secret store or service
-registry.
+registry. To route dispatch to the `netbox-rpc-backend` service (an `RPCBackend`
+row) even when `netbox-nms` is installed, set
+`backend_resolver = "netbox_rpc.backends.local_rpcbackend_resolver"`; it uses the
+execution's `backend` pk, else the single configured `RPCBackend`.
 
 When no custom resolver is configured and `netbox-nms` is importable,
 `netbox-rpc` adapts `netbox_nms.backend.get_backend(pk)` to the tiny backend

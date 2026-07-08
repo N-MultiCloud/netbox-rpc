@@ -84,3 +84,25 @@ def _adapt_backend(backend: object) -> BackendTarget:
         headers=dict(backend.get_auth_headers()),
         verify_ssl=bool(getattr(backend, "verify_ssl")),
     )
+
+
+def local_rpcbackend_resolver(pk: object) -> BackendTarget | None:
+    """``backend_resolver`` that routes dispatch to a local ``RPCBackend``.
+
+    Set ``PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"] =
+    "netbox_rpc.backends.local_rpcbackend_resolver"`` to send RPC executions to
+    the ``netbox-rpc-backend`` service (configured as an ``RPCBackend`` row)
+    instead of ``nms-backend`` — even when ``netbox-nms`` is installed. Uses the
+    given ``pk``; when none is supplied it falls back to the single configured
+    ``RPCBackend`` so a one-backend deployment needs no per-execution selection.
+    """
+    target = _resolve_local_backend(pk)
+    if target is not None:
+        return target
+
+    from .models import RPCBackend
+
+    rows = list(RPCBackend.objects.all()[:2])
+    if len(rows) == 1:
+        return _adapt_backend(rows[0])
+    return None
