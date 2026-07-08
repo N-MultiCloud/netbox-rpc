@@ -2,9 +2,9 @@
 
 Covers the `RPCExecution` presentation helpers used by the tab
 (`intent_reference`, `source_label`, `result_steps`), the `source` column on
-`RPCExecutionTable`, and the `runs` tab view which lists a procedure's
-executions (owner, source, status, target, timing) and links each to its
-detail where the issued commands and output are rendered.
+`RPCExecutionTable`, the `runs` tab view (scoping, rendered owner/source, badge
+count), and the execution-detail page which renders the issued commands and
+their output (the "Command Output" card) plus the run's Source.
 """
 
 from __future__ import annotations
@@ -103,3 +103,68 @@ class ProcedureRunsTabViewTests(TestCase):
         pks = {row.record.pk for row in table.rows}
         assert mine.pk in pks
         assert theirs.pk not in pks
+
+    def test_runs_tab_renders_owner_and_source(self):
+        proc = make_procedure("os.linux.test.runs.render")
+        _make_execution(proc, user=self.user)
+        _make_execution(proc, user=self.user, params={"_intent_name": "batch.job"})
+
+        url = reverse("plugins:netbox_rpc:rpcprocedure_runs", args=[proc.pk])
+        html = self.client.get(url).content.decode()
+        # Owner column value and both Source variants appear in the rendered tab.
+        assert self.user.username in html
+        assert "Direct" in html
+        assert "Intent: batch.job" in html
+
+    def test_runs_tab_is_registered_with_a_badge_count(self):
+        from netbox_rpc.views import RPCProcedureRunsView
+
+        proc = make_procedure("os.linux.test.runs.badge")
+        assert RPCProcedureRunsView.tab.badge(proc) == 0
+        make_execution(procedure=proc, user=self.user)
+        make_execution(procedure=proc, user=self.user)
+        assert RPCProcedureRunsView.tab.badge(proc) == 2
+
+
+class ExecutionDetailCommandOutputTests(TestCase):
+    """The execution detail page renders the issued commands and their output."""
+
+    def setUp(self):
+        self.user = make_user("runs-detail-tester", superuser=True)
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def _detail_html(self, execution) -> str:
+        url = reverse("plugins:netbox_rpc:rpcexecution", args=[execution.pk])
+        resp = self.client.get(url)
+        assert resp.status_code == 200, resp.content
+        return resp.content.decode()
+
+    def test_detail_renders_command_output_card(self):
+        proc = make_procedure("os.linux.test.detail.output")
+        steps = [
+            {"command": "systemctl is-active nginx", "operation": "status",
+             "exit_code": 0, "ok": True, "stdout": "active-marker", "stderr": ""},
+            {"command": "false", "operation": "probe", "exit_code": 1,
+             "ok": False, "stdout": "", "stderr": "stderr-marker"},
+        ]
+        ex = _make_execution(proc, user=self.user, result={"ok": False, "steps": steps})
+        html = self._detail_html(ex)
+        assert "Command Output" in html
+        assert "systemctl is-active nginx" in html
+        assert "active-marker" in html      # stdout of a successful step
+        assert "stderr-marker" in html      # stderr of a failed step
+
+    def test_detail_shows_direct_source_without_steps(self):
+        proc = make_procedure("os.linux.test.detail.direct")
+        ex = _make_execution(proc, user=self.user)
+        html = self._detail_html(ex)
+        assert "Direct" in html
+        # No steps -> no Command Output card.
+        assert "Command Output" not in html
+
+    def test_detail_shows_intent_source(self):
+        proc = make_procedure("os.linux.test.detail.intent")
+        ex = _make_execution(proc, user=self.user, params={"_intent_name": "grouped.run"})
+        html = self._detail_html(ex)
+        assert "grouped.run" in html
