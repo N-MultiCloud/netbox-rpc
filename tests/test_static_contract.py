@@ -151,6 +151,28 @@ def test_transport_and_parsing_selection_docs_are_present() -> None:
         assert "docs/transport-and-parsing-selection.md" in content
 
 
+def test_rpc_generated_core_jobs_docs_are_present() -> None:
+    guide = read("docs/rpc-generated-core-jobs.md")
+    readme = read("README.md")
+    agents = read("AGENTS.md")
+    architecture = read("docs/architecture.md")
+
+    # The guide must explain where the command, output, and timing live.
+    assert "Reading a netbox-rpc-generated NetBox core job" in guide
+    assert "result.steps[].command" in guide
+    assert "result.steps[].stdout" in guide
+    assert "*.step.result" in guide
+    # The core-job <-> execution link and the sanctioned read path.
+    assert "job_id" in guide
+    assert "rpc executions get" in guide
+    assert "nms rpc events" in guide
+    # The worked example must stay anchored to a concrete core job / execution.
+    assert "core job 555" in guide
+    # The guide must be cross-linked from the surfaces that point to it.
+    for content in (readme, agents, architecture):
+        assert "rpc-generated-core-jobs.md" in content
+
+
 def test_normalizer_centrally_threads_driver_selection() -> None:
     normalization = read("netbox_rpc/domain/normalization.py")
     jobs = read("netbox_rpc/jobs.py")
