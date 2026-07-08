@@ -113,7 +113,11 @@ be used autonomously on destructive procedures.
 ---
 
 - Procedure records map canonical names to backend `handler_id` values.
-- NetBox RQ jobs normalize params and delegate execution to `nms-backend`.
+- NetBox RQ jobs normalize params and delegate execution to `nms-backend`. Each
+  run's core RQ job (`/core/jobs/<N>/`) links to the `RPCExecution` by `job_id`;
+  the issued command(s), their output, and per-command timing are read from
+  `RPCExecution.result.steps[]` and the event ledger. See
+  [`docs/rpc-generated-core-jobs.md`](docs/rpc-generated-core-jobs.md).
 - SSH credentials and host-key pinning live in `netbox-nms.DeviceService`.
   `RPCLinuxServiceAllowlist.ssh_credential_override` can point at a
   `netbox-nms.DeviceCredential` for per-service SSH key overrides; when set,
