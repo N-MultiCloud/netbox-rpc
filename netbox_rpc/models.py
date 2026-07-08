@@ -48,6 +48,11 @@ SYSTEMD_UNIT_RE = re.compile(
     r"(?:\.service)?$"
 )
 
+# Bare hostname/domain for RPCBackend.domain: alphanumerics, dots, and hyphens
+# only — no scheme, port, path, or whitespace. Prevents a URL parser differential
+# when composing backend_url as "{scheme}://{host}:{port}".
+_BACKEND_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
+
 
 class RPCBackend(NetBoxModel):
     """Standalone backend target.
@@ -107,6 +112,21 @@ class RPCBackend(NetBoxModel):
 
         return reverse("plugins:netbox_rpc:rpcbackend", args=[self.pk])
 
+    def clean(self) -> None:
+        super().clean()
+        # Reject anything but a bare hostname/domain so the composed backend_url
+        # cannot be steered to a different host via an embedded path/port/scheme.
+        domain = (self.domain or "").strip()
+        if domain and not _BACKEND_HOSTNAME_RE.fullmatch(domain):
+            raise ValidationError(
+                {
+                    "domain": (
+                        "Enter a bare hostname or domain (letters, digits, dots, "
+                        "and hyphens only — no scheme, port, path, or spaces)."
+                    )
+                }
+            )
+
     @property
     def ip(self) -> str:
         """The backend IP address without any CIDR mask, or empty string."""
@@ -120,6 +140,10 @@ class RPCBackend(NetBoxModel):
         host = (self.domain or "").strip() or self.ip
         if not host:
             return ""
+        # Bracket IPv6 literals so the "host:port" form stays unambiguous
+        # (http://[2001:db8::1]:8000, not http://2001:db8::1:8000).
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
         scheme = "https" if self.use_https else "http"
         return f"{scheme}://{host}:{self.port}"
 
