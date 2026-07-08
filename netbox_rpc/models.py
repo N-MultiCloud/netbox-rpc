@@ -7,6 +7,7 @@ import re
 from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
@@ -100,17 +101,25 @@ class RPCProcedure(NetBoxModel):
     # explicit data on the procedure (never encoded inside handler_id). "asyncssh"
     # is the historical default and reproduces the legacy single-/multi-command SSH
     # behaviour; the other drivers opt into the pluggable driver layer.
+    # Linux/server SSH drivers (backend capability "linux-shell").
     TRANSPORT_ASYNCSSH = "asyncssh"
+    TRANSPORT_PARAMIKO = "paramiko"
+    TRANSPORT_SUBPROCESS = "subprocess"
+    TRANSPORT_FABRIC = "fabric"
+    # Network CLI / orchestration drivers (backend capability "network-cli").
     TRANSPORT_SCRAPLI = "scrapli"
     TRANSPORT_NETMIKO = "netmiko"
-    TRANSPORT_PARAMIKO = "paramiko"
     TRANSPORT_NAPALM = "napalm"
+    TRANSPORT_NORNIR = "nornir"
     TRANSPORT_DRIVER_CHOICES = (
         (TRANSPORT_ASYNCSSH, "AsyncSSH (default)"),
+        (TRANSPORT_PARAMIKO, "Paramiko"),
+        (TRANSPORT_SUBPROCESS, "subprocess (OpenSSH)"),
+        (TRANSPORT_FABRIC, "Fabric"),
         (TRANSPORT_SCRAPLI, "Scrapli"),
         (TRANSPORT_NETMIKO, "Netmiko"),
-        (TRANSPORT_PARAMIKO, "Paramiko"),
         (TRANSPORT_NAPALM, "NAPALM"),
+        (TRANSPORT_NORNIR, "Nornir"),
     )
 
     # Output parser the nms-backend pipeline applies to raw command output when the
@@ -161,6 +170,18 @@ class RPCProcedure(NetBoxModel):
         help_text=(
             "Transport driver the nms-backend execution pipeline uses for this "
             "procedure. AsyncSSH preserves the legacy behaviour."
+        ),
+    )
+    transport_driver_chain = ArrayField(
+        base_field=models.CharField(max_length=32, choices=TRANSPORT_DRIVER_CHOICES),
+        default=list,
+        blank=True,
+        help_text=(
+            "Ordered transport-driver priority + fallback chain (index 0 is tried "
+            "first). Leave empty to use the single Transport driver above. The "
+            "execution backend advances to the next capable driver when one is "
+            "unavailable or a connection fails; a command-level failure stops the "
+            "chain."
         ),
     )
     output_parser = models.CharField(

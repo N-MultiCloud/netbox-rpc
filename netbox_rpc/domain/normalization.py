@@ -198,6 +198,17 @@ def _apply_driver_pipeline_overrides(
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver"] = driver
 
+    # Ordered driver priority + fallback chain. Injected only when the operator
+    # configured a non-empty chain, so legacy procedures keep a byte-for-byte
+    # identical payload. The backend reads it from normalized_params, tries the
+    # drivers in order, and falls through on unavailable/connection errors.
+    raw_chain = getattr(procedure, "transport_driver_chain", None) or []
+    chain = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
+    if chain:
+        normalized["transport_driver_chain"] = chain
+        if isinstance(fingerprint, dict):
+            fingerprint["transport_driver_chain"] = chain
+
     parser = str(getattr(procedure, "output_parser", "") or "").strip()
     if parser and parser != _DEFAULT_OUTPUT_PARSER:
         normalized["output_parser"] = parser
