@@ -217,10 +217,17 @@ class RPCIntentForm(NetBoxModelForm):
         )
 
     def save(self, commit: bool = True) -> RPCIntent:
+        if commit and self.instance.pk:
+            # Update path: reconcile the ordered through rows BEFORE the model
+            # save so the changelog postchange (RPCIntent.serialize_object) is
+            # serialized at post_save with the new membership/order — otherwise a
+            # reorder-only change is not captured in the ObjectChange diff.
+            self._save_intent_procedures()
+            return super().save(commit=commit)
+
         instance = super().save(commit=commit)
         if commit:
-            # Instance is persisted (NetBox's ObjectEditView path); attach the
-            # ordered through rows now.
+            # Create path: the instance now has a PK; attach the ordered rows.
             self._save_intent_procedures()
         else:
             # Defer ordered through-row reconciliation onto save_m2m() so the

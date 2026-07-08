@@ -139,7 +139,16 @@ done; the procedures (with their commands) declare *how*. See
   Safety Guardrails below. An intent must never bypass approval on a destructive
   procedure. Seeded by additive migration `0039_rpcintent` (depends on the
   `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
-  dependency).
+  dependency). `0040_rpcintentprocedure_sequence_min` adds the `sequence >= 1`
+  validator + DB `CheckConstraint`.
+- `RPCIntentProcedure.sequence` must be `>= 1` (validator + check constraint);
+  the form/API renumber from 1. Grouped-procedure add/remove/reorder is captured
+  in the intent changelog because `RPCIntent.serialize_object()` includes the
+  ordered `intent_procedures` and the form/serializer reconcile the through rows
+  **before** the model save on the update path (Django never fires `m2m_changed`
+  for a through-M2M with extra fields).
+- The plugin's real floor is NetBox **4.6.0** (`min_version = "4.6.0"`): the
+  migration graph depends on `extras.0138` (a 4.6 migration).
 
 ## LLM Agent Safety Guardrails
 

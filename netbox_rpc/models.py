@@ -8,6 +8,7 @@ from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from netbox.models import NetBoxModel
 
@@ -651,6 +652,20 @@ class RPCIntent(NetBoxModel):
     def procedure_count(self) -> int:
         return self.procedures.count()
 
+    def serialize_object(self, exclude=None):
+        # Include the ordered grouped procedures so membership/order changes are
+        # captured in the object's changelog. Django never fires ``m2m_changed``
+        # for a ``through``-M2M with extra fields, so this is how a reorder shows
+        # up in the ObjectChange diff — RPCIntentForm/RPCIntentSerializer
+        # reconcile the through rows *before* the model save on the update path so
+        # this postchange snapshot reflects the new order.
+        data = super().serialize_object(exclude=exclude)
+        data["intent_procedures"] = [
+            {"procedure": ip.procedure_id, "sequence": ip.sequence}
+            for ip in self.intent_procedures.all()
+        ]
+        return data
+
 
 class RPCIntentProcedure(models.Model):
     """Through model ordering the procedures grouped by an ``RPCIntent``.
@@ -671,6 +686,7 @@ class RPCIntentProcedure(models.Model):
     )
     sequence = models.PositiveIntegerField(
         default=1,
+        validators=[MinValueValidator(1)],
         help_text="Execution order within the intent (used in sequential mode).",
     )
 
@@ -681,6 +697,10 @@ class RPCIntentProcedure(models.Model):
             models.UniqueConstraint(
                 fields=("intent", "procedure"),
                 name="netbox_rpc_intent_unique_procedure",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sequence__gte=1),
+                name="netbox_rpc_intentprocedure_sequence_gte_1",
             ),
         )
         verbose_name = "RPC Intent Procedure"

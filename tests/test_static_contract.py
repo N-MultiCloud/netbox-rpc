@@ -966,3 +966,35 @@ def test_intent_is_reference_data_not_event_sourced() -> None:
     intent_view = views[intent_view_start : intent_view_start + 400]
     assert "NetBoxModelViewSet" in intent_view
     assert "http_method_names" not in intent_view
+
+
+def test_intent_sequence_has_min_validator_and_check_constraint() -> None:
+    models = read("netbox_rpc/models.py")
+    migration = read(
+        "netbox_rpc/migrations/0040_rpcintentprocedure_sequence_min.py"
+    )
+    assert "MinValueValidator(1)" in models
+    assert "netbox_rpc_intentprocedure_sequence_gte_1" in models
+    assert "condition=models.Q(sequence__gte=1)" in models
+    # Migration depends on 0039, is data-safe (normalizes first), and adds the
+    # DB check constraint.
+    assert '"0039_rpcintent"' in migration
+    assert "_normalize_sequences" in migration
+    assert "CheckConstraint" in migration
+    assert "sequence__gte=1" in migration
+
+
+def test_intent_serialize_object_includes_ordered_membership() -> None:
+    # Ordered through-row membership is part of the intent's serialized state so
+    # reorders/membership changes appear in the ObjectChange diff.
+    models = read("netbox_rpc/models.py")
+    assert "def serialize_object" in models
+    assert '"intent_procedures"' in models
+    assert '"sequence": ip.sequence' in models
+
+
+def test_plugin_min_version_matches_extras_dependency() -> None:
+    # The migration graph depends on extras.0138 (NetBox 4.6), so the declared
+    # floor must be 4.6.0, not 4.5.0.
+    init = read("netbox_rpc/__init__.py")
+    assert 'min_version = "4.6.0"' in init
