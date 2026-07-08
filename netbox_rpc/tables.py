@@ -162,6 +162,11 @@ class RPCExecutionTable(NetBoxTable):
     id = tables.Column(linkify=True, verbose_name="ID")
     procedure = tables.Column(linkify=True)
     status = columns.ChoiceFieldColumn()
+    source = tables.Column(
+        accessor="source_label",
+        orderable=False,
+        verbose_name="Source",
+    )
     backend = tables.Column(verbose_name="Backend ID")
 
     class Meta(NetBoxTable.Meta):
@@ -172,6 +177,7 @@ class RPCExecutionTable(NetBoxTable):
             "procedure",
             "target_display",
             "status",
+            "source",
             "requested_by",
             "backend",
             "started_at",
@@ -185,6 +191,7 @@ class RPCExecutionTable(NetBoxTable):
             "procedure",
             "target_display",
             "status",
+            "source",
             "requested_by",
             "started_at",
         )

@@ -32,6 +32,16 @@
             <td>{{ object.requested_by|placeholder }}</td>
           </tr>
           <tr>
+            <th scope="row">Source</th>
+            <td>
+              {% if object.intent_reference %}
+                <span class="badge text-bg-info">Intent</span> {{ object.intent_reference }}
+              {% else %}
+                <span class="badge text-bg-secondary">Direct</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
             <th scope="row">Backend ID</th>
             <td>
               {% if object.backend %}
@@ -79,6 +89,49 @@
     {% include 'inc/panels/comments.html' %}
   </div>
 </div>
+
+{% if object.result_steps %}
+<div class="row mb-3">
+  <div class="col">
+    <div class="card">
+      <h5 class="card-header">Command Output</h5>
+      <div class="card-body">
+        {% for step in object.result_steps %}
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <div>
+                <code>{{ step.command|default:step.operation|placeholder }}</code>
+                {% if step.operation and step.command %}
+                  <span class="text-muted ms-2">({{ step.operation }})</span>
+                {% endif %}
+              </div>
+              <div>
+                {% if step.ok %}
+                  <span class="badge text-bg-success">exit {{ step.exit_code|default:0 }}</span>
+                {% else %}
+                  <span class="badge text-bg-danger">exit {{ step.exit_code|default:"?" }}</span>
+                {% endif %}
+              </div>
+            </div>
+            {% if step.stdout %}
+              <label class="form-label text-muted small mb-0">stdout</label>
+              <pre class="mb-1">{{ step.stdout }}</pre>
+            {% endif %}
+            {% if step.stderr %}
+              <label class="form-label text-danger small mb-0">stderr</label>
+              <pre class="text-danger mb-1">{{ step.stderr }}</pre>
+            {% endif %}
+            {% if not step.stdout and not step.stderr %}
+              <span class="text-muted">{{ ''|placeholder }}</span>
+            {% endif %}
+          </div>
+          {% if not forloop.last %}<hr>{% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% if events_table.rows %}
 <div class="row mb-3">

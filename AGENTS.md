@@ -60,6 +60,29 @@ installers, destructive Proxmox workflows, and command branches that the
 truthy-only condition contract cannot express. Do not remove an exemption until
 the backend command executor can consume an exact row-level representation.
 
+## Procedure Runs Tab (query-side)
+
+The `RPCProcedure` object view has a **Runs** tab (`RPCProcedureRunsView`,
+registered as the `runs` action, `/plugins/rpc/procedures/<pk>/runs/`) that lists
+that procedure's `RPCExecution` history — a pure query-side projection with no
+new mutation surface. It reuses `RPCExecutionTable` (with a `source` column) and
+three read-only `RPCExecution` presentation properties:
+
+- `source_label` / `intent_reference` — how the run was issued. Executing an
+  `RPCIntent` is out of scope for the aggregate today (see **Intents** below), so
+  every run currently reads as `Direct`. The helpers are forward-compatible: when
+  a future intent executor stamps an underscore-prefixed `_intent_name`/`_intent`
+  marker into `params`, the tab attributes the run as `Intent: <name>`. Do **not**
+  reuse a bare `intent` params key for a procedure's own parameter — only the
+  underscore-prefixed internal keys are treated as origin markers.
+- `result_steps` — returns `result.steps[]` (empty when absent/malformed). The
+  execution detail template renders it as a **Command Output** card (command,
+  operation, exit code, stdout, stderr). Keep this output bounded/redacted per the
+  event-data rule above; never surface secrets or unbounded raw output.
+
+Any future intent executor that records an origin marker in `params` must keep it
+under the `_intent`-prefixed keys so this attribution stays correct.
+
 ## DDD / CQRS / Event Sourcing
 
 - Treat `RPCExecution` as the command aggregate and current-state read

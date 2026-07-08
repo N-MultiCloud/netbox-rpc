@@ -464,6 +464,51 @@ class RPCExecution(NetBoxModel):
             return f"{self.target_model_label}:{self.assigned_object_id}"
         return str(getattr(target, "name", None) or target)
 
+    # Underscore-prefixed internal keys a future intent executor may stamp into
+    # ``params`` to record that a run originated from an ``RPCIntent`` rather
+    # than a direct API/UI request. Prefixed to avoid colliding with a
+    # procedure's own declared parameters.
+    _INTENT_PARAM_KEYS = ("_intent_name", "_intent")
+
+    @property
+    def intent_reference(self) -> str | None:
+        """Best-effort intent name when this run was dispatched via an intent.
+
+        Executing an ``RPCIntent`` is intentionally out of scope for the
+        aggregate today (see ``AGENTS.md`` → Intents), so no run currently
+        carries an intent marker and this returns ``None`` — such runs read as
+        directly issued. When a future intent executor records its origin in
+        ``params`` under one of ``_INTENT_PARAM_KEYS``, this surfaces the intent
+        name so the procedure Runs tab can attribute the run to it.
+        """
+        params = self.params or {}
+        for key in self._INTENT_PARAM_KEYS:
+            value = params.get(key)
+            if value:
+                return str(value)
+        return None
+
+    @property
+    def source_label(self) -> str:
+        """How the run was issued: ``"Intent: <name>"`` or ``"Direct"``."""
+        reference = self.intent_reference
+        if reference:
+            return f"Intent: {reference}"
+        return "Direct"
+
+    @property
+    def result_steps(self) -> list:
+        """Ordered per-command results (``result.steps[]``) for detail rendering.
+
+        Each step records the exact command issued on the target plus its
+        ``stdout``/``stderr``/``exit_code``/``ok`` (see
+        ``docs/rpc-generated-core-jobs.md``). Returns an empty list when the run
+        has not produced structured step output.
+        """
+        result = self.result or {}
+        steps = result.get("steps")
+        return steps if isinstance(steps, list) else []
+
 
 class RPCExecutionEvent(NetBoxModel):
     LEVEL_DEBUG = "debug"
