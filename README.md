@@ -158,8 +158,13 @@ and worked API examples.
 create an `RPCBackend` object in NetBox and set:
 
 - `name`: operator-facing backend name.
-- `base_url`: backend service base URL; dispatch uses
-  `<base_url>/rpc/executions/<execution_id>/run`.
+- `ip_address` / `domain` / `port` / `use_https`: point the plugin at the backend
+  by **IP address or domain**; `backend_url` is composed as
+  `{http|https}://{domain or ip}:{port}` (mirroring netbox-proxbox's
+  `FastAPIEndpoint`).
+- `base_url`: optional explicit URL override — when set it wins; when empty the
+  URL is composed from the fields above. Dispatch uses
+  `<backend_url>/rpc/executions/<execution_id>/run`.
 - `verify_ssl`: whether `requests.post()` verifies the backend TLS certificate.
 - `auth_header_name` and `auth_token`: optional static auth header. The token is
   stored in plaintext, so security-conscious deployments should prefer a custom

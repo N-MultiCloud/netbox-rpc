@@ -8,9 +8,14 @@ without `netbox-nms`; NMS support is an optional auto-detected adapter.
 
 Install `netbox-rpc` without `netbox-nms` when only the audited RPC catalog and
 execution framework are needed. Standalone deployments use the local
-`RPCBackend` model for `base_url`, `verify_ssl`, and an optional static auth
-header. `auth_token` is plaintext storage; security-conscious deployments
-should configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` to resolve a
+`RPCBackend` model to reach the execution backend (`netbox-rpc-backend`): point
+it at the backend by **IP address or domain** plus `port` / `use_https` — the
+`backend_url` is composed from those structured fields, mirroring
+netbox-proxbox's `FastAPIEndpoint` (`{scheme}://{domain or ip}:{port}`) — or set
+an explicit `base_url`, which wins as an override. `verify_ssl` and an optional
+static auth header (`auth_header_name` / `auth_token`) round out the target.
+`auth_token` is plaintext storage; security-conscious deployments should
+configure `PLUGINS_CONFIG["netbox_rpc"]["backend_resolver"]` to resolve a
 `netbox_rpc.backends.BackendTarget` from an external secret store or service
 registry.
 
