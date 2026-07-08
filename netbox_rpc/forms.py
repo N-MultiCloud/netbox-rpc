@@ -216,12 +216,24 @@ class RPCIntentForm(NetBoxModelForm):
             ]
         )
 
-    def save(self, *args: object, **kwargs: object) -> RPCIntent:
-        instance = super().save(*args, **kwargs)
-        # NetBox's ObjectEditView always commits (instance has a pk here); only
-        # then can we attach the ordered through rows.
-        if instance.pk:
+    def save(self, commit: bool = True) -> RPCIntent:
+        instance = super().save(commit=commit)
+        if commit:
+            # Instance is persisted (NetBox's ObjectEditView path); attach the
+            # ordered through rows now.
             self._save_intent_procedures()
+        else:
+            # Defer ordered through-row reconciliation onto save_m2m() so the
+            # standard `obj = form.save(commit=False); obj.save(); form.save_m2m()`
+            # pattern still persists the grouping in submitted order once the
+            # instance has a PK.
+            original_save_m2m = self.save_m2m
+
+            def save_m2m() -> None:
+                original_save_m2m()
+                self._save_intent_procedures()
+
+            self.save_m2m = save_m2m
         return instance
 
     class Meta:

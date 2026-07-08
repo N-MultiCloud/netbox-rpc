@@ -57,7 +57,8 @@ Base path: `/api/plugins/rpc/intents/`.
 
 Send an **ordered** `procedure_ids` list. The list order becomes the through
 `sequence` (renumbered from 1). Omitting `procedure_ids` on `PATCH` leaves the
-existing grouping untouched; sending `[]` clears it.
+existing grouping untouched; sending `[]` clears it. Duplicate IDs are rejected
+with a `400` (each procedure may appear at most once per intent).
 
 ```jsonc
 // POST /api/plugins/rpc/intents/
