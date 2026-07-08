@@ -42,3 +42,9 @@ class LocalRpcBackendResolverTests(TestCase):
 
     def test_no_backends_returns_none(self) -> None:
         self.assertIsNone(local_rpcbackend_resolver(None))
+
+    def test_specific_missing_pk_fails_closed(self) -> None:
+        # A specific backend was requested but does not exist: return None (fail
+        # closed) rather than silently rerouting to the single configured backend.
+        only = RPCBackend.objects.create(name="only", domain="only.example.com")
+        self.assertIsNone(local_rpcbackend_resolver(only.pk + 1000))
