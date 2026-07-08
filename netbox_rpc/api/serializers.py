@@ -10,6 +10,7 @@ from ..models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
+    RPCProcedureCommand,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
 )
@@ -45,10 +46,54 @@ class RPCBackendSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "name", "base_url")
 
 
+class RPCProcedureCommandSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpcprocedurecommand-detail",
+    )
+    device_cli_mode = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = RPCProcedureCommand
+        fields = (
+            "id",
+            "url",
+            "display",
+            "procedure",
+            "sequence",
+            "step_type",
+            "device_cli_mode",
+            "argv",
+            "description",
+            "condition_param",
+            "condition_negate",
+            "for_each_param",
+            "continue_on_error",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "procedure", "sequence", "step_type")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not data.get("device_cli_mode"):
+            data["device_cli_mode"] = None
+        return data
+
+    def validate_device_cli_mode(self, value):
+        return value or ""
+
+
 class RPCProcedureSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rpc-api:rpcprocedure-detail",
     )
+    commands = RPCProcedureCommandSerializer(many=True, read_only=True)
 
     class Meta:
         model = RPCProcedure
@@ -69,6 +114,7 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
             "transport_driver",
             "output_parser",
             "output_schema",
+            "commands",
             "description",
             "comments",
             "tags",
@@ -136,7 +182,7 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rpc-api:rpcexecution-detail",
     )
-    procedure = RPCProcedureSerializer(nested=True, read_only=True)
+    procedure = RPCProcedureSerializer(read_only=True)
     procedure_id = serializers.PrimaryKeyRelatedField(
         queryset=RPCProcedure.objects.all(),
         source="procedure",

@@ -5,6 +5,7 @@ from .models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
+    RPCProcedureCommand,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
 )
@@ -62,6 +63,41 @@ class RPCProcedureTable(NetBoxTable):
             "effect",
             "timeout_seconds",
             "approval_required",
+        )
+
+
+class RPCProcedureCommandTable(NetBoxTable):
+    procedure = tables.Column(linkify=True)
+    sequence = tables.Column(linkify=True)
+    step_type = columns.ChoiceFieldColumn()
+    device_cli_mode = columns.ChoiceFieldColumn()
+
+    class Meta(NetBoxTable.Meta):
+        model = RPCProcedureCommand
+        fields = (
+            "pk",
+            "id",
+            "procedure",
+            "sequence",
+            "step_type",
+            "device_cli_mode",
+            "argv",
+            "description",
+            "condition_param",
+            "condition_negate",
+            "for_each_param",
+            "continue_on_error",
+            "tags",
+            "actions",
+        )
+        default_columns = (
+            "procedure",
+            "sequence",
+            "step_type",
+            "device_cli_mode",
+            "argv",
+            "condition_param",
+            "for_each_param",
         )
 
 
