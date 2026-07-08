@@ -25,7 +25,11 @@ _install_netbox_stub()
 
 from pathlib import Path  # noqa: E402
 
-from netbox_rpc.domain.value_objects import Effect, ExecutionStatus  # noqa: E402
+from netbox_rpc.domain.value_objects import (  # noqa: E402
+    Effect,
+    ExecutionMode,
+    ExecutionStatus,
+)
 
 
 def test_execution_status_values() -> None:
@@ -42,12 +46,22 @@ def test_effect_values() -> None:
     assert Effect.DESTRUCTIVE.value == "destructive"
 
 
+def test_execution_mode_values() -> None:
+    assert ExecutionMode.SEQUENTIAL.value == "sequential"
+    assert ExecutionMode.PARALLEL.value == "parallel"
+
+
 def test_model_constants_are_single_sourced_from_value_objects() -> None:
-    # The model must derive its STATUS_*/EFFECT_* constants from the domain
+    # The model must derive its STATUS_*/EFFECT_*/MODE_* constants from the domain
     # value objects so there is exactly one source of truth.
     src = Path(__file__).resolve().parent.parent.joinpath("netbox_rpc/models.py").read_text()
-    assert "from .domain.value_objects import Effect, ExecutionStatus" in src
+    assert (
+        "from .domain.value_objects import Effect, ExecutionMode, ExecutionStatus"
+        in src
+    )
     assert "STATUS_QUEUED = ExecutionStatus.QUEUED.value" in src
     assert "STATUS_CANCELLED = ExecutionStatus.CANCELLED.value" in src
     assert "EFFECT_READ = Effect.READ.value" in src
     assert "EFFECT_DESTRUCTIVE = Effect.DESTRUCTIVE.value" in src
+    assert "MODE_SEQUENTIAL = ExecutionMode.SEQUENTIAL.value" in src
+    assert "MODE_PARALLEL = ExecutionMode.PARALLEL.value" in src

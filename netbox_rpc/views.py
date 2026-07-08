@@ -170,6 +170,45 @@ class RPCLinuxServiceAllowlistBulkDeleteView(generic.BulkDeleteView):
     table = tables.RPCLinuxServiceAllowlistTable
 
 
+# ── RPCIntent ────────────────────────────────────────────────────────────────
+
+
+@register_model_view(models.RPCIntent, "list", path="", detail=False)
+class RPCIntentListView(generic.ObjectListView):
+    queryset = models.RPCIntent.objects.prefetch_related("procedures")
+    table = tables.RPCIntentTable
+    filterset = filtersets.RPCIntentFilterSet
+    filterset_form = forms.RPCIntentFilterForm
+    actions = LIST_ACTIONS
+
+
+@register_model_view(models.RPCIntent)
+class RPCIntentView(generic.ObjectView):
+    # The detail template renders the ordered through rows directly via
+    # `object.ordered_intent_procedures`.
+    queryset = models.RPCIntent.objects.prefetch_related(
+        "intent_procedures__procedure"
+    )
+
+
+@register_model_view(models.RPCIntent, "add", detail=False)
+@register_model_view(models.RPCIntent, "edit")
+class RPCIntentEditView(generic.ObjectEditView):
+    queryset = models.RPCIntent.objects.all()
+    form = forms.RPCIntentForm
+
+
+@register_model_view(models.RPCIntent, "delete")
+class RPCIntentDeleteView(generic.ObjectDeleteView):
+    queryset = models.RPCIntent.objects.all()
+
+
+@register_model_view(models.RPCIntent, "bulk_delete", path="delete", detail=False)
+class RPCIntentBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.RPCIntent.objects.all()
+    table = tables.RPCIntentTable
+
+
 # ── RPCExecution (read-only) ──────────────────────────────────────────────────
 
 

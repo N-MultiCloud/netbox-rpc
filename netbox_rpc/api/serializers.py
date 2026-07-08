@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.contenttypes.models import ContentType
+from drf_spectacular.utils import extend_schema_field
 from netbox.api.fields import ContentTypeField
 from netbox.api.gfk_fields import GFKSerializerField
 from netbox.api.serializers import NetBoxModelSerializer
@@ -10,9 +11,11 @@ from ..models import (
     RPCBackend,
     RPCExecution,
     RPCExecutionEvent,
-    RPCProcedureCommand,
+    RPCIntent,
+    RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
     RPCProcedure,
+    RPCProcedureCommand,
 )
 
 
@@ -149,6 +152,86 @@ class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):
             "last_updated",
         )
         brief_fields = ("id", "url", "display", "slug", "enabled")
+
+
+class RPCIntentProcedureSerializer(serializers.Serializer):
+    """Read representation of one grouped procedure with its execution order."""
+
+    id = serializers.IntegerField(source="procedure_id", read_only=True)
+    name = serializers.CharField(source="procedure.name", read_only=True)
+    handler_id = serializers.CharField(source="procedure.handler_id", read_only=True)
+    effect = serializers.CharField(source="procedure.effect", read_only=True)
+    approval_required = serializers.BooleanField(
+        source="procedure.approval_required", read_only=True
+    )
+    sequence = serializers.IntegerField(read_only=True)
+
+
+class RPCIntentSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpcintent-detail",
+    )
+    procedures = serializers.SerializerMethodField()
+    procedure_ids = serializers.PrimaryKeyRelatedField(
+        queryset=RPCProcedure.objects.all(),
+        many=True,
+        write_only=True,
+        required=False,
+        help_text=(
+            "Ordered list of RPCProcedure IDs to group under this intent. The "
+            "list order becomes the through 'sequence' (used in sequential mode)."
+        ),
+    )
+
+    class Meta:
+        model = RPCIntent
+        fields = (
+            "id",
+            "url",
+            "display",
+            "name",
+            "execution_mode",
+            "enabled",
+            "procedures",
+            "procedure_ids",
+            "description",
+            "comments",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name", "execution_mode", "enabled")
+
+    @extend_schema_field(RPCIntentProcedureSerializer(many=True))
+    def get_procedures(self, obj: RPCIntent) -> list[dict]:
+        rows = obj.intent_procedures.select_related("procedure").all()
+        return RPCIntentProcedureSerializer(rows, many=True).data
+
+    def _set_procedures(self, intent: RPCIntent, procedures: list) -> None:
+        # Reconcile the ordered through rows to exactly the provided list,
+        # renumbering `sequence` from 1 in list order.
+        RPCIntentProcedure.objects.filter(intent=intent).delete()
+        RPCIntentProcedure.objects.bulk_create(
+            [
+                RPCIntentProcedure(intent=intent, procedure=proc, sequence=index)
+                for index, proc in enumerate(procedures, start=1)
+            ]
+        )
+
+    def create(self, validated_data: dict) -> RPCIntent:
+        procedures = validated_data.pop("procedure_ids", None)
+        intent = super().create(validated_data)
+        if procedures is not None:
+            self._set_procedures(intent, procedures)
+        return intent
+
+    def update(self, instance: RPCIntent, validated_data: dict) -> RPCIntent:
+        procedures = validated_data.pop("procedure_ids", None)
+        intent = super().update(instance, validated_data)
+        if procedures is not None:
+            self._set_procedures(intent, procedures)
+        return intent
 
 
 class RPCExecutionEventSerializer(NetBoxModelSerializer):

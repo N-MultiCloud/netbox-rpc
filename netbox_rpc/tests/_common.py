@@ -57,3 +57,26 @@ def make_execution(*, procedure=None, user=None) -> models.RPCExecution:
 
 def event_names(execution) -> list[str]:
     return list(execution.events.order_by("sequence").values_list("event", flat=True))
+
+
+def make_intent(
+    name: str = "intent.test.stack",
+    *,
+    execution_mode: str | None = None,
+    procedures=None,
+) -> models.RPCIntent:
+    defaults = {}
+    if execution_mode:
+        defaults["execution_mode"] = execution_mode
+    intent, _ = models.RPCIntent.objects.get_or_create(name=name, defaults=defaults)
+    if procedures:
+        models.RPCIntentProcedure.objects.filter(intent=intent).delete()
+        models.RPCIntentProcedure.objects.bulk_create(
+            [
+                models.RPCIntentProcedure(
+                    intent=intent, procedure=proc, sequence=index
+                )
+                for index, proc in enumerate(procedures, start=1)
+            ]
+        )
+    return intent

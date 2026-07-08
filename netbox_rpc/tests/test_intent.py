@@ -1,0 +1,187 @@
+"""DB integration tests for the RPCIntent declarative grouping model.
+
+RPCIntent groups RPCProcedures (the "what") and declares an execution mode —
+``sequential`` (nested, ordered) or ``parallel`` (concurrent, not nested). These
+tests cover the ORM invariants, the ordered through model, the REST API
+(create/update/list/filter with ordered ``procedure_ids``), and the edit form's
+selection-order reconciliation.
+"""
+
+from __future__ import annotations
+
+from django.db import IntegrityError, transaction
+from django.db.models import ProtectedError
+from django.http import QueryDict
+from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
+
+from netbox_rpc.models import RPCIntent, RPCIntentProcedure, RPCProcedure
+
+from ._common import make_procedure, make_user
+
+
+class IntentModelTests(TestCase):
+    def test_default_execution_mode_is_sequential(self):
+        intent = RPCIntent.objects.create(name="intent.default")
+        assert intent.execution_mode == RPCIntent.MODE_SEQUENTIAL
+
+    def test_ordered_intent_procedures_follow_sequence(self):
+        a = make_procedure("os.linux.test.a")
+        b = make_procedure("os.linux.test.b")
+        c = make_procedure("os.linux.test.c")
+        intent = RPCIntent.objects.create(
+            name="intent.ordered", execution_mode=RPCIntent.MODE_SEQUENTIAL
+        )
+        # Insert out of order; ordering must come from `sequence`, not insert order.
+        RPCIntentProcedure.objects.create(intent=intent, procedure=b, sequence=2)
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        RPCIntentProcedure.objects.create(intent=intent, procedure=c, sequence=3)
+        ordered = [ip.procedure_id for ip in intent.ordered_intent_procedures]
+        assert ordered == [a.pk, b.pk, c.pk]
+        assert intent.procedure_count == 3
+
+    def test_unique_procedure_per_intent(self):
+        a = make_procedure("os.linux.test.uniq")
+        intent = RPCIntent.objects.create(name="intent.unique")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=2)
+
+    def test_grouped_procedure_is_protected_from_delete(self):
+        a = make_procedure("os.linux.test.protected")
+        intent = RPCIntent.objects.create(name="intent.protect")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        with self.assertRaises(ProtectedError):
+            a.delete()
+
+    def test_intent_delete_cascades_through_rows_but_keeps_procedure(self):
+        a = make_procedure("os.linux.test.cascade")
+        intent = RPCIntent.objects.create(name="intent.cascade")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        intent.delete()
+        assert not RPCIntentProcedure.objects.filter(procedure=a).exists()
+        assert RPCProcedure.objects.filter(pk=a.pk).exists()
+
+
+class IntentApiTests(TestCase):
+    def setUp(self):
+        self.user = make_user("intent-api-tester", superuser=True)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _list_url(self):
+        return reverse("plugins-api:netbox_rpc-api:rpcintent-list")
+
+    def _detail_url(self, pk):
+        return reverse("plugins-api:netbox_rpc-api:rpcintent-detail", args=[pk])
+
+    def test_create_with_ordered_procedure_ids(self):
+        a = make_procedure("os.linux.api.a")
+        b = make_procedure("os.linux.api.b")
+        resp = self.client.post(
+            self._list_url(),
+            {
+                "name": "intent.api.create",
+                "execution_mode": "parallel",
+                "procedure_ids": [b.pk, a.pk],
+            },
+            format="json",
+        )
+        assert resp.status_code == 201, resp.content
+        intent = RPCIntent.objects.get(pk=resp.data["id"])
+        assert intent.execution_mode == "parallel"
+        rows = list(
+            intent.intent_procedures.order_by("sequence").values_list(
+                "procedure_id", "sequence"
+            )
+        )
+        assert rows == [(b.pk, 1), (a.pk, 2)]
+        # Read representation exposes the ordered procedures with their sequence.
+        assert [p["id"] for p in resp.data["procedures"]] == [b.pk, a.pk]
+        assert [p["sequence"] for p in resp.data["procedures"]] == [1, 2]
+
+    def test_update_replaces_procedures(self):
+        a = make_procedure("os.linux.api.u.a")
+        b = make_procedure("os.linux.api.u.b")
+        intent = RPCIntent.objects.create(name="intent.api.update")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        resp = self.client.patch(
+            self._detail_url(intent.pk),
+            {"procedure_ids": [b.pk]},
+            format="json",
+        )
+        assert resp.status_code == 200, resp.content
+        rows = list(intent.intent_procedures.values_list("procedure_id", flat=True))
+        assert rows == [b.pk]
+
+    def test_update_without_procedure_ids_preserves_grouping(self):
+        a = make_procedure("os.linux.api.keep")
+        intent = RPCIntent.objects.create(name="intent.api.keep")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        resp = self.client.patch(
+            self._detail_url(intent.pk),
+            {"description": "renamed"},
+            format="json",
+        )
+        assert resp.status_code == 200, resp.content
+        assert list(intent.intent_procedures.values_list("procedure_id", flat=True)) == [
+            a.pk
+        ]
+
+    def test_list_filter_by_execution_mode(self):
+        RPCIntent.objects.create(name="intent.seq", execution_mode="sequential")
+        RPCIntent.objects.create(name="intent.par", execution_mode="parallel")
+        resp = self.client.get(self._list_url(), {"execution_mode": "parallel"})
+        assert resp.status_code == 200
+        names = [r["name"] for r in resp.data["results"]]
+        assert "intent.par" in names
+        assert "intent.seq" not in names
+
+
+class IntentFormTests(TestCase):
+    def test_form_reconciles_through_rows_in_submitted_order(self):
+        from netbox_rpc.forms import RPCIntentForm
+
+        a = make_procedure("os.linux.form.a")
+        b = make_procedure("os.linux.form.b")
+        data = QueryDict(mutable=True)
+        data["name"] = "intent.form"
+        data["execution_mode"] = "sequential"
+        data["enabled"] = "on"
+        # Submit b before a; the through `sequence` must follow submission order.
+        data.setlist("procedures", [str(b.pk), str(a.pk)])
+
+        form = RPCIntentForm(data=data)
+        assert form.is_valid(), form.errors
+        intent = form.save()
+        rows = list(
+            intent.intent_procedures.order_by("sequence").values_list(
+                "procedure_id", "sequence"
+            )
+        )
+        assert rows == [(b.pk, 1), (a.pk, 2)]
+
+    def test_form_edit_removes_deselected_procedures(self):
+        from netbox_rpc.forms import RPCIntentForm
+
+        a = make_procedure("os.linux.form.edit.a")
+        b = make_procedure("os.linux.form.edit.b")
+        intent = RPCIntent.objects.create(name="intent.form.edit")
+        RPCIntentProcedure.objects.create(intent=intent, procedure=a, sequence=1)
+        RPCIntentProcedure.objects.create(intent=intent, procedure=b, sequence=2)
+
+        data = QueryDict(mutable=True)
+        data["name"] = "intent.form.edit"
+        data["execution_mode"] = "parallel"
+        data["enabled"] = "on"
+        data.setlist("procedures", [str(b.pk)])
+
+        form = RPCIntentForm(data=data, instance=intent)
+        assert form.is_valid(), form.errors
+        form.save()
+        assert list(
+            intent.intent_procedures.values_list("procedure_id", flat=True)
+        ) == [b.pk]
+        assert intent.execution_mode == "parallel"

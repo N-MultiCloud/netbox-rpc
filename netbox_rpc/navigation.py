@@ -32,6 +32,18 @@ menu = PluginMenu(
                     ),
                 ),
                 PluginMenuItem(
+                    link="plugins:netbox_rpc:rpcintent_list",
+                    link_text="Intents",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rpc:rpcintent_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                            color=ButtonColorChoices.GREEN,
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_rpc:rpclinuxserviceallowlist_list",
                     link_text="Linux Service Allowlist",
                     buttons=(

@@ -17,7 +17,7 @@ from .command_contract import (
     token_has_balanced_placeholders,
     token_is_safe,
 )
-from .domain.value_objects import Effect, ExecutionStatus
+from .domain.value_objects import Effect, ExecutionMode, ExecutionStatus
 
 # Matches a valid systemd service unit name with an optional .service suffix.
 # Rules enforced:
@@ -529,3 +529,116 @@ class RPCExecutionEvent(NetBoxModel):
 
     def delete(self, *args, **kwargs) -> None:
         raise ValidationError("RPCExecutionEvent rows are append-only.")
+
+
+class RPCIntent(NetBoxModel):
+    """Declarative grouping of RPCProcedures — the "what" of an operation.
+
+    An intent declares *what* needs to be done; the grouped ``RPCProcedure``s
+    (together with their commands) declare *how*. ``execution_mode`` declares the
+    trigger topology:
+
+    - ``sequential`` — the grouped procedures are nested and triggered one after
+      another in the declared ``sequence`` order;
+    - ``parallel`` — the grouped procedures are triggered concurrently, with no
+      nesting at all (``sequence`` is then informational).
+
+    Intents are declarative reference-data/configuration: plain NetBox CRUD,
+    ObjectChange-audited, and NOT event-sourced — consistent with
+    ``RPCProcedure``, ``RPCLinuxServiceAllowlist``, and ``RPCBackend``.
+
+    Actually *executing* an intent (fanning out one child ``RPCExecution`` per
+    grouped procedure) is intentionally out of scope for this model. Any future
+    executor MUST continue to honour each procedure's ``approval_required`` /
+    ``effect`` gating and the LLM Agent Safety Guardrails; an intent must never
+    become a way to bypass approval on a destructive procedure.
+    """
+
+    # Execution-mode vocabulary is single-sourced from the domain value object.
+    MODE_SEQUENTIAL = ExecutionMode.SEQUENTIAL.value
+    MODE_PARALLEL = ExecutionMode.PARALLEL.value
+    EXECUTION_MODE_CHOICES = (
+        (MODE_SEQUENTIAL, "Sequential (nested, ordered)"),
+        (MODE_PARALLEL, "Parallel (concurrent, not nested)"),
+    )
+
+    name = models.CharField(max_length=255, unique=True)
+    execution_mode = models.CharField(
+        max_length=20,
+        choices=EXECUTION_MODE_CHOICES,
+        default=MODE_SEQUENTIAL,
+        help_text=(
+            "How the grouped procedures are triggered. 'sequential' nests and "
+            "runs them one after another in sequence order; 'parallel' runs them "
+            "concurrently with no nesting."
+        ),
+    )
+    enabled = models.BooleanField(default=True)
+    procedures = models.ManyToManyField(
+        RPCProcedure,
+        through="RPCIntentProcedure",
+        related_name="intents",
+        blank=True,
+    )
+    description = models.CharField(max_length=255, blank=True)
+    comments = models.TextField(blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("name",)
+        permissions = (("execute_rpcintent", "Can execute RPC intent"),)
+        verbose_name = "RPC Intent"
+
+    def __str__(self) -> str:
+        return self.name
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpcintent", args=[self.pk])
+
+    @property
+    def ordered_intent_procedures(self):
+        """Through rows in declared execution order (``sequence`` then id)."""
+        return self.intent_procedures.select_related("procedure").all()
+
+    @property
+    def procedure_count(self) -> int:
+        return self.procedures.count()
+
+
+class RPCIntentProcedure(models.Model):
+    """Through model ordering the procedures grouped by an ``RPCIntent``.
+
+    ``sequence`` orders the procedures for ``sequential`` (nested) execution; it
+    is informational when the intent's ``execution_mode`` is ``parallel``.
+    """
+
+    intent = models.ForeignKey(
+        RPCIntent,
+        on_delete=models.CASCADE,
+        related_name="intent_procedures",
+    )
+    procedure = models.ForeignKey(
+        RPCProcedure,
+        on_delete=models.PROTECT,
+        related_name="intent_procedures",
+    )
+    sequence = models.PositiveIntegerField(
+        default=1,
+        help_text="Execution order within the intent (used in sequential mode).",
+    )
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("intent", "sequence", "id")
+        constraints = (
+            models.UniqueConstraint(
+                fields=("intent", "procedure"),
+                name="netbox_rpc_intent_unique_procedure",
+            ),
+        )
+        verbose_name = "RPC Intent Procedure"
+
+    def __str__(self) -> str:
+        return f"{self.intent_id}:{self.sequence}:{self.procedure_id}"

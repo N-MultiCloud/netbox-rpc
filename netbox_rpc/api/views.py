@@ -15,6 +15,7 @@ from ..application.command_handlers import cancel_execution, create_execution
 from ..application.queries import execution_events
 from .serializers import (
     RPCBackendSerializer,
+    RPCIntentSerializer,
     RPCLinuxServiceAllowlistSerializer,
     RPCExecutionEventSerializer,
     RPCExecutionSerializer,
@@ -99,6 +100,13 @@ class RPCProcedureCommandViewSet(NetBoxModelViewSet):
         if procedure_id:
             qs = qs.filter(procedure_id=procedure_id)
         return qs
+
+
+class RPCIntentViewSet(NetBoxModelViewSet):
+    queryset = models.RPCIntent.objects.prefetch_related(
+        "tags", "intent_procedures__procedure"
+    )
+    serializer_class = RPCIntentSerializer
 
 
 class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
