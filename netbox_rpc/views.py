@@ -1,7 +1,7 @@
 from django.http import HttpRequest
 from netbox.object_actions import AddObject, BulkDelete, BulkExport
 from netbox.views import generic
-from utilities.views import register_model_view
+from utilities.views import ViewTab, register_model_view
 
 from . import filtersets, forms, models, tables
 
@@ -91,6 +91,43 @@ class RPCProcedureDeleteView(generic.ObjectDeleteView):
 class RPCProcedureBulkDeleteView(generic.BulkDeleteView):
     queryset = models.RPCProcedure.objects.all()
     table = tables.RPCProcedureTable
+
+
+@register_model_view(models.RPCProcedure, "runs", path="runs")
+class RPCProcedureRunsView(generic.ObjectChildrenView):
+    """Run-history tab: the ``RPCExecution`` records for a procedure.
+
+    Each row surfaces the run's user owner (``requested_by``), how it was issued
+    (``source`` — directly, or as part of an intent), status, target, backend,
+    and timing, and links to the execution detail where the issued commands and
+    their output are rendered.
+    """
+
+    queryset = models.RPCProcedure.objects.all()
+    child_model = models.RPCExecution
+    table = tables.RPCExecutionTable
+    filterset = filtersets.RPCExecutionFilterSet
+    actions = READ_ONLY_ACTIONS
+    tab = ViewTab(
+        label="Runs",
+        badge=lambda obj: obj.executions.count(),
+        permission="netbox_rpc.view_rpcexecution",
+        weight=500,
+    )
+
+    def get_children(self, request, parent):
+        return (
+            parent.executions.restrict(request.user, "view")
+            .select_related("assigned_object_type", "requested_by")
+            .order_by("-created", "-id")
+        )
+
+    def get_table(self, data, request, bulk_actions=True):
+        table = super().get_table(data, request, bulk_actions)
+        # The procedure is implied by the parent object; hide the redundant column.
+        if "procedure" in table.columns:
+            table.columns.hide("procedure")
+        return table
 
 
 # ── RPCProcedureCommand ─────────────────────────────────────────────────────

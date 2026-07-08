@@ -15,6 +15,12 @@ This page explains, for any netbox-rpc-generated core job, exactly where to read
 
 A fully worked example (core job **555**) is at the bottom.
 
+> **UI shortcut:** you rarely need the core job number. The procedure object
+> page's **Runs** tab (`/plugins/rpc/procedures/<pk>/runs/`) lists every
+> `RPCExecution` for a procedure (owner, source, status, target, timing); each
+> run's detail page renders the same `result.steps[]` as a **Command Output**
+> card next to the event ledger.
+
 ## Field map (quick reference)
 
 | You want… | Read it from | Notes |

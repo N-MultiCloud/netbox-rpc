@@ -70,6 +70,20 @@ rows through `/api/plugins/rpc/procedure-commands/` or list/create rows for a
 single procedure with `/api/plugins/rpc/procedures/{id}/commands/`. The NetBox
 procedure object page renders the same data in a "Commands" card.
 
+### Procedure Runs tab
+
+The procedure object page has a **Runs** tab
+(`/plugins/rpc/procedures/<pk>/runs/`) listing every `RPCExecution` for that
+procedure, newest first, with a badge of the run count. Each row shows the run's
+user owner (`requested_by`), how it was issued (**Source** — `Direct`, or
+`Intent: <name>` when a future intent executor stamps an `_intent_name`/`_intent`
+marker into `params`), status, target, backend, and timing, and links to the
+execution detail. The execution detail additionally renders a **Command Output**
+card built from `result.steps[]` — the exact command(s) issued on the target and
+each command's stdout/stderr/exit code — so a run's issued commands and their
+output are visible end-to-end. The `RPCExecution.source_label`,
+`intent_reference`, and `result_steps` model properties back these surfaces.
+
 Literal argv tokens are validated by `netbox_rpc.command_contract.SAFE_TOKEN_RE`;
 dynamic values must be explicit `{placeholders}` backed by the procedure params
 schema or the documented runtime keys. Handlers that cannot be represented
