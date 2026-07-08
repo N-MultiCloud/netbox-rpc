@@ -49,6 +49,10 @@ typed events from `RPCExecutionEvent` rows.
 database trigger layer protects the ledger below Django. Event append failures
 fail closed through `RPCEventStoreError`.
 
+For how these projections and events surface the issued command(s), their
+output, and per-command/overall timing for a given `/core/jobs/<N>/` — with a
+worked example — see [`rpc-generated-core-jobs.md`](./rpc-generated-core-jobs.md).
+
 ## Projection Fold
 
 `netbox_rpc.domain.projection.apply(state, event)` is the canonical projection

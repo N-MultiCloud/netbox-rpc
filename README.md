@@ -334,6 +334,13 @@ libraries. It must execute only known handler IDs such as
 `os.linux.dns_host.deploy_dns_stack` and
 `os.linux_proxmox.qemu_vm_lifecycle`.
 
+Each RPC run enqueues a NetBox core RQ job (`/core/jobs/<N>/`) linked to the
+`RPCExecution` by `job_id`. The core job page is thin — the issued command(s),
+their output, and per-command timing live on the linked `RPCExecution`
+(`result.steps[]`) and its event ledger. See
+[`docs/rpc-generated-core-jobs.md`](docs/rpc-generated-core-jobs.md) for the
+field map and a worked example.
+
 ### Transport-driver & output-parser selection
 
 Each `RPCProcedure` declares a pluggable **transport driver** and **output
