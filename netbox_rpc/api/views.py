@@ -21,7 +21,26 @@ from .serializers import (
     RPCExecutionSerializer,
     RPCProcedureCommandSerializer,
     RPCProcedureSerializer,
+    RpcPluginSettingsSerializer,
 )
+
+
+class RpcPluginSettingsViewSet(NetBoxModelViewSet):
+    """REST API for the netbox-rpc opt-in settings singleton (GET + PATCH).
+
+    The singleton row is materialized via ``get_solo()`` so ``GET`` (list/detail)
+    and ``PATCH`` always operate on the one settings object. Create/delete are
+    disabled — there is exactly one settings row.
+    """
+
+    queryset = models.RpcPluginSettings.objects.prefetch_related("tags")
+    serializer_class = RpcPluginSettingsSerializer
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def get_queryset(self) -> Any:
+        # Ensure the singleton exists so GET/PATCH always resolve a row.
+        models.RpcPluginSettings.get_solo()
+        return models.RpcPluginSettings.objects.prefetch_related("tags").order_by("id")
 
 
 class RPCBackendViewSet(NetBoxModelViewSet):

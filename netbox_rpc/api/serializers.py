@@ -16,7 +16,37 @@ from ..models import (
     RPCLinuxServiceAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RpcPluginSettings,
 )
+
+
+class RpcPluginSettingsSerializer(NetBoxModelSerializer):
+    """Read/write the opt-in netbox-rpc settings singleton (``enabled``/``backend``)."""
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpcpluginsettings-detail",
+    )
+    backend = serializers.PrimaryKeyRelatedField(
+        queryset=RPCBackend.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = RpcPluginSettings
+        fields = (
+            "id",
+            "url",
+            "display",
+            "enabled",
+            "backend",
+            "comments",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "enabled")
 
 
 class RPCBackendSerializer(NetBoxModelSerializer):
