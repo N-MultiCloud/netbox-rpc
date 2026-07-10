@@ -532,6 +532,16 @@ be used autonomously on destructive procedures.
   agent-install procedures), and forwards only validated `install_dir` /
   `config_path` (absolute-path charset) and `ports` (int list, ≤16) hints. It
   must never accept arbitrary SSH command text.
+- `nmap-scan` is seeded by migration `0045` as a **read-only**
+  (`effect="read"`, `approval_required=False`, 120s) SSH-backed diagnostic
+  procedure. Handler ID: `os.linux.nmap.scan`. It targets
+  `ipam.ipaddress`, `dcim.device`, and `virtualization.virtualmachine`, accepts
+  a required scan `target` plus optional `ports`, `scan_type`
+  (`connect`/`syn`/`os-detect`), and the shared `rpc_ssh_*` overrides. Its
+  normalizer (`_normalize_nmap_execution`) rejects every target that is not an
+  IPv4 address, strict IPv4 CIDR, or strict DNS hostname, and canonicalizes
+  bounded port selectors before nms-backend constructs fixed argv
+  (`nmap -oX - ...`). It must never accept arbitrary shell command text.
 - Dell OS10 third-party optical module unlock is seeded by migration `0017`. One write procedure
   for enabling non-Dell QSFP28-SR4 (and similar) transceivers on S5232F-ON switches:
   - `network.device.dell_os10.s5232f_on.allow_third_party_transceiver` (write, 45s, approval required):

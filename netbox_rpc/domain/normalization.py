@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from typing import Any
 from urllib.parse import urlparse
 
@@ -111,6 +111,18 @@ _MINECRAFT_VIAVERSION_PRESETS = {
 }
 _MINECRAFT_VIAVERSION_PLUGINS = frozenset({"viaversion", "viabackwards", "viarewind"})
 _MINECRAFT_PAPERMC_PROJECTS = frozenset({"paper", "folia", "velocity"})
+_NMAP_HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}\.?$)(?=.*[A-Za-z])"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?"
+)
+_NMAP_PORT_TOKEN_RE = re.compile(r"\d{1,5}(?:-\d{1,5})?")
+_NMAP_SCAN_TYPES = frozenset({"connect", "syn", "os-detect"})
+# Bound CIDR scan targets so an unapproved read-only scan cannot sweep a huge
+# range (e.g. 0.0.0.0/0). A /24 (256 addresses) covers the managed cloud
+# prefixes (a /25 = 128 hosts) while rejecting anything broader.
+_NMAP_MIN_CIDR_PREFIXLEN = 24
+_NMAP_MAX_CIDR_HOSTS = 256
 _DNS_HOST_TARGET_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
 _DNS_HOST_COMPOSE_PROJECT = "powerdns-dns-api"
 _PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
@@ -427,6 +439,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in OOKLA_PROCEDURE_NAMES:
         return _normalize_ookla_execution(execution, target)
+
+    if procedure_name == "nmap-scan":
+        return _normalize_nmap_execution(execution)
 
     if procedure_name in PACKER_PROCEDURE_NAMES:
         # Function-local import keeps the netbox-packer reference lazy: this
@@ -1266,6 +1281,186 @@ def _validate_dns_host_ssh_host(host: str) -> None:
         host,
         empty_message="rpc_ssh_host could not be resolved from params.",
     )
+
+
+def _normalize_nmap_execution(execution: RPCExecution) -> dict[str, Any]:
+    """Normalize a read-only nmap scan execution.
+
+    nmap receives only a validated IPv4/CIDR/hostname target, an enum scan
+    type, and a tightly bounded port selector. There is no raw command text.
+    """
+    params = execution.params or {}
+    target = _normalize_nmap_target(params.get("target"))
+    scan_type = str(params.get("scan_type") or "connect").strip()
+    if scan_type not in _NMAP_SCAN_TYPES:
+        raise RPCExecutionError(
+            "scan_type must be one of: connect, syn, os-detect.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "scan_type": scan_type,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": execution.procedure.name,
+            "target": target,
+            "scan_type": scan_type,
+        },
+    }
+
+    ports = _normalize_nmap_ports(params.get("ports")) if "ports" in params else ""
+    if ports:
+        normalized["ports"] = ports
+        normalized["command_fingerprint"]["ports"] = ports
+
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_nmap_target(raw_target: object) -> str:
+    target = str(raw_target or "").strip()
+    if not target:
+        raise RPCExecutionError(
+            "target is required.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(ch.isspace() or ord(ch) < 32 for ch in target):
+        raise RPCExecutionError(
+            "target must not contain whitespace or control characters.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    if "/" in target:
+        try:
+            network = ip_network(target, strict=True)
+        except ValueError as exc:
+            raise RPCExecutionError(
+                "target CIDR must be a valid IPv4 network.",
+                code="RPC_PARAM_INVALID",
+            ) from exc
+        if network.version != 4:
+            raise RPCExecutionError(
+                "target CIDR must be IPv4.",
+                code="RPC_PARAM_INVALID",
+            )
+        if network.num_addresses > _NMAP_MAX_CIDR_HOSTS:
+            raise RPCExecutionError(
+                "target CIDR is too broad; use a network no larger than "
+                f"/{_NMAP_MIN_CIDR_PREFIXLEN} ({_NMAP_MAX_CIDR_HOSTS} addresses).",
+                code="RPC_PARAM_INVALID",
+            )
+        return str(network)
+
+    try:
+        address = ip_address(target)
+    except ValueError:
+        pass
+    else:
+        if address.version != 4:
+            raise RPCExecutionError(
+                "target IP address must be IPv4.",
+                code="RPC_PARAM_INVALID",
+            )
+        return str(address)
+
+    if _NMAP_HOSTNAME_RE.fullmatch(target):
+        return target.lower()
+
+    raise RPCExecutionError(
+        "target must be an IPv4 address, IPv4 CIDR, or strict hostname.",
+        code="RPC_PARAM_INVALID",
+    )
+
+
+def _normalize_nmap_ports(raw_ports: object) -> str:
+    if raw_ports is None:
+        return ""
+
+    if isinstance(raw_ports, str):
+        ports = raw_ports.strip()
+        if not ports:
+            raise RPCExecutionError(
+                "ports must not be empty when provided.",
+                code="RPC_PARAM_INVALID",
+            )
+        if any(ch.isspace() or ord(ch) < 32 for ch in ports):
+            raise RPCExecutionError(
+                "ports must not contain whitespace or control characters.",
+                code="RPC_PARAM_INVALID",
+            )
+        return _normalize_nmap_port_tokens(ports.split(","))
+
+    if isinstance(raw_ports, (list, tuple)):
+        if not raw_ports:
+            raise RPCExecutionError(
+                "ports must not be empty when provided.",
+                code="RPC_PARAM_INVALID",
+            )
+        if len(raw_ports) > 32:
+            raise RPCExecutionError(
+                "ports may contain at most 32 entries.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized_ports: list[str] = []
+        for value in raw_ports:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise RPCExecutionError(
+                    "ports entries must be integers.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if not 1 <= value <= 65535:
+                raise RPCExecutionError(
+                    "ports entries must be between 1 and 65535.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized_ports.append(str(value))
+        return ",".join(normalized_ports)
+
+    raise RPCExecutionError(
+        "ports must be a comma-separated string or list of integers.",
+        code="RPC_PARAM_INVALID",
+    )
+
+
+def _normalize_nmap_port_tokens(tokens: list[str]) -> str:
+    if len(tokens) > 32:
+        raise RPCExecutionError(
+            "ports may contain at most 32 entries.",
+            code="RPC_PARAM_INVALID",
+        )
+    normalized: list[str] = []
+    for token in tokens:
+        if not _NMAP_PORT_TOKEN_RE.fullmatch(token):
+            raise RPCExecutionError(
+                "ports must contain only integers or integer ranges.",
+                code="RPC_PARAM_INVALID",
+            )
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            if start > end:
+                raise RPCExecutionError(
+                    "ports ranges must be ascending.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if not 1 <= start <= 65535 or not 1 <= end <= 65535:
+                raise RPCExecutionError(
+                    "ports entries must be between 1 and 65535.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized.append(f"{start}-{end}")
+            continue
+
+        port = int(token)
+        if not 1 <= port <= 65535:
+            raise RPCExecutionError(
+                "ports entries must be between 1 and 65535.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized.append(str(port))
+    return ",".join(normalized)
 
 
 _OOKLA_ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,255}$")
