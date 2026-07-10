@@ -1,9 +1,12 @@
-from django.http import HttpRequest
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.shortcuts import redirect, render
+from django.views import View
 from netbox.object_actions import AddObject, BulkDelete, BulkExport
 from netbox.views import generic
 from utilities.views import ViewTab, register_model_view
 
-from . import filtersets, forms, models, tables
+from . import filtersets, forms, health, models, tables
 
 LIST_ACTIONS = (AddObject, BulkExport, BulkDelete)
 READ_ONLY_ACTIONS = (BulkExport,)
@@ -284,3 +287,85 @@ class RPCExecutionEventListView(generic.ObjectListView):
     filterset = filtersets.RPCExecutionEventFilterSet
     filterset_form = forms.RPCExecutionEventFilterForm
     actions = READ_ONLY_ACTIONS
+
+
+# ── RpcPluginSettings (opt-in) + landing/dashboard ───────────────────────────
+
+
+@register_model_view(models.RpcPluginSettings)
+class RpcPluginSettingsView(generic.ObjectView):
+    queryset = models.RpcPluginSettings.objects.all()
+
+
+@register_model_view(models.RpcPluginSettings, "edit")
+class RpcPluginSettingsEditView(generic.ObjectEditView):
+    queryset = models.RpcPluginSettings.objects.all()
+    form = forms.RpcPluginSettingsForm
+
+
+class RpcSettingsSingletonRedirectView(LoginRequiredMixin, View):
+    """UI helper: always edit the single settings row (create-on-first-visit)."""
+
+    def get(
+        self,
+        request: HttpRequest,
+        *args: object,
+        **kwargs: object,
+    ) -> HttpResponse:
+        obj = models.RpcPluginSettings.get_solo()
+        return redirect("plugins:netbox_rpc:rpcpluginsettings_edit", pk=obj.pk)
+
+
+rpc_settings_singleton_redirect = RpcSettingsSingletonRedirectView.as_view()
+
+
+class RPCHomeView(LoginRequiredMixin, View):
+    """Landing/status page for /plugins/rpc/.
+
+    Shows whether the operator has opted in (``enabled``), the resolved backend,
+    counts, and a *Test connection* button (which calls the probe endpoint via
+    JS so the page render is never blocked on a network call).
+    """
+
+    template_name = "netbox_rpc/home.html"
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        settings_obj = models.RpcPluginSettings.get_solo()
+        target = settings_obj.resolved_backend_target()
+        backend_url = str(getattr(target, "url", "") or "") if target is not None else ""
+        context = {
+            "settings": settings_obj,
+            "enabled": settings_obj.enabled,
+            "backend": settings_obj.backend,
+            "backend_url": backend_url,
+            "backend_configured": bool(backend_url),
+            "procedure_count": models.RPCProcedure.objects.restrict(
+                request.user, "view"
+            ).count(),
+            "intent_count": models.RPCIntent.objects.restrict(
+                request.user, "view"
+            ).count(),
+            "execution_count": models.RPCExecution.objects.restrict(
+                request.user, "view"
+            ).count(),
+        }
+        return render(request, self.template_name, context)
+
+
+class RpcBackendTestConnectionView(LoginRequiredMixin, View):
+    """POST-only: probe the configured backend's ``/status/ping`` and return JSON.
+
+    Issues a single fixed GET to the resolved backend base URL — no caller-
+    controlled host or shell input. Used by the landing/settings *Test
+    connection* button.
+    """
+
+    def post(
+        self,
+        request: HttpRequest,
+        *args: object,
+        **kwargs: object,
+    ) -> JsonResponse:
+        settings_obj = models.RpcPluginSettings.get_solo()
+        target = settings_obj.resolved_backend_target()
+        return JsonResponse(health.probe_backend(target))

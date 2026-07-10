@@ -1,0 +1,141 @@
+{% extends 'generic/_base.html' %}
+{% load helpers %}
+
+{% block title %}NetBox RPC{% endblock %}
+
+{% block controls %}
+  <div class="btn-list">
+    <a href="{% url 'plugins:netbox_rpc:rpcpluginsettings_singleton_edit' %}" class="btn btn-primary">
+      <i class="mdi mdi-cog-outline"></i> Settings
+    </a>
+  </div>
+{% endblock controls %}
+
+{% block content %}
+<div class="container-fluid">
+  {% csrf_token %}
+
+  {% if not enabled %}
+  <div class="alert alert-secondary d-flex align-items-center justify-content-between" role="alert">
+    <div>
+      <i class="mdi mdi-power-plug-off-outline me-2"></i>
+      The netbox-rpc integration is <strong>optional</strong> and currently <strong>not enabled</strong>.
+      netbox-rpc still works standalone; enable it to configure the netbox-rpc-backend connection.
+    </div>
+    <a href="{% url 'plugins:netbox_rpc:rpcpluginsettings_singleton_edit' %}" class="btn btn-sm btn-primary text-nowrap ms-3">
+      <i class="mdi mdi-cog"></i> Configure &amp; opt in
+    </a>
+  </div>
+  {% endif %}
+
+  <div class="row g-3 mb-3">
+    <div class="col col-md-6">
+      <div class="card h-100">
+        <h2 class="card-header">Backend</h2>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Integration</th>
+            <td>
+              {% if enabled %}
+                <span class="badge text-bg-success">Enabled</span>
+              {% else %}
+                <span class="badge text-bg-secondary">Not enabled</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Backend</th>
+            <td>
+              {% if backend %}
+                <a href="{{ backend.get_absolute_url }}">{{ backend }}</a>
+              {% elif backend_configured %}
+                <span class="text-muted">Resolved via default resolver</span>
+              {% else %}
+                <span class="text-muted">Not configured</span>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Backend URL</th>
+            <td class="text-truncate" style="max-width: 360px;">
+              {{ backend_url|default:"—" }}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Reachability</th>
+            <td>
+              <button type="button" id="rpc-test-connection" class="btn btn-sm btn-outline-primary"
+                      {% if not backend_configured %}disabled{% endif %}>
+                <i class="mdi mdi-lan-connect"></i> Test connection
+              </button>
+              <span id="rpc-test-result" class="ms-2 text-muted"></span>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    <div class="col col-md-6">
+      <div class="card h-100">
+        <h2 class="card-header">Catalog</h2>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Procedures</th>
+            <td><a href="{% url 'plugins:netbox_rpc:rpcprocedure_list' %}">{{ procedure_count }}</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Intents</th>
+            <td><a href="{% url 'plugins:netbox_rpc:rpcintent_list' %}">{{ intent_count }}</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Executions</th>
+            <td><a href="{% url 'plugins:netbox_rpc:rpcexecution_list' %}">{{ execution_count }}</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Backends</th>
+            <td><a href="{% url 'plugins:netbox_rpc:rpcbackend_list' %}">Manage</a></td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    "use strict";
+    var btn = document.getElementById("rpc-test-connection");
+    var out = document.getElementById("rpc-test-result");
+    if (!btn || !out) return;
+    var url = "{% url 'plugins:netbox_rpc:rpcpluginsettings_test_connection' %}";
+    function csrf() {
+      var el = document.querySelector("input[name=csrfmiddlewaretoken]");
+      return el ? el.value : "";
+    }
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      out.className = "ms-2 text-muted";
+      out.textContent = "Testing…";
+      fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRFToken": csrf() }
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data && data.ok) {
+            out.className = "ms-2 text-success";
+            out.textContent = "Connected" + (data.latency_ms != null ? " (" + data.latency_ms + " ms)" : "");
+          } else {
+            out.className = "ms-2 text-danger";
+            out.textContent = "Failed: " + ((data && data.error) ? String(data.error).substring(0, 120) : "unreachable");
+          }
+        })
+        .catch(function () {
+          out.className = "ms-2 text-danger";
+          out.textContent = "Failed: status endpoint error";
+        })
+        .finally(function () { btn.disabled = false; });
+    });
+  })();
+  </script>
+</div>
+{% endblock content %}

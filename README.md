@@ -185,6 +185,21 @@ The resolver is called as `resolver(pk)` and must return
 `netbox-nms` is installed, the NMS adapter is used automatically. If
 `netbox-nms` is absent, `RPCBackend` is used as the self-contained default.
 
+### Opt-in settings + dashboard (optional Proxbox companion)
+
+netbox-rpc can be adopted as an **optional companion** of the netbox-proxbox
+family (like netbox-pdm / netbox-ceph / netbox-pbs) **without any hard
+dependency** — it remains fully standalone. An easy, UI-based opt-in lives at
+**RPC → Configuration**:
+
+- **Dashboard** (`/plugins/rpc/`) shows whether the integration is enabled, the
+  resolved backend, catalog counts, and a **Test connection** button that probes
+  `GET {backend_url}/status/ping`.
+- **Settings** edits the `RpcPluginSettings` singleton: `enabled` (opt-in,
+  **off by default**) and an optional `backend` pointing at the `RPCBackend`
+  used to reach `netbox-rpc-backend`. When disabled, netbox-rpc behaves exactly
+  as before; when enabled, netbox-proxbox shows a companion card linking here.
+
 ## DDD / CQRS / Event Sourcing
 
 `netbox-rpc` is the Remote Command Policy bounded context for the NMS stack.

@@ -989,3 +989,78 @@ class RPCIntentProcedure(models.Model):
 
     def __str__(self) -> str:
         return f"{self.intent_id}:{self.sequence}:{self.procedure_id}"
+
+
+class RpcPluginSettings(NetBoxModel):
+    """Singleton opt-in settings for the optional netbox-rpc integration.
+
+    netbox-rpc is a fully standalone plugin. This row gives operators an easy,
+    UI-based way to *opt in* (``enabled``, default off) and pick which
+    ``RPCBackend`` the netbox-rpc-backend connection uses — mirroring the
+    ``*PluginSettings`` singletons of the netbox-proxbox companion family
+    (netbox-pdm / netbox-ceph / netbox-pbs) without adding any hard dependency.
+    When disabled, netbox-rpc behaves exactly as before.
+    """
+
+    singleton_key = models.CharField(
+        max_length=32,
+        unique=True,
+        default="default",
+        editable=False,
+    )
+    enabled = models.BooleanField(
+        default=False,
+        verbose_name="Integration enabled",
+        help_text=(
+            "Opt in to the netbox-rpc backend integration. Off by default; "
+            "netbox-rpc remains a fully standalone plugin when disabled."
+        ),
+    )
+    backend = models.ForeignKey(
+        to="netbox_rpc.RPCBackend",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+        help_text=(
+            "RPCBackend used to reach the netbox-rpc-backend service. When "
+            "unset, the default resolver (custom resolver / netbox-nms / a "
+            "single configured RPCBackend) is used instead."
+        ),
+    )
+    comments = models.TextField(blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        verbose_name = "RPC plugin settings"
+        verbose_name_plural = "RPC plugin settings"
+
+    def __str__(self) -> str:
+        return "RPC plugin settings"
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpcpluginsettings", args=[self.pk])
+
+    def save(self, *args: object, **kwargs: object) -> None:
+        self.singleton_key = "default"
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls) -> "RpcPluginSettings":
+        obj, _created = cls.objects.get_or_create(singleton_key="default")
+        return obj
+
+    def resolved_backend_target(self) -> object | None:
+        """Resolve this settings row to a ``backends.BackendTarget`` (or None).
+
+        Uses the selected ``RPCBackend`` FK when set; otherwise defers to the
+        default resolution chain (custom ``backend_resolver`` / netbox-nms /
+        single local ``RPCBackend``). Never imports the resolver at module load.
+        """
+        from . import backends
+
+        if self.backend_id is not None and self.backend is not None:
+            return backends._adapt_backend(self.backend)
+        return backends.resolve_backend(None)

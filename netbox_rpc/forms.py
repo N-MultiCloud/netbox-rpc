@@ -18,6 +18,7 @@ from .models import (
     RPCLinuxServiceAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RpcPluginSettings,
 )
 
 REQUEST_ATTR = "_netbox_rpc_request"
@@ -352,3 +353,19 @@ class RPCExecutionEventFilterForm(NetBoxModelFilterSetForm):
         choices=[("", "---------")] + list(RPCExecutionEvent.LEVEL_CHOICES),
         required=False,
     )
+
+
+class RpcPluginSettingsForm(NetBoxModelForm):
+    """Edit the opt-in netbox-rpc integration settings singleton."""
+
+    comments = CommentField()
+    backend = DynamicModelChoiceField(
+        queryset=RPCBackend.objects.all(),
+        required=False,
+        label="RPC backend",
+        help_text="RPCBackend used to reach the netbox-rpc-backend service.",
+    )
+
+    class Meta:
+        model = RpcPluginSettings
+        fields = ("enabled", "backend", "comments", "tags")

@@ -10,9 +10,25 @@ _MODEL_ROUTES = (
     ("rpclinuxserviceallowlist", "linux-service-allowlist"),
     ("rpcexecution", "executions"),
     ("rpcexecutionevent", "execution-events"),
+    ("rpcpluginsettings", "settings"),
 )
 
-urlpatterns = []
+urlpatterns = [
+    # Landing/status page for /plugins/rpc/.
+    path("", views.RPCHomeView.as_view(), name="home"),
+    # Opt-in settings singleton: always edit the one row (create-on-first-visit).
+    path(
+        "settings/edit/",
+        views.rpc_settings_singleton_redirect,
+        name="rpcpluginsettings_singleton_edit",
+    ),
+    # Best-effort backend reachability probe (POST) for the Test-connection button.
+    path(
+        "settings/test-connection/",
+        views.RpcBackendTestConnectionView.as_view(),
+        name="rpcpluginsettings_test_connection",
+    ),
+]
 
 for _model_name, _slug in _MODEL_ROUTES:
     urlpatterns += [
