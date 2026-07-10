@@ -28,6 +28,35 @@ runtime contract: `backend_url`, `get_auth_headers()`, and `verify_ssl`. When
 `netbox-nms` is absent, `RPCBackend` is the default backend source. The
 N-MultiCloud procedure catalog remains in-repo as an optional guarded layer.
 
+## Opt-in settings + landing page (optional netbox-proxbox companion)
+
+`netbox-rpc` presents itself as an **optional companion** of the netbox-proxbox
+family (like netbox-pdm / netbox-ceph / netbox-pbs) **without any hard
+dependency** — it still has **no `required_plugins`** and boots/migrates
+standalone. The UI-based opt-in surface lives here:
+
+- **`RpcPluginSettings`** (`models.py`) is a `get_solo()` singleton (mirrors
+  `CephPluginSettings`/`PBSPluginSettings`): `enabled` (opt-in gate, **default
+  `False`**) + an optional `backend` FK to an `RPCBackend`. `RPCBackend` stays
+  the single source of truth for connection details; the settings row does not
+  duplicate url/token fields. `resolved_backend_target()` returns a
+  `backends.BackendTarget` — the selected FK when set, else the normal
+  `backends.resolve_backend(None)` chain (custom resolver → netbox-nms → single
+  local `RPCBackend`). Additive migration `0044_rpcpluginsettings` (no
+  `netbox_nms`/`netbox_proxbox` migration dependency).
+- **Landing page** at `/plugins/rpc/` (`RPCHomeView`, URL name `home`) shows the
+  enabled state, resolved backend, catalog counts, and a **Test connection**
+  button. **Settings** page is the singleton edit (`RpcPluginSettingsEditView`
+  via `rpcpluginsettings_singleton_edit` redirect). Both are in the **RPC →
+  Configuration** nav group.
+- **Backend reachability** is `health.probe_backend()` — a single fixed
+  `GET {backend_url}/status/ping` (never caller-controlled host/shell), shared by
+  the landing view and the POST `rpcpluginsettings_test_connection` endpoint.
+- netbox-proxbox surfaces this as a soft companion card on its home dashboard via
+  its own `integrations/rpc.py::rpc_dashboard_context()` — it reads
+  `RpcPluginSettings` through a guarded `try/except ImportError` and degrades to
+  nothing when netbox-rpc is absent. netbox-rpc never imports netbox-proxbox.
+
 ## RPC Procedure Commands
 
 `netbox-rpc` is now the database source of truth for the structured command

@@ -70,6 +70,19 @@ menu = PluginMenu(
                 ),
             ),
         ),
+        (
+            "Configuration",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_rpc:home",
+                    link_text="Dashboard",
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_rpc:rpcpluginsettings_singleton_edit",
+                    link_text="Settings",
+                ),
+            ),
+        ),
     ),
     icon_class="mdi mdi-remote",
 )

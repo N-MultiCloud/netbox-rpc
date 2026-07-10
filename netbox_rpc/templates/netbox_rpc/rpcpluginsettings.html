@@ -1,0 +1,45 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row">
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">RPC Integration</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">Enabled</th>
+          <td>
+            {% if object.enabled %}
+              <span class="badge text-bg-success">Enabled</span>
+            {% else %}
+              <span class="badge text-bg-secondary">Optional &middot; not enabled</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Backend</th>
+          <td>
+            {% if object.backend %}
+              <a href="{{ object.backend.get_absolute_url }}">{{ object.backend }}</a>
+            {% else %}
+              <span class="text-muted">Default resolver (custom / netbox-nms / single RPCBackend)</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% if object.backend %}
+        <tr>
+          <th scope="row">Backend URL</th>
+          <td>{{ object.backend.backend_url }}</td>
+        </tr>
+        {% endif %}
+      </table>
+    </div>
+  </div>
+  <div class="col col-md-6">
+    {% include 'inc/panels/tags.html' %}
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+{% endblock content %}
