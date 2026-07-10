@@ -200,6 +200,12 @@ dependency** — it remains fully standalone. An easy, UI-based opt-in lives at
   used to reach `netbox-rpc-backend`. When disabled, netbox-rpc behaves exactly
   as before; when enabled, netbox-proxbox shows a companion card linking here.
 
+The singleton can also be driven **programmatically**, not just from the UI:
+
+- REST: `GET`/`PATCH` `/api/plugins/rpc/settings/` (e.g. `PATCH {"enabled": true}`).
+- CLI: `python manage.py rpc_settings --enable` (also `--disable`, `--show`,
+  `--backend <name-or-id>`, `--clear-backend`, `--dry-run`).
+
 ## DDD / CQRS / Event Sourcing
 
 `netbox-rpc` is the Remote Command Policy bounded context for the NMS stack.

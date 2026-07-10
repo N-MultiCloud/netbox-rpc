@@ -52,6 +52,12 @@ standalone. The UI-based opt-in surface lives here:
 - **Backend reachability** is `health.probe_backend()` — a single fixed
   `GET {backend_url}/status/ping` (never caller-controlled host/shell), shared by
   the landing view and the POST `rpcpluginsettings_test_connection` endpoint.
+- **Programmatic control** of the singleton (beyond the UI): a **REST API** at
+  `/api/plugins/rpc/settings/` (`RpcPluginSettingsViewSet`, **GET + PATCH only**;
+  `get_queryset()` calls `get_solo()` so the row always exists; create/delete are
+  405) and a **`manage.py rpc_settings`** command (`--enable`/`--disable`/`--show`,
+  `--backend <name-or-id>`/`--clear-backend`, `--dry-run`). Both only touch
+  netbox-rpc's own config — no Proxbox/NMS dependency.
 - netbox-proxbox surfaces this as a soft companion card on its home dashboard via
   its own `integrations/rpc.py::rpc_dashboard_context()` — it reads
   `RpcPluginSettings` through a guarded `try/except ImportError` and degrades to
