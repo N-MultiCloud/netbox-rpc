@@ -138,6 +138,18 @@ LINUX_PROXMOX_QEMU_VM_LIFECYCLE_HANDLER = "os.linux_proxmox.qemu_vm_lifecycle"
 LINUX_PROXMOX_PVESH_JSON = "os.linux.proxmox.pvesh_json"
 LINUX_PROXMOX_PVESH_JSON_HANDLER = "os.linux.proxmox.pvesh_json"
 
+# Read-only agentless systemd service-state pull from a Proxmox host. Unlike
+# LINUX_PROXMOX_CONVERT_MELLANOX_NIC and LINUX_PROXMOX_QEMU_VM_LIFECYCLE, this
+# procedure does NOT resolve the netbox-nms ProxmoxEndpointSSHBinding and emits
+# no rpc_ssh_* keys — the normalizer only forwards proxmox_endpoint_id + units.
+# The execution backend resolves SSH downstream from the endpoint's OWN stored
+# credential (fetched from netbox-proxbox's SSH-credential secrets API), gated
+# on the endpoint's allow_writes + registered SSH credential.
+LINUX_PROXMOX_SHOW_SYSTEMCTL_SERVICES = "os.linux.proxmox.show_systemctl_services"
+LINUX_PROXMOX_SHOW_SYSTEMCTL_SERVICES_HANDLER = (
+    "os.linux_proxmox.show_systemctl_services"
+)
+
 NGINX_1_CONFIG_TEST = "service.nginx.1.config_test"
 NGINX_1_CONFIG_DEPLOY = "service.nginx.1.config_deploy"
 NGINX_1_RELOAD = "service.nginx.1.reload"

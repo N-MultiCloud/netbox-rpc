@@ -116,6 +116,13 @@ EXEMPT_HANDLER_RATIONALE = {
     "os.linux.ubuntu.24.ookla.check_firewall": (
         "Runs discovery plus firewall-state bash-s probes."
     ),
+    "os.linux_proxmox.show_systemctl_services": (
+        "Read-only agentless pull: the backend runs `systemctl show -p ...` per "
+        "unit (or a backend-defined default unit set when none is requested) and "
+        "parses the key=value output; SSH is resolved backend-side from the "
+        "endpoint's own credential, so it cannot be faithfully reduced to a "
+        "single fixed argv row."
+    ),
 }
 EXEMPT_HANDLER_IDS = frozenset(EXEMPT_HANDLER_RATIONALE)
 

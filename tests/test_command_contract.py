@@ -47,7 +47,20 @@ def test_placeholder_extraction_and_balance_checks() -> None:
 
 def test_seeded_handler_ids_have_command_rows_or_documented_exemption() -> None:
     constants = runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
-    migration = read("netbox_rpc/migrations/0037_seed_rpc_procedure_commands.py")
+    # Command rows are seeded by 0037 and by any later per-procedure command
+    # seed migration (procedures added after 0037 seed their representative rows
+    # in their own migration). Scan only migrations that actually seed
+    # RPCProcedureCommand rows — NOT procedure-seed migrations, which also
+    # mention the handler_id but do not create a command row. This keeps the
+    # test able to catch a deleted command row.
+    migration = "\n".join(
+        src
+        for src in (
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "netbox_rpc/migrations").glob("0*.py"))
+        )
+        if "RPCProcedureCommand" in src
+    )
 
     handler_ids = {
         value

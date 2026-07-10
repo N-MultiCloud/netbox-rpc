@@ -32,6 +32,7 @@ from ..constants import (
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
     LINUX_PROXMOX_PVESH_JSON,
     LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
+    LINUX_PROXMOX_SHOW_SYSTEMCTL_SERVICES,
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
@@ -122,6 +123,12 @@ _PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
         "migrate",
     }
 )
+# systemd unit-name allowlist charset for os.linux.proxmox.show_systemctl_services.
+# The first character must be alphanumeric/underscore so a value can never be
+# mistaken for a `systemctl` option (e.g. "--user"); "-", ".", ":" and "@" are
+# only allowed after the first character.
+_SYSTEMCTL_UNIT_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@:-]*$")
+_MAX_SYSTEMCTL_UNITS = 32
 
 
 class RPCExecutionError(RuntimeError):
@@ -432,6 +439,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
+
+    if procedure_name == LINUX_PROXMOX_SHOW_SYSTEMCTL_SERVICES:
+        return _normalize_show_systemctl_services_execution(execution, target)
 
     if procedure_name == DELL_OS10_S5232F_BOOTSTRAP_RESTCONF:
         return _normalize_dell_os10_bootstrap_execution(execution, target)
@@ -1423,6 +1433,77 @@ def _normalize_convert_mellanox_nic_execution(
         "interfaces_content_sha": _hash_json(interfaces_content)
         if interfaces_content
         else "",
+    }
+    return normalized
+
+
+def _normalize_show_systemctl_services_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize params for os.linux.proxmox.show_systemctl_services.
+
+    Unlike _normalize_convert_mellanox_nic_execution and
+    _normalize_proxmox_qemu_vm_lifecycle_execution, this read-only procedure
+    does NOT resolve the netbox-nms ProxmoxEndpointSSHBinding and emits no
+    rpc_ssh_* keys. The execution backend resolves the SSH connection
+    downstream from the endpoint's OWN stored credential (fetched from
+    netbox-proxbox's SSH-credential secrets API), so only proxmox_endpoint_id
+    and a validated units list are forwarded.
+    """
+    params = execution.params or {}
+    endpoint_id = _int_range(params, "proxmox_endpoint_id", 1, None)
+
+    # Audit integrity: the SSH target the backend resolves (proxmox_endpoint_id)
+    # must match the execution's audited target object. Otherwise a caller could
+    # target ProxmoxEndpoint A in NetBox while reading services from endpoint B.
+    assigned_id = getattr(execution, "assigned_object_id", None)
+    if assigned_id is not None and int(assigned_id) != endpoint_id:
+        raise RPCExecutionError(
+            "proxmox_endpoint_id must match the execution target object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    units: list[str] = []
+    raw_units = params.get("units")
+    if raw_units not in (None, ""):
+        if not isinstance(raw_units, (list, tuple)):
+            raise RPCExecutionError(
+                "units must be a list of systemd unit names.",
+                code="RPC_PARAM_INVALID",
+            )
+        if len(raw_units) > _MAX_SYSTEMCTL_UNITS:
+            raise RPCExecutionError(
+                f"units may contain at most {_MAX_SYSTEMCTL_UNITS} entries.",
+                code="RPC_PARAM_INVALID",
+            )
+        for value in raw_units:
+            if not isinstance(value, str):
+                raise RPCExecutionError(
+                    "each units entry must be a string systemd unit name.",
+                    code="RPC_PARAM_INVALID",
+                )
+            name = value.strip()
+            if (
+                not name
+                or len(name) > 100
+                or not _SYSTEMCTL_UNIT_NAME_RE.fullmatch(name)
+            ):
+                raise RPCExecutionError(
+                    "each units entry must be a valid systemd unit name.",
+                    code="RPC_PARAM_INVALID",
+                )
+            units.append(name)
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "proxmox_endpoint_id": endpoint_id,
+        "units": units,
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "proxmox_endpoint_id": endpoint_id,
+        "units": units,
     }
     return normalized
 

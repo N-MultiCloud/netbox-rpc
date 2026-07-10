@@ -365,6 +365,28 @@ be used autonomously on destructive procedures.
   appear in RPC params beyond the credential id. It must never accept arbitrary
   shell command text. Handler ID: `os.linux_proxmox.qemu_vm_lifecycle` (in
   nms-backend).
+- Proxmox systemctl service state: `os.linux.proxmox.show_systemctl_services`
+  (**read**, no approval, 60s) is seeded by migration `0044` (representative
+  command row in `0045`). It targets a **netbox-proxbox `ProxmoxEndpoint`**
+  (`target_models = ["netbox_proxbox.proxmoxendpoint"]`) and drives the
+  opt-in, agentless, pull-based service monitoring in netbox-proxbox. **Unlike
+  the Mellanox/QEMU Proxmox procedures it does NOT resolve the netbox-nms
+  `ProxmoxEndpointSSHBinding` and emits no `rpc_ssh_*` keys** — its normalizer
+  (`_normalize_show_systemctl_services_execution`) forwards only
+  `proxmox_endpoint_id` and a validated `units` list (each a string, charset
+  `^[A-Za-z0-9_][A-Za-z0-9_.@:-]*$` — the first char cannot be `-`, so a value
+  can never be read as a `systemctl` option — ≤32 entries, ≤100 chars each;
+  empty ⇒ backend default set). For audit integrity the normalizer also requires
+  `proxmox_endpoint_id` to match the execution's target object
+  (`assigned_object_id`) when one is set, so the audited target and the resolved
+  SSH target can never diverge. The execution backend resolves SSH downstream from the endpoint's OWN
+  stored credential (fetched from netbox-proxbox's SSH-credential secrets API,
+  gated on `allow_writes` + a registered SSH credential), runs
+  `systemctl show -p …` per unit, and returns
+  `{ok, procedure, target, reachable, services[…]}`. Handler ID:
+  `os.linux_proxmox.show_systemctl_services` (exempt in
+  `command_contract.EXEMPT_HANDLER_RATIONALE` because the per-unit /
+  default-set / output-parsing orchestration is backend-owned).
 - Dell SmartFabric OS10 S5232F-ON procedures are seeded by migration `0009`.
   They are fixed SSH fallback/bootstrap procedures for a RESTCONF-first driver:
   `network.device.dell_os10.s5232f_on.bootstrap_restconf`,

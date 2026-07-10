@@ -37,6 +37,7 @@ The procedure catalog is intentionally narrow:
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`
+- `os.linux.proxmox.show_systemctl_services`
 - `services.pterodactyl.bootstrap_api_key`
 - `services.pterodactyl.artisan`
 - `services.pterodactyl.container_logs`
