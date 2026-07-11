@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from ipaddress import ip_address, ip_network
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +43,11 @@ from ..constants import (
     NGINX_1_ROLLBACK,
     OOKLA_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
+    PASSBOLT_CLEANUP,
+    PASSBOLT_EXPORT_SECRETS,
+    PASSBOLT_IMPORT_SECRETS,
+    PASSBOLT_PROCEDURE_NAMES,
+    PASSBOLT_TRANSFER_SECRETS,
     PTERODACTYL_ARTISAN,
     PTERODACTYL_BOOTSTRAP_API_KEY,
     PTERODACTYL_CONTAINER_LOGS,
@@ -135,6 +141,16 @@ _PTERODACTYL_ARTISAN_ALLOWLIST = frozenset(
         "migrate",
     }
 )
+_PASSBOLT_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_PASSBOLT_DB_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}$")
+_PASSBOLT_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_PASSBOLT_PATH_SAFE_CHARS_RE = re.compile(r"/[A-Za-z0-9._/-]{1,254}")
+_PASSBOLT_BROAD_DIRS = frozenset({"/", "/tmp", "/var/tmp", "/etc"})
+_PASSBOLT_HOST_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+_PASSBOLT_POSIX_USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
 # systemd unit-name allowlist charset for os.linux.proxmox.show_systemctl_services.
 # The first character must be alphanumeric/underscore so a value can never be
 # mistaken for a `systemctl` option (e.g. "--user"); "-", ".", ":" and "@" are
@@ -356,7 +372,9 @@ def _apply_target_object_context(
 ) -> None:
     if not _has_jinja_command(execution.procedure):
         return
-    snapshot = _build_target_object_snapshot(getattr(execution, "assigned_object", None))
+    snapshot = _build_target_object_snapshot(
+        getattr(execution, "assigned_object", None)
+    )
     if not snapshot:
         return
     normalized["_target_object"] = snapshot
@@ -451,6 +469,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         from ..packer_normalizer import normalize_packer_vm_execution
 
         return normalize_packer_vm_execution(execution, target)
+
+    if procedure_name in PASSBOLT_PROCEDURE_NAMES:
+        return _normalize_passbolt_migration_execution(execution, target)
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
@@ -865,6 +886,157 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_passbolt_migration_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize approval-gated Passbolt migration helper params.
+
+    The backend handlers own execution; netbox-rpc forwards only validated
+    runtime parameters and a redacted fingerprint. No DB password, DB dump,
+    GPG/JWT content, private key, or archive bytes are accepted or recorded here.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+        },
+    }
+    _copy_required_ssh_overrides(params, normalized)
+
+    if procedure_name == PASSBOLT_EXPORT_SECRETS:
+        _copy_passbolt_field(params, normalized, "app_container_name", "container")
+        _copy_passbolt_field(params, normalized, "db_container_name", "container")
+        _copy_passbolt_field(params, normalized, "db_name", "db_name")
+        _copy_passbolt_field(params, normalized, "db_host", "host")
+        normalized["db_port"] = _int_range(params, "db_port", 1, 65535)
+        normalized["command_fingerprint"]["db_port"] = normalized["db_port"]
+        _copy_passbolt_field(params, normalized, "db_user_env", "env")
+        _copy_passbolt_field(params, normalized, "db_password_env", "env")
+        _copy_passbolt_path(params, normalized, "gpg_dir", "/etc/passbolt/gpg")
+        _copy_passbolt_path(params, normalized, "jwt_dir", "/etc/passbolt/jwt")
+        _copy_passbolt_path(params, normalized, "staging_dir", None)
+        return normalized
+
+    if procedure_name == PASSBOLT_TRANSFER_SECRETS:
+        _copy_passbolt_path(params, normalized, "source_staging_dir", None)
+        _copy_passbolt_field(params, normalized, "target_host", "host")
+        _copy_passbolt_field(params, normalized, "target_ssh_user", "posix_user")
+        normalized["target_ssh_port"] = _int_range(params, "target_ssh_port", 1, 65535)
+        normalized["command_fingerprint"]["target_ssh_port"] = normalized[
+            "target_ssh_port"
+        ]
+        _copy_passbolt_path(params, normalized, "target_staging_dir", None)
+        return normalized
+
+    if procedure_name == PASSBOLT_IMPORT_SECRETS:
+        _copy_passbolt_path(params, normalized, "staging_dir", None)
+        _copy_passbolt_field(params, normalized, "db_name", "db_name")
+        _copy_passbolt_path(params, normalized, "gpg_dest_dir", "/etc/passbolt/gpg")
+        _copy_passbolt_path(params, normalized, "jwt_dest_dir", "/etc/passbolt/jwt")
+        _copy_passbolt_path(
+            params,
+            normalized,
+            "cake_bin_path",
+            "/usr/share/php/passbolt/bin/cake",
+        )
+        return normalized
+
+    if procedure_name == PASSBOLT_CLEANUP:
+        _copy_passbolt_path(params, normalized, "source_staging_dir", None)
+        _copy_passbolt_field(params, normalized, "target_host", "host")
+        _copy_passbolt_field(params, normalized, "target_ssh_user", "posix_user")
+        normalized["target_ssh_port"] = _int_range(params, "target_ssh_port", 1, 65535)
+        normalized["command_fingerprint"]["target_ssh_port"] = normalized[
+            "target_ssh_port"
+        ]
+        _copy_passbolt_path(params, normalized, "target_staging_dir", None)
+        return normalized
+
+    raise RPCExecutionError(
+        f"Procedure {procedure_name!r} is not a Passbolt migration procedure.",
+        code="RPC_PARAM_INVALID",
+    )
+
+
+def _copy_required_ssh_overrides(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    _copy_optional_ssh_overrides(params, normalized)
+    if "rpc_ssh_host" not in normalized or "rpc_ssh_credential_pk" not in normalized:
+        raise RPCExecutionError(
+            "rpc_ssh_host and rpc_ssh_credential_pk are required.",
+            code="RPC_PARAM_INVALID",
+        )
+    host = str(normalized["rpc_ssh_host"])
+    if not _PASSBOLT_HOST_RE.fullmatch(host):
+        raise RPCExecutionError(
+            "rpc_ssh_host must be a DNS name or IP address without shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+
+
+def _copy_passbolt_field(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+    key: str,
+    kind: str,
+) -> None:
+    value = str(params.get(key) or "").strip()
+    if not value:
+        raise RPCExecutionError(f"{key} is required.", code="RPC_PARAM_INVALID")
+    validators = {
+        "container": (_PASSBOLT_SAFE_NAME_RE, "must be a safe Docker container name"),
+        "db_name": (_PASSBOLT_DB_NAME_RE, "must contain only letters, digits, and _"),
+        "env": (_PASSBOLT_ENV_NAME_RE, "must be a valid environment variable name"),
+        "host": (_PASSBOLT_HOST_RE, "must be a DNS name or IP address"),
+        "posix_user": (_PASSBOLT_POSIX_USER_RE, "must be a POSIX username"),
+    }
+    pattern, message = validators[kind]
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(f"{key} {message}.", code="RPC_PARAM_INVALID")
+    normalized[key] = value
+    normalized["command_fingerprint"][key] = value
+
+
+def _copy_passbolt_path(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+    key: str,
+    default: str | None,
+) -> None:
+    raw = params.get(key)
+    value = str(raw if raw not in (None, "") else default or "").strip()
+    if not value:
+        raise RPCExecutionError(f"{key} is required.", code="RPC_PARAM_INVALID")
+    if not _PASSBOLT_PATH_SAFE_CHARS_RE.fullmatch(value):
+        raise RPCExecutionError(
+            f"{key} must be an absolute safe path without traversal or shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    path = PurePosixPath("/" + value.lstrip("/"))
+    if ".." in path.parts:
+        raise RPCExecutionError(
+            f"{key} must be an absolute safe path without traversal or shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(
+        path == PurePosixPath(blocked) or PurePosixPath(blocked).is_relative_to(path)
+        for blocked in _PASSBOLT_BROAD_DIRS
+    ):
+        raise RPCExecutionError(
+            f"{key} must not be a root or broad system directory.",
+            code="RPC_PARAM_INVALID",
+        )
+    normalized[key] = value
+    normalized["command_fingerprint"][key] = value
 
 
 def _normalize_minecraft_plugin_install_url_execution(

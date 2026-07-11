@@ -281,6 +281,20 @@ before dispatching, not after:
 | `network.device.dell_os10.s5232f_on.configure_vlt_domain` | Network partition risk |
 | `services.pterodactyl.bootstrap_api_key` | Credential rotation |
 
+### Passbolt Migration Procedures
+
+The `services.passbolt.export_secrets`, `services.passbolt.transfer_secrets`,
+`services.passbolt.import_secrets`, and `services.passbolt.cleanup` procedures
+are all `effect="destructive"` and `approval_required=True`. They are tools for
+a one-time operator-run Passbolt CE migration and must never be created or
+approved autonomously by an LLM agent. Agents must not ask for, fabricate,
+print, log, or store real Passbolt DB contents, GPG/JWT material, or DB
+passwords. The only permitted outputs are artifact paths, byte sizes, sha256
+checksums, and migrate/healthcheck/cleanup status.
+
+See [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md)
+for the operator command sequence. Use placeholder values in docs and tests.
+
 ### Permission Invariant
 
 Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
@@ -461,6 +475,27 @@ be used autonomously on destructive procedures.
     (1–500, default 100).
     Handler: `services.pterodactyl.container_logs`.
   Target models for all three: `dcim.device` and `virtualization.virtualmachine`.
+- Passbolt CE migration procedures are seeded by migration `0048`. Four
+  destructive, approval-gated procedures orchestrate a one-time migration from a
+  source Docker deployment to an already-provisioned native VM using only
+  runtime params and dedicated staging directories:
+  - `services.passbolt.export_secrets` (destructive, 1800s, approval required):
+    runs on the source Docker host, uses DB credential environment variable
+    names from the DB container instead of a caller-supplied DB password, and
+    creates `db.sql`, `gpg.tar`, and `jwt.tar` in `staging_dir`.
+  - `services.passbolt.transfer_secrets` (destructive, 1800s, approval required):
+    runs rsync from the source host to the target host and recomputes checksums
+    on the target.
+  - `services.passbolt.import_secrets` (destructive, 3600s, approval required):
+    imports the DB dump on the target VM, extracts GPG/JWT archives to validated
+    destination dirs, sets `www-data:www-data` ownership and locked-down
+    permissions, then runs Passbolt migrate and healthcheck.
+  - `services.passbolt.cleanup` (destructive, 300s, approval required): removes
+    source and target staging directories after operator-confirmed success.
+  Handler IDs equal procedure IDs. The normalizer and backend schemas validate
+  every container, DB, env var, host, user, port, and path parameter; no real
+  secret contents are accepted, returned, logged, or stored. Operator commands
+  live in `docs/passbolt-migration-runbook.md`.
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.

@@ -88,6 +88,23 @@ PTERODACTYL_WINGS_LOGS_HANDLER = "services.pterodactyl.wings.logs"
 PTERODACTYL_WINGS_RESTART = "services.pterodactyl.wings.restart"
 PTERODACTYL_WINGS_RESTART_HANDLER = "services.pterodactyl.wings.restart"
 
+PASSBOLT_EXPORT_SECRETS = "services.passbolt.export_secrets"
+PASSBOLT_EXPORT_SECRETS_HANDLER = "services.passbolt.export_secrets"
+PASSBOLT_TRANSFER_SECRETS = "services.passbolt.transfer_secrets"
+PASSBOLT_TRANSFER_SECRETS_HANDLER = "services.passbolt.transfer_secrets"
+PASSBOLT_IMPORT_SECRETS = "services.passbolt.import_secrets"
+PASSBOLT_IMPORT_SECRETS_HANDLER = "services.passbolt.import_secrets"
+PASSBOLT_CLEANUP = "services.passbolt.cleanup"
+PASSBOLT_CLEANUP_HANDLER = "services.passbolt.cleanup"
+PASSBOLT_PROCEDURE_NAMES = frozenset(
+    {
+        PASSBOLT_EXPORT_SECRETS,
+        PASSBOLT_TRANSFER_SECRETS,
+        PASSBOLT_IMPORT_SECRETS,
+        PASSBOLT_CLEANUP,
+    }
+)
+
 MINECRAFT_PLUGIN_INSTALL_URL = "services.minecraft.plugin.install_url"
 MINECRAFT_PLUGIN_INSTALL_URL_HANDLER = "services.minecraft.plugin.install_url"
 MINECRAFT_VIAVERSION_INSTALL = "services.minecraft.viaversion.install"
@@ -254,6 +271,278 @@ _RPC_SSH_OVERRIDE_PROPERTIES = {
         "description": "Optional strict host-key checking override consumed by nms-backend.",
     },
 }
+
+_PASSBOLT_SAFE_NAME = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 128,
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+}
+
+_PASSBOLT_DB_NAME = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": "^[A-Za-z0-9_]{1,64}$",
+}
+
+_PASSBOLT_ENV_NAME = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+}
+
+_PASSBOLT_ABS_PATH = {
+    "type": "string",
+    "minLength": 2,
+    "maxLength": 255,
+    # Charset + absolute-path gate only. Traversal (`..`, incl. a leading
+    # `/../`) and broad-directory rejection is enforced authoritatively by the
+    # normalizer (`_copy_passbolt_path`) and nms-backend Pydantic, because a
+    # single regex cannot reliably reject a leading `/../` segment.
+    "pattern": "^/[A-Za-z0-9._/-]{1,254}$",
+}
+
+_PASSBOLT_HOST = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 253,
+    "pattern": (
+        "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        "(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+    ),
+}
+
+_PASSBOLT_POSIX_USER = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 32,
+    "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+}
+
+_PASSBOLT_FILE_METADATA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["path", "bytes", "sha256"],
+    "properties": {
+        "path": {"type": "string"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    },
+}
+
+_PASSBOLT_COMMON_RESULT = {
+    "ok": {"type": "boolean"},
+    "procedure": {"type": "string"},
+    "target": {"type": "string"},
+}
+
+_PASSBOLT_EXPORT_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": [
+        "rpc_ssh_host",
+        "rpc_ssh_credential_pk",
+        "app_container_name",
+        "db_container_name",
+        "db_name",
+        "db_host",
+        "db_port",
+        "db_user_env",
+        "db_password_env",
+        "staging_dir",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+        "app_container_name": {
+            **_PASSBOLT_SAFE_NAME,
+            "description": "Passbolt application container holding GPG/JWT material.",
+        },
+        "db_container_name": {
+            **_PASSBOLT_SAFE_NAME,
+            "description": "Container where mysqldump runs; can equal app_container_name.",
+        },
+        "db_name": _PASSBOLT_DB_NAME,
+        "db_host": _PASSBOLT_HOST,
+        "db_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "db_user_env": _PASSBOLT_ENV_NAME,
+        "db_password_env": _PASSBOLT_ENV_NAME,
+        "gpg_dir": {**_PASSBOLT_ABS_PATH, "default": "/etc/passbolt/gpg"},
+        "jwt_dir": {**_PASSBOLT_ABS_PATH, "default": "/etc/passbolt/jwt"},
+        "staging_dir": _PASSBOLT_ABS_PATH,
+    },
+}
+
+_PASSBOLT_EXPORT_RESULT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ok", "procedure", "target", "files"],
+    "properties": {
+        **_PASSBOLT_COMMON_RESULT,
+        "files": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["db_sql", "gpg_tar", "jwt_tar"],
+            "properties": {
+                "db_sql": _PASSBOLT_FILE_METADATA,
+                "gpg_tar": _PASSBOLT_FILE_METADATA,
+                "jwt_tar": _PASSBOLT_FILE_METADATA,
+            },
+        },
+    },
+}
+
+_PASSBOLT_TRANSFER_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": [
+        "rpc_ssh_host",
+        "rpc_ssh_credential_pk",
+        "source_staging_dir",
+        "target_host",
+        "target_ssh_user",
+        "target_ssh_port",
+        "target_staging_dir",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+        "source_staging_dir": _PASSBOLT_ABS_PATH,
+        "target_host": _PASSBOLT_HOST,
+        "target_ssh_user": _PASSBOLT_POSIX_USER,
+        "target_ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "target_staging_dir": _PASSBOLT_ABS_PATH,
+    },
+}
+
+_PASSBOLT_TRANSFER_RESULT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ok", "procedure", "target", "source_files", "target_files"],
+    "properties": {
+        **_PASSBOLT_COMMON_RESULT,
+        "source_files": {"type": "array", "items": _PASSBOLT_FILE_METADATA},
+        "target_files": {"type": "array", "items": _PASSBOLT_FILE_METADATA},
+    },
+}
+
+_PASSBOLT_IMPORT_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": ["rpc_ssh_host", "rpc_ssh_credential_pk", "staging_dir", "db_name"],
+    "additionalProperties": False,
+    "properties": {
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+        "staging_dir": _PASSBOLT_ABS_PATH,
+        "db_name": _PASSBOLT_DB_NAME,
+        "gpg_dest_dir": {**_PASSBOLT_ABS_PATH, "default": "/etc/passbolt/gpg"},
+        "jwt_dest_dir": {**_PASSBOLT_ABS_PATH, "default": "/etc/passbolt/jwt"},
+        "cake_bin_path": {
+            **_PASSBOLT_ABS_PATH,
+            "default": "/usr/share/php/passbolt/bin/cake",
+        },
+    },
+}
+
+_PASSBOLT_IMPORT_RESULT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ok", "procedure", "target", "migrate", "healthcheck"],
+    "properties": {
+        **_PASSBOLT_COMMON_RESULT,
+        "migrate": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["ok", "exit_code"],
+            "properties": {"ok": {"type": "boolean"}, "exit_code": {"type": "integer"}},
+        },
+        "healthcheck": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["ok", "exit_code"],
+            "properties": {"ok": {"type": "boolean"}, "exit_code": {"type": "integer"}},
+        },
+    },
+}
+
+_PASSBOLT_CLEANUP_PARAMS_SCHEMA = {
+    "type": "object",
+    "required": [
+        "rpc_ssh_host",
+        "rpc_ssh_credential_pk",
+        "source_staging_dir",
+        "target_host",
+        "target_ssh_user",
+        "target_ssh_port",
+        "target_staging_dir",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        **_RPC_SSH_OVERRIDE_PROPERTIES,
+        "source_staging_dir": _PASSBOLT_ABS_PATH,
+        "target_host": _PASSBOLT_HOST,
+        "target_ssh_user": _PASSBOLT_POSIX_USER,
+        "target_ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "target_staging_dir": _PASSBOLT_ABS_PATH,
+    },
+}
+
+_PASSBOLT_CLEANUP_RESULT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ok", "procedure", "target", "source_removed", "target_removed"],
+    "properties": {
+        **_PASSBOLT_COMMON_RESULT,
+        "source_removed": {"type": "boolean"},
+        "target_removed": {"type": "boolean"},
+    },
+}
+
+PASSBOLT_MIGRATION_PROCEDURES = (
+    {
+        "name": PASSBOLT_EXPORT_SECRETS,
+        "handler_id": PASSBOLT_EXPORT_SECRETS_HANDLER,
+        "target_models": [],
+        "effect": "destructive",
+        "timeout_seconds": 1800,
+        "approval_required": True,
+        "description": "Export Passbolt DB/GPG/JWT material to a source-host staging directory.",
+        "params_schema": _PASSBOLT_EXPORT_PARAMS_SCHEMA,
+        "result_schema": _PASSBOLT_EXPORT_RESULT_SCHEMA,
+    },
+    {
+        "name": PASSBOLT_TRANSFER_SECRETS,
+        "handler_id": PASSBOLT_TRANSFER_SECRETS_HANDLER,
+        "target_models": [],
+        "effect": "destructive",
+        "timeout_seconds": 1800,
+        "approval_required": True,
+        "description": "Transfer staged Passbolt migration files host-to-host with rsync over SSH.",
+        "params_schema": _PASSBOLT_TRANSFER_PARAMS_SCHEMA,
+        "result_schema": _PASSBOLT_TRANSFER_RESULT_SCHEMA,
+    },
+    {
+        "name": PASSBOLT_IMPORT_SECRETS,
+        "handler_id": PASSBOLT_IMPORT_SECRETS_HANDLER,
+        "target_models": [],
+        "effect": "destructive",
+        "timeout_seconds": 3600,
+        "approval_required": True,
+        "description": "Import staged Passbolt DB/GPG/JWT material into a native Passbolt VM.",
+        "params_schema": _PASSBOLT_IMPORT_PARAMS_SCHEMA,
+        "result_schema": _PASSBOLT_IMPORT_RESULT_SCHEMA,
+    },
+    {
+        "name": PASSBOLT_CLEANUP,
+        "handler_id": PASSBOLT_CLEANUP_HANDLER,
+        "target_models": [],
+        "effect": "destructive",
+        "timeout_seconds": 300,
+        "approval_required": True,
+        "description": "Remove source and target Passbolt migration staging directories.",
+        "params_schema": _PASSBOLT_CLEANUP_PARAMS_SCHEMA,
+        "result_schema": _PASSBOLT_CLEANUP_RESULT_SCHEMA,
+    },
+)
 
 _MINECRAFT_SERVER_UUID = {
     "type": "string",

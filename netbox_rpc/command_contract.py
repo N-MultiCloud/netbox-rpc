@@ -90,6 +90,22 @@ EXEMPT_HANDLER_RATIONALE = {
     "services.pterodactyl.bootstrap_api_key": (
         "Uses a backend-owned fallback sequence for php artisan about/version."
     ),
+    "services.passbolt.export_secrets": (
+        "Exports DB/GPG/JWT material into staged files without returning file "
+        "contents; the workflow uses backend-owned Docker/tar/stat/checksum steps."
+    ),
+    "services.passbolt.transfer_secrets": (
+        "Transfers staged files host-to-host via rsync/ssh and verifies checksums; "
+        "file bytes must never pass through netbox-rpc or nms-backend storage."
+    ),
+    "services.passbolt.import_secrets": (
+        "Imports DB and archive material on the target VM, fixes ownership and "
+        "permissions, then runs Passbolt cake migration/healthcheck as www-data."
+    ),
+    "services.passbolt.cleanup": (
+        "Removes operator-approved staging directories on source and target hosts "
+        "after a successful migration."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."
