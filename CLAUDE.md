@@ -41,7 +41,11 @@ command behavior changes.
 > **LLM Agent Safety Guardrails** section in `AGENTS.md`. Destructive Proxmox
 > procedures (`os.linux.proxmox.convert_mellanox_nic_to_ethernet`) MUST NOT be
 > dispatched without explicit human confirmation of the target endpoint, params,
-> and expected network impact.
+> and expected network impact. The destructive Passbolt migration procedures
+> (`services.passbolt.export_secrets`, `services.passbolt.transfer_secrets`,
+> `services.passbolt.import_secrets`, and `services.passbolt.cleanup`) also
+> require explicit operator approval and must never expose DB dump contents,
+> GPG/JWT material, or DB passwords in params, logs, events, or results.
 
 @AGENTS.md
 

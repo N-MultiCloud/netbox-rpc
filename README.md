@@ -41,6 +41,10 @@ The procedure catalog is intentionally narrow:
 - `services.pterodactyl.bootstrap_api_key`
 - `services.pterodactyl.artisan`
 - `services.pterodactyl.container_logs`
+- `services.passbolt.export_secrets`
+- `services.passbolt.transfer_secrets`
+- `services.passbolt.import_secrets`
+- `services.passbolt.cleanup`
 
 Operators call named procedures, not arbitrary SSH commands.
 
@@ -369,6 +373,32 @@ again by the Pydantic schema in `nms-backend`. Disallowed commands raise
 (1–500, default 100; values outside that range are clamped, not rejected).
 `approval_required=False`. Handler ID: `services.pterodactyl.container_logs`
 (in `nms-backend`).
+
+### Passbolt CE migration procedures
+
+Migration `0048` adds four approval-gated, destructive procedures for a
+one-time operator-run Passbolt CE migration from a source Docker deployment to
+an already-provisioned native VM. Target models are empty because each run uses
+explicit, audited `rpc_ssh_*` host/credential override params supplied at
+runtime. Handler IDs equal procedure IDs:
+
+| Procedure / handler | Purpose |
+|---|---|
+| `services.passbolt.export_secrets` | On the source Docker host, create `db.sql`, `gpg.tar`, and `jwt.tar` in a dedicated staging directory |
+| `services.passbolt.transfer_secrets` | From the source host, rsync staged artifacts directly to the target host and verify target-side checksums |
+| `services.passbolt.import_secrets` | On the target VM, import MariaDB data, extract GPG/JWT files, set `www-data` ownership and locked-down permissions, then run Passbolt migrate and healthcheck |
+| `services.passbolt.cleanup` | Remove dedicated source and target staging directories after operator-confirmed success |
+
+The normalizer validates every caller-supplied container name, DB name, env var
+name, host, user, port, and absolute path with strict allowlists, rejects broad
+or traversal paths, and records only metadata in the command fingerprint.
+Neither `netbox-rpc` nor `nms-backend` stores or returns database dump contents,
+GPG/JWT material, or DB passwords. The export procedure accepts DB credential
+environment variable names only; the backend reads those variables inside the DB
+container at execution time.
+
+Operator instructions live in
+[`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md).
 
 ### Minecraft stack SSH procedures
 
