@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pytest-asyncio requests jinja2 ruff
+      - run: pip install pytest pytest-asyncio requests jinja2 jsonschema ruff
       - run: ruff check netbox_rpc tests
       - run: python -m compileall netbox_rpc tests
       - run: pytest tests/ -q

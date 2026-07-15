@@ -496,6 +496,57 @@ be used autonomously on destructive procedures.
   every container, DB, env var, host, user, port, and path parameter; no real
   secret contents are accepted, returned, logged, or stored. Operator commands
   live in `docs/passbolt-migration-runbook.md`.
+- Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
+  migration `0049` (command rows in `0050`). All twelve are `effect="read"`,
+  `approval_required=False`, and target
+  `["netbox_fileserver.sambadomain", "virtualization.virtualmachine", "dcim.device"]`.
+  They are the observability half of the Samba catalog and drive the
+  `netbox-fileserver` observed-state sync; the write/lifecycle and user/group
+  halves land separately. Handler IDs are the procedure name with `samba.1` →
+  `samba_1` (e.g. `service.samba_1.config_read`); the handlers live in
+  nms-backend.
+  - `config_read` (30s) — `/etc/samba/smb.conf` content + sha256.
+  - `config_test` (30s) — `testparm -s` validation of the running config.
+  - `config_list_files` (60s) — enumerates `/etc/samba/**/*.conf` with size,
+    mtime, and per-file sha256. **Exempt** (backend-owned recursive walk + stat
+    + hash loop).
+  - `include_file_read` (30s) — reads ONE include file. Required `include_path`.
+  - `service_status` (30s) — active/sub/unit-file state for `smbd`, `nmbd`,
+    `winbind`, `samba-ad-dc`.
+  - `version` (30s) — `smbd -V`.
+  - `list_shares` (30s) — effective share definitions.
+  - `status_report` (30s) — `smbstatus --json`; `output_parser="json"`. Its
+    `output_schema` describes the **raw** Samba document: per
+    `source3/utils/status.c`, sections are emitted via `add_section_to_json()` →
+    `json_new_object()`, so `sessions`/`tcons`/`open_files`/`byte_range_locks`/
+    `notifies` are **objects keyed by id, not arrays**, and there is **no
+    top-level `locks` key** (`--locks` is a CLI flag). Sections are
+    flag-dependent, so none are required. The `result_schema` is the handler's
+    own envelope and flattens each section into an array.
+  - `domain_info` (60s) — `samba-tool domain info` + `domain level show`.
+  - `user_list` (60s) — directory usernames/SIDs/enabled state only.
+  - `group_list` (90s) — groups + members. **Exempt** (per-group member
+    expansion depends on prior command output).
+  - `share_acl_read` (30s) — `sharesec --view`. Required `share_name`.
+
+  **Security invariants.** Every procedure accepts the shared optional
+  `rpc_ssh_*` connection overrides; beyond those, the two procedure-specific
+  caller-supplied values are confined in *both* the `params_schema` and the
+  normalizer (`_normalize_samba_include_path` / `_normalize_samba_share_name`),
+  so pure-domain paths fail closed before
+  nms-backend repeats the checks: `include_path` must be a `.conf` file under
+  `/etc/samba` (no traversal, no shell metacharacters — enforced by regex **and**
+  a `PurePosixPath.is_relative_to` confinement check) and is forwarded as the
+  **resolved absolute path** (the command rows run `cat {include_path}`, so a
+  relative value would read relative to the backend cwd), and `share_name` must
+  match a safe charset whose first character is alphanumeric/underscore so it can
+  never be read as an option. Both normalizers `.strip()` before validating, so
+  surrounding whitespace is sanitized rather than propagated. The seed patterns
+  anchor with `(?![\s\S])` rather than `$` — `jsonschema` enforces `pattern` via
+  `re.search`, and Python's `$` matches *before* a single trailing newline, so a
+  `$`-anchored pattern would accept `"smb.conf\n"`. The `user_list` and
+  `domain_info` `result_schema`s contain no password/hash fields (asserted in
+  `tests/test_jobs_samba_normalization.py`).
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.

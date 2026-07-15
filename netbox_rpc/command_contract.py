@@ -106,6 +106,15 @@ EXEMPT_HANDLER_RATIONALE = {
         "Removes operator-approved staging directories on source and target hosts "
         "after a successful migration."
     ),
+    "service.samba_1.config_list_files": (
+        "Recursively enumerates /etc/samba/**/*.conf, stats each file, and "
+        "computes per-file sha256 values; the loop and path confinement are "
+        "backend-owned rather than a single fixed argv invocation."
+    ),
+    "service.samba_1.group_list": (
+        "Lists groups and then expands members for each discovered group; the "
+        "dynamic per-group member loop depends on previous command output."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."

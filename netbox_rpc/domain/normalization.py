@@ -54,6 +54,9 @@ from ..constants import (
     PTERODACTYL_WINGS_LOGS,
     PTERODACTYL_WINGS_RESTART,
     PTERODACTYL_WINGS_STATUS,
+    SAMBA_1_INCLUDE_FILE_READ,
+    SAMBA_1_PROCEDURE_NAMES,
+    SAMBA_1_SHARE_ACL_READ,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -151,6 +154,12 @@ _PASSBOLT_HOST_RE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
 _PASSBOLT_POSIX_USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
+_SAMBA_INCLUDE_FILE_RE = re.compile(
+    r"^(?!.*(?:^|/)\.\.(?:/|$))(?:/etc/samba/)?"
+    r"[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*\.conf$"
+)
+_SAMBA_SHARE_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@+-]{0,79}$")
+_SAMBA_CONF_ROOT = PurePosixPath("/etc/samba")
 # systemd unit-name allowlist charset for os.linux.proxmox.show_systemctl_services.
 # The first character must be alphanumeric/underscore so a value can never be
 # mistaken for a `systemctl` option (e.g. "--user"); "-", ".", ":" and "@" are
@@ -472,6 +481,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in PASSBOLT_PROCEDURE_NAMES:
         return _normalize_passbolt_migration_execution(execution, target)
+
+    if procedure_name in SAMBA_1_PROCEDURE_NAMES:
+        return _normalize_samba_1_read_execution(execution, target)
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
@@ -886,6 +898,82 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_samba_1_read_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize read-only Samba catalog procedures.
+
+    The backend handlers own Samba command execution and parsing; netbox-rpc
+    forwards only bounded, schema-shaped parameters. Caller-supplied path/share
+    values are revalidated here so pure-domain execution paths fail closed even
+    before nms-backend repeats the same confinement checks.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+        },
+    }
+
+    if procedure_name == SAMBA_1_INCLUDE_FILE_READ:
+        include_path = _normalize_samba_include_path(params.get("include_path"))
+        normalized["include_path"] = include_path
+        normalized["command_fingerprint"]["include_path"] = include_path
+
+    if procedure_name == SAMBA_1_SHARE_ACL_READ:
+        share_name = _normalize_samba_share_name(params.get("share_name"))
+        normalized["share_name"] = share_name
+        normalized["command_fingerprint"]["share_name"] = share_name
+
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_samba_include_path(raw_path: object) -> str:
+    value = str(raw_path or "").strip()
+    if (
+        not value
+        or len(value) > 255
+        or not _SAMBA_INCLUDE_FILE_RE.fullmatch(value)
+    ):
+        raise RPCExecutionError(
+            "include_path must be a .conf file under /etc/samba without traversal "
+            "or shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    path = PurePosixPath(value)
+    confined_path = path if path.is_absolute() else _SAMBA_CONF_ROOT / path
+    if (
+        ".." in confined_path.parts
+        or not confined_path.is_relative_to(_SAMBA_CONF_ROOT)
+        or confined_path == _SAMBA_CONF_ROOT
+    ):
+        raise RPCExecutionError(
+            "include_path must be confined under /etc/samba.",
+            code="RPC_PARAM_INVALID",
+        )
+    # Return the resolved absolute path, not the caller's raw value. The command
+    # rows run `cat {include_path}`, so returning a relative value would read the
+    # file relative to the backend process cwd instead of /etc/samba.
+    return str(confined_path)
+
+
+def _normalize_samba_share_name(raw_name: object) -> str:
+    share_name = str(raw_name or "").strip()
+    if not share_name or not _SAMBA_SHARE_NAME_RE.fullmatch(share_name):
+        raise RPCExecutionError(
+            "share_name must be a safe Samba share name without shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return share_name
 
 
 def _normalize_passbolt_migration_execution(

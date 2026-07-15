@@ -400,6 +400,72 @@ container at execution time.
 Operator instructions live in
 [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md).
 
+### `service.samba.1.*` — Samba file-server observability
+
+Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,
+`approval_required=False`) that observe a managed Samba file server; migration
+`0050` seeds their command rows. Target models are
+`netbox_fileserver.sambadomain`, `virtualization.virtualmachine`, and
+`dcim.device` — `target_models` is a plain content-type label list, so this
+creates no import or FK dependency on `netbox-fileserver`. Handler IDs are the
+procedure name with `samba.1` → `samba_1`; the handlers live in nms-backend.
+
+| Procedure | Timeout | Purpose |
+|---|---|---|
+| `service.samba.1.config_read` | 30s | `/etc/samba/smb.conf` content + sha256 |
+| `service.samba.1.config_test` | 30s | `testparm -s` validation of the running config |
+| `service.samba.1.config_list_files` | 60s | Enumerate `/etc/samba/**/*.conf` with size, mtime, sha256 |
+| `service.samba.1.include_file_read` | 30s | Read one include file (`include_path`) |
+| `service.samba.1.service_status` | 30s | active/sub/unit-file state for `smbd`, `nmbd`, `winbind`, `samba-ad-dc` |
+| `service.samba.1.version` | 30s | `smbd -V` |
+| `service.samba.1.list_shares` | 30s | Effective share definitions |
+| `service.samba.1.status_report` | 30s | `smbstatus --json` → sessions, tcons, open files |
+| `service.samba.1.domain_info` | 60s | `samba-tool domain info` + `domain level show` |
+| `service.samba.1.user_list` | 60s | Directory usernames, SIDs, enabled state |
+| `service.samba.1.group_list` | 90s | Groups and their members |
+| `service.samba.1.share_acl_read` | 30s | `sharesec --view` for one share (`share_name`) |
+
+`status_report` pins `output_parser="json"` with an `output_schema` describing
+the **raw** `smbstatus --json` document. Per Samba's `source3/utils/status.c`,
+each section is emitted by `add_section_to_json()` → `json_new_object()`, so
+`sessions`, `tcons`, `open_files`, `byte_range_locks`, and `notifies` are
+**objects keyed by id, not arrays** — and there is no top-level `locks` key
+(`--locks` is a CLI flag, not a JSON section). Which sections appear depends on
+the flags smbstatus was invoked with, so none are required. The handler's own
+`result_schema` flattens each section into an array, giving downstream consumers
+(the `netbox-fileserver` observed state) stable lists instead of id-keyed maps.
+
+`config_list_files` and `group_list` are the only exempt handlers in this family
+— the recursive stat/hash walk and the per-group member expansion are
+backend-orchestrated and cannot be reduced to fixed argv.
+
+Every procedure in this family also accepts the shared, optional `rpc_ssh_*`
+connection overrides (`rpc_ssh_host`, `rpc_ssh_port`, `rpc_ssh_credential_pk`,
+`rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking`), forwarded by
+`_copy_optional_ssh_overrides()` like the other SSH-backed families. Beyond
+those, only two procedure-specific params are caller-supplied, and both are
+confined **twice** — in the `params_schema` and again in the normalizer — so
+pure-domain execution paths fail closed before nms-backend repeats the checks:
+
+- `include_path` must be a `.conf` file under `/etc/samba`, rejected on traversal
+  or shell metacharacters by regex **and** a `PurePosixPath.is_relative_to`
+  confinement check. The normalizer forwards the **resolved absolute path**, not
+  the caller's raw value — the command rows run `cat {include_path}`, so a
+  relative value would otherwise read relative to the backend process cwd.
+- `share_name` must match a safe charset whose first character is
+  alphanumeric/underscore, so a value can never be read as a command option.
+
+Both normalizers `.strip()` before validating, so surrounding whitespace is
+sanitized rather than propagated downstream. The seed patterns deliberately
+anchor with `(?![\s\S])` instead of `$`: `jsonschema` enforces `pattern` with
+`re.search`, and Python's `$` matches *before* a single trailing newline, so a
+`$`-anchored pattern would accept `"smb.conf\n"`.
+
+These procedures never return credential material — the `user_list` and
+`domain_info` result schemas contain no password or hash fields, so the observed
+state persisted by `netbox-fileserver` satisfies its no-secrets-at-rest
+invariant.
+
 ### Minecraft stack SSH procedures
 
 Migration `0029` adds structured SSH fallback procedures for game nodes and
