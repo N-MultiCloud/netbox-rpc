@@ -497,12 +497,12 @@ be used autonomously on destructive procedures.
   secret contents are accepted, returned, logged, or stored. Operator commands
   live in `docs/passbolt-migration-runbook.md`.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
-  migration `0049` (command rows in `0050`). All twelve are `effect="read"`,
-  `approval_required=False`, and target
+  migration `0049` (command rows in `0050`). Samba config write/lifecycle
+  procedures are seeded by migration `0051` (command rows in `0052`). The twelve
+  read procedures are `effect="read"`, `approval_required=False`, and target
   `["netbox_fileserver.sambadomain", "virtualization.virtualmachine", "dcim.device"]`.
   They are the observability half of the Samba catalog and drive the
-  `netbox-fileserver` observed-state sync; the write/lifecycle and user/group
-  halves land separately. Handler IDs are the procedure name with `samba.1` →
+  `netbox-fileserver` observed-state sync. Handler IDs are the procedure name with `samba.1` →
   `samba_1` (e.g. `service.samba_1.config_read`); the handlers live in
   nms-backend.
   - `config_read` (30s) — `/etc/samba/smb.conf` content + sha256.
@@ -528,24 +528,52 @@ be used autonomously on destructive procedures.
   - `group_list` (90s) — groups + members. **Exempt** (per-group member
     expansion depends on prior command output).
   - `share_acl_read` (30s) — `sharesec --view`. Required `share_name`.
+  - `config_deploy` (120s, write) — writes `config_content` via stdin to a
+    temp candidate, runs `testparm` against the candidate, snapshots the
+    previous config, then activates + reloads. On any failure after the snapshot
+    is taken (activation, reload, timeout, or lost response), the backend must
+    restore the snapshot, re-validate and reload the restored config, and report
+    `stage`, `snapshot_id`, `activated`, `reloaded`, `rolled_back`, and
+    nullable `rollback_error`. **Never write smb.conf directly and validate
+    afterwards. Exempt** (stdin + validate/snapshot/activate/rollback
+    orchestration).
+  - `config_rollback` (60s, destructive, **approval required**) — restores a
+    backend-issued config snapshot and reloads, reporting lifecycle and
+    rollback-outcome fields where applicable. **Exempt**.
+  - `include_file_write` (60s, write) — writes one confined include file via
+    stdin, validates the full config, and activates atomically. Required
+    `include_path`, `content`. **Exempt**.
+  - `include_file_delete` (60s, destructive, **approval required**) — deletes
+    one confined include file with validation/rollback guardrails. **Exempt**.
+  - `share_upsert` (60s, write) — creates/updates one share from structured
+    fields only (`share_name`, `path`, booleans, principal lists, masks,
+    comment); no arbitrary Samba option map. **Exempt**.
+  - `share_delete` (60s, destructive, **approval required**) — deletes one safe
+    share definition with validation/rollback guardrails. **Exempt**.
+  - `service_control` (30s, write) — fixed argv `systemctl` action. `unit` enum
+    is `smbd`/`nmbd`/`winbind`/`samba-ad-dc`; `action` enum is
+    `start`/`stop`/`restart`/`reload`. No `RPCLinuxServiceAllowlist` rows.
 
   **Security invariants.** Every procedure accepts the shared optional
-  `rpc_ssh_*` connection overrides; beyond those, the two procedure-specific
-  caller-supplied values are confined in *both* the `params_schema` and the
-  normalizer (`_normalize_samba_include_path` / `_normalize_samba_share_name`),
-  so pure-domain paths fail closed before
-  nms-backend repeats the checks: `include_path` must be a `.conf` file under
-  `/etc/samba` (no traversal, no shell metacharacters — enforced by regex **and**
-  a `PurePosixPath.is_relative_to` confinement check) and is forwarded as the
-  **resolved absolute path** (the command rows run `cat {include_path}`, so a
-  relative value would read relative to the backend cwd), and `share_name` must
-  match a safe charset whose first character is alphanumeric/underscore so it can
-  never be read as an option. Both normalizers `.strip()` before validating, so
-  surrounding whitespace is sanitized rather than propagated. The seed patterns
-  anchor with `(?![\s\S])` rather than `$` — `jsonschema` enforces `pattern` via
-  `re.search`, and Python's `$` matches *before* a single trailing newline, so a
-  `$`-anchored pattern would accept `"smb.conf\n"`. The `user_list` and
-  `domain_info` `result_schema`s contain no password/hash fields (asserted in
+  `rpc_ssh_*` connection overrides; beyond those, caller-supplied values are
+  confined in *both* the `params_schema` and the normalizer, so pure-domain paths
+  fail closed before nms-backend repeats the checks. Reuse
+  `_normalize_samba_include_path` for write/delete include paths; it confines
+  `.conf` paths under `/etc/samba` and returns the **resolved absolute path**.
+  Reuse `_normalize_samba_share_name` for share names; it starts with a safe
+  alphanumeric/underscore character so it can never be read as an option. Config
+  bodies (`config_content`, include `content`) must never become argv; the
+  normalizer forwards content for backend stdin use and fingerprints sha256 +
+  byte count metadata. Before persistence/dispatch it scans every assignment's
+  smb.conf parameter name case-insensitively and whitespace-insensitively,
+  rejecting any name ending in `script`, `command`, or `action`, plus the
+  `preexec`/`postexec` family (`root preexec` runs as root). `include`
+  directives inside caller-supplied bodies must resolve under `/etc/samba`;
+  `include = registry` and unconfined paths such as `/tmp/evil.conf` are
+  rejected. The scan first joins smb.conf line-continuations (a physical line ending in `\\`, per Samba's `lib/util/tini.c`) into one logical line before splitting the parameter name, so a directive cannot be smuggled past the denylist by splitting its name across a backslash continuation (`root pree\\` / `xec = ...`). The seed patterns anchor with `(?![\s\S])` rather than `$` because
+  `jsonschema` enforces `pattern` via `re.search`, and Python's `$` matches
+  before a single trailing newline. The `user_list` and `domain_info`
+  `result_schema`s contain no password/hash fields (asserted in
   `tests/test_jobs_samba_normalization.py`).
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none

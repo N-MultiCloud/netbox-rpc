@@ -129,6 +129,20 @@ SAMBA_1_GROUP_LIST = "service.samba.1.group_list"
 SAMBA_1_GROUP_LIST_HANDLER = "service.samba_1.group_list"
 SAMBA_1_SHARE_ACL_READ = "service.samba.1.share_acl_read"
 SAMBA_1_SHARE_ACL_READ_HANDLER = "service.samba_1.share_acl_read"
+SAMBA_1_CONFIG_DEPLOY = "service.samba.1.config_deploy"
+SAMBA_1_CONFIG_DEPLOY_HANDLER = "service.samba_1.config_deploy"
+SAMBA_1_CONFIG_ROLLBACK = "service.samba.1.config_rollback"
+SAMBA_1_CONFIG_ROLLBACK_HANDLER = "service.samba_1.config_rollback"
+SAMBA_1_INCLUDE_FILE_WRITE = "service.samba.1.include_file_write"
+SAMBA_1_INCLUDE_FILE_WRITE_HANDLER = "service.samba_1.include_file_write"
+SAMBA_1_INCLUDE_FILE_DELETE = "service.samba.1.include_file_delete"
+SAMBA_1_INCLUDE_FILE_DELETE_HANDLER = "service.samba_1.include_file_delete"
+SAMBA_1_SHARE_UPSERT = "service.samba.1.share_upsert"
+SAMBA_1_SHARE_UPSERT_HANDLER = "service.samba_1.share_upsert"
+SAMBA_1_SHARE_DELETE = "service.samba.1.share_delete"
+SAMBA_1_SHARE_DELETE_HANDLER = "service.samba_1.share_delete"
+SAMBA_1_SERVICE_CONTROL = "service.samba.1.service_control"
+SAMBA_1_SERVICE_CONTROL_HANDLER = "service.samba_1.service_control"
 SAMBA_1_PROCEDURE_NAMES = frozenset(
     {
         SAMBA_1_CONFIG_READ,
@@ -143,6 +157,13 @@ SAMBA_1_PROCEDURE_NAMES = frozenset(
         SAMBA_1_USER_LIST,
         SAMBA_1_GROUP_LIST,
         SAMBA_1_SHARE_ACL_READ,
+        SAMBA_1_CONFIG_DEPLOY,
+        SAMBA_1_CONFIG_ROLLBACK,
+        SAMBA_1_INCLUDE_FILE_WRITE,
+        SAMBA_1_INCLUDE_FILE_DELETE,
+        SAMBA_1_SHARE_UPSERT,
+        SAMBA_1_SHARE_DELETE,
+        SAMBA_1_SERVICE_CONTROL,
     }
 )
 

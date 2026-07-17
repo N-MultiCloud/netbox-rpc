@@ -400,11 +400,12 @@ container at execution time.
 Operator instructions live in
 [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md).
 
-### `service.samba.1.*` — Samba file-server observability
+### `service.samba.1.*` — Samba file-server observability and config lifecycle
 
 Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,
 `approval_required=False`) that observe a managed Samba file server; migration
-`0050` seeds their command rows. Target models are
+`0050` seeds their command rows. Migration `0051` adds seven config
+write/lifecycle procedures and migration `0052` adds their command rows. Target models are
 `netbox_fileserver.sambadomain`, `virtualization.virtualmachine`, and
 `dcim.device` — `target_models` is a plain content-type label list, so this
 creates no import or FK dependency on `netbox-fileserver`. Handler IDs are the
@@ -424,6 +425,13 @@ procedure name with `samba.1` → `samba_1`; the handlers live in nms-backend.
 | `service.samba.1.user_list` | 60s | Directory usernames, SIDs, enabled state |
 | `service.samba.1.group_list` | 90s | Groups and their members |
 | `service.samba.1.share_acl_read` | 30s | `sharesec --view` for one share (`share_name`) |
+| `service.samba.1.config_deploy` | 120s | Write smb.conf via temp file, `testparm`, snapshot, activate, reload, and post-snapshot rollback |
+| `service.samba.1.config_rollback` | 60s | Restore a backend-issued config snapshot with lifecycle/rollback evidence; destructive, approval required |
+| `service.samba.1.include_file_write` | 60s | Write one confined include file via stdin and validate |
+| `service.samba.1.include_file_delete` | 60s | Delete one confined include file; destructive, approval required |
+| `service.samba.1.share_upsert` | 60s | Create or update one share from structured fields |
+| `service.samba.1.share_delete` | 60s | Delete one share definition; destructive, approval required |
+| `service.samba.1.service_control` | 30s | Enum-constrained systemctl action for one Samba unit |
 
 `status_report` pins `output_parser="json"` with an `output_schema` describing
 the **raw** `smbstatus --json` document. Per Samba's `source3/utils/status.c`,
@@ -435,17 +443,27 @@ the flags smbstatus was invoked with, so none are required. The handler's own
 `result_schema` flattens each section into an array, giving downstream consumers
 (the `netbox-fileserver` observed state) stable lists instead of id-keyed maps.
 
-`config_list_files` and `group_list` are the only exempt handlers in this family
-— the recursive stat/hash walk and the per-group member expansion are
-backend-orchestrated and cannot be reduced to fixed argv.
+`config_list_files`, `group_list`, and the config-editing write procedures are
+exempt handlers. Their recursive reads, per-group expansion, stdin content,
+temp-file validation, snapshots, atomic activation, reloads, and rollback
+semantics are backend-orchestrated and cannot be reduced to fixed argv.
+For `config_deploy`, any failure after the active config snapshot is taken
+(activation, reload, timeout, or lost response) must make the backend restore
+the snapshot, re-validate and reload the restored config, and report the
+`stage`, `snapshot_id`, `activated`, `reloaded`, `rolled_back`, and nullable
+`rollback_error` fields. `config_rollback` reports the same rollback-outcome
+fields where applicable.
+`service_control` is fixed argv because `unit` is one of `smbd`, `nmbd`,
+`winbind`, or `samba-ad-dc`, and `action` is one of `start`, `stop`, `restart`,
+or `reload` in both schema and normalizer.
 
 Every procedure in this family also accepts the shared, optional `rpc_ssh_*`
 connection overrides (`rpc_ssh_host`, `rpc_ssh_port`, `rpc_ssh_credential_pk`,
 `rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking`), forwarded by
-`_copy_optional_ssh_overrides()` like the other SSH-backed families. Beyond
-those, only two procedure-specific params are caller-supplied, and both are
-confined **twice** — in the `params_schema` and again in the normalizer — so
-pure-domain execution paths fail closed before nms-backend repeats the checks:
+`_copy_optional_ssh_overrides()` like the other SSH-backed families.
+Procedure-specific params are confined in the `params_schema` and again in the
+normalizer, so pure-domain execution paths fail closed before nms-backend
+repeats the checks:
 
 - `include_path` must be a `.conf` file under `/etc/samba`, rejected on traversal
   or shell metacharacters by regex **and** a `PurePosixPath.is_relative_to`
@@ -454,6 +472,19 @@ pure-domain execution paths fail closed before nms-backend repeats the checks:
   relative value would otherwise read relative to the backend process cwd.
 - `share_name` must match a safe charset whose first character is
   alphanumeric/underscore, so a value can never be read as a command option.
+- `config_content` and include-file `content` are never argv. They are passed to
+  backend handlers for stdin use, while the command fingerprint stores sha256 and
+  byte-count metadata. Before persistence/dispatch the normalizer scans every
+  assignment's parameter name case-insensitively and whitespace-insensitively,
+  rejecting command-executing Samba directives: any name ending in `script`,
+  `command`, or `action`, plus the `preexec`/`postexec` family. `include`
+  directives inside these bodies must resolve under `/etc/samba`;
+  `include = registry` and unconfined paths such as `/tmp/evil.conf` are
+  rejected. The scan first joins smb.conf line-continuations (a physical line ending in `\\`, per Samba's `lib/util/tini.c`) into one logical line before splitting the parameter name, so a directive cannot be smuggled past the denylist by splitting its name across a backslash continuation (`root pree\\` / `xec = ...`).
+- `share_upsert` accepts allowlisted fields only (`path`, booleans, principal
+  lists, masks, and comment), not arbitrary Samba option names or command text.
+- `config_rollback`, `include_file_delete`, and `share_delete` are
+  `effect="destructive"` and `approval_required=True`.
 
 Both normalizers `.strip()` before validating, so surrounding whitespace is
 sanitized rather than propagated downstream. The seed patterns deliberately
