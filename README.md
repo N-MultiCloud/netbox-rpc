@@ -34,6 +34,8 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_listeners`
 - `os.linux.ubuntu.24.ookla.check_tls`
 - `os.linux.ubuntu.24.ookla.check_firewall`
+- `os.linux.ubuntu.24.{status,start,stop,reload,enable,disable}_service` and
+  `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb` service
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`
