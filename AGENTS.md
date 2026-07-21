@@ -324,6 +324,13 @@ be used autonomously on destructive procedures.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
+- InfluxDB service management is provided by the generic Ubuntu 24 systemd
+  procedures through the seeded `RPCLinuxServiceAllowlist` row
+  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
+  `dcim.device` and `virtualization.virtualmachine`. Do not add
+  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
+  a new typed procedure if a future operation cannot be modeled as service
+  lifecycle control.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.
