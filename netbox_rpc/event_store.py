@@ -270,6 +270,92 @@ def record_execution_cancelled(
         )
 
 
+def record_execution_requested(
+    execution: RPCExecution,
+    *,
+    requested_by_id: object | None = None,
+) -> None:
+    if requested_by_id is None:
+        requested_by = getattr(execution, "requested_by", None)
+        requested_by_id = getattr(requested_by, "pk", None) or getattr(
+            execution, "requested_by_id", None
+        )
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionRequested(requested_by_id=requested_by_id),
+        )
+
+
+def record_approval_requested(
+    execution: RPCExecution,
+    *,
+    snapshot_hash: str,
+    expires_at: object | None = None,
+    requested_by_id: object | None = None,
+) -> None:
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ApprovalRequested(
+                snapshot_hash=snapshot_hash,
+                expires_at=expires_at,
+                requested_by_id=requested_by_id,
+            ),
+        )
+
+
+def record_execution_approved(
+    execution: RPCExecution,
+    *,
+    approved_by_id: object,
+    snapshot_hash: str,
+    reason: str = "",
+) -> None:
+    decided_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionApproved(
+                approved_by_id=approved_by_id,
+                snapshot_hash=snapshot_hash,
+                decided_at=decided_at,
+                reason=reason,
+            ),
+        )
+
+
+def record_execution_rejected(
+    execution: RPCExecution,
+    *,
+    rejected_by_id: object,
+    reason: str = "",
+) -> None:
+    decided_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionRejected(
+                rejected_by_id=rejected_by_id,
+                decided_at=decided_at,
+                reason=reason,
+            ),
+        )
+
+
+def record_execution_expired(
+    execution: RPCExecution,
+    *,
+    reason: str = "",
+) -> None:
+    expired_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionExpired(expired_at=expired_at, reason=reason),
+        )
+
+
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
     ok = bool(response.get("ok"))
     result = redact_event_data(
