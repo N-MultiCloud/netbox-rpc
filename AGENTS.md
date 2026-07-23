@@ -196,6 +196,39 @@ under the `_intent`-prefixed keys so this attribution stays correct.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
+### Two-person approval workflow — foundation (#164)
+
+The execution aggregate carries an additive **approval-workflow** surface (the
+foundation of the P0 two-person-approval epic #163). This is infrastructure
+only — it does **not** yet change behaviour; routing `approval_required`
+procedures through it (enforcement, API/UI, signed dispatch leases) is the paired
+work in #165–#168.
+
+- **States** (`domain.value_objects.ExecutionStatus`): `requested`,
+  `pending_approval`, `approved`, `rejected`, `expired` precede the existing
+  `queued → running → …` lifecycle. `rejected`/`expired` are terminal
+  (`ExecutionStatus.approval_terminal()`); the pre-existing direct flow still
+  starts at `queued`.
+- **Events** (`domain.events`): `ExecutionRequested`, `ApprovalRequested`,
+  `ExecutionApproved`, `ExecutionRejected`, `ExecutionExpired`. As always,
+  status folds only from the append-only stream via `projection.apply()`; all
+  transitions go through `event_store` (never mutate status directly).
+- **Immutable snapshot** (`models.RPCApprovalRequest`, one-to-one with the
+  execution): pins procedure id/version/effect, target snapshot hash, normalized
+  params + command fingerprint, backend, credential-policy *reference*,
+  requester, expiry, and stream version, plus a tamper-evident `payload_hash`
+  over the protected fields (`compute_approval_snapshot_hash`). It is append-only
+  like `RPCExecutionEvent` (save-after-create and delete raise; execution-cascade
+  still works), stores references not secrets, and `matches_current()` detects a
+  snapshot-invalidating drift.
+- **Aggregate transitions** (`domain.aggregate`): `request` → `request_approval`
+  (never enqueues) → `approve` / `reject` / `expire`. `approve`/`reject` enforce
+  **segregation of duties** (the requester cannot decide their own request) and
+  `approve` re-checks the snapshot; the decision is serialised with a
+  `select_for_update` row lock + in-transaction status recheck so
+  double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
+  to a single deterministic event.
+
 ## Intents
 
 `RPCIntent` groups one or more `RPCProcedure`s and declares *what* needs to be

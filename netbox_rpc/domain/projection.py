@@ -5,12 +5,17 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from .events import (
+    ApprovalRequested,
     BackendEventRecorded,
     DomainEvent,
+    ExecutionApproved,
     ExecutionCancelled,
     ExecutionEnqueueFailed,
+    ExecutionExpired,
     ExecutionFailed,
     ExecutionQueued,
+    ExecutionRejected,
+    ExecutionRequested,
     ExecutionStarted,
     ExecutionSucceeded,
     JobEnqueued,
@@ -72,6 +77,28 @@ class ProjectionState:
 
 
 def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
+    if isinstance(event, ExecutionRequested):
+        return replace(state, status=ExecutionStatus.REQUESTED.value)
+    if isinstance(event, ApprovalRequested):
+        return replace(state, status=ExecutionStatus.PENDING_APPROVAL.value)
+    if isinstance(event, ExecutionApproved):
+        return replace(state, status=ExecutionStatus.APPROVED.value)
+    if isinstance(event, ExecutionRejected):
+        return replace(
+            state,
+            status=ExecutionStatus.REJECTED.value,
+            error_code="",
+            error_message="",
+            finished_at=_coerce_datetime(event.decided_at),
+        )
+    if isinstance(event, ExecutionExpired):
+        return replace(
+            state,
+            status=ExecutionStatus.EXPIRED.value,
+            error_code="",
+            error_message="",
+            finished_at=_coerce_datetime(event.expired_at),
+        )
     if isinstance(event, ExecutionQueued):
         return replace(state, status=ExecutionStatus.QUEUED.value)
     if isinstance(event, ExecutionStarted):

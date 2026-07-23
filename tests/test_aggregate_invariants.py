@@ -56,12 +56,14 @@ def test_cannot_transition_from_terminal_status(status: str) -> None:
         aggregate.fail("boom", "RPC_BOOM")
 
 
-def test_cancel_only_when_queued() -> None:
+def test_cancel_only_when_queued_or_pending_approval() -> None:
+    # A running execution can no longer be cancelled; queued and (since #164)
+    # pending-approval executions can.
     aggregate = RPCExecutionAggregate(FakeExecution(status="running"))
 
     with pytest.raises(
         RPCExecutionAggregateError,
-        match="queued execution can be cancelled",
+        match="queued or pending-approval execution can be cancelled",
     ):
         aggregate.cancel()
 

@@ -42,6 +42,13 @@ NOW = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 def test_event_registry_contains_every_transition_type() -> None:
     assert set(EVENT_TYPES) == {
+        # Approval workflow (issue #164).
+        "ExecutionRequested",
+        "ApprovalRequested",
+        "ExecutionApproved",
+        "ExecutionRejected",
+        "ExecutionExpired",
+        # Existing execution lifecycle.
         "ExecutionQueued",
         "ExecutionStarted",
         "ParametersNormalized",
