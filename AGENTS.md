@@ -227,8 +227,9 @@ done; the procedures (with their commands) declare *how*. See
   ordered `intent_procedures` and the form/serializer reconcile the through rows
   **before** the model save on the update path (Django never fires `m2m_changed`
   for a through-M2M with extra fields).
-- The plugin's real floor is NetBox **4.6.0** (`min_version = "4.6.0"`): the
-  migration graph depends on `extras.0138` (a 4.6 migration).
+- The plugin's real floor is NetBox **4.5.8** (`min_version = "4.5.8"`): the
+  migration graph depends only on NetBox migration anchors present in both
+  NetBox 4.5.8 and 4.6.x.
 
 ## LLM Agent Safety Guardrails
 
