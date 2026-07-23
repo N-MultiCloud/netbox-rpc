@@ -1023,7 +1023,7 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    assert len(extras_dependencies) == 4
+    assert len(extras_dependencies) == 5
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
