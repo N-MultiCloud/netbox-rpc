@@ -38,10 +38,10 @@ _COMMAND_STEPS_BY_HANDLER_ID = {
     "service.samba_1.config_deploy": representative(
         "samba-config-deploy",
         (
-            "Backend writes smb.conf content via stdin to a temp path, validates "
-            "the candidate with testparm, snapshots the active config, activates "
-            "the candidate, reloads Samba, and restores the snapshot on any "
-            "post-snapshot activation, reload, timeout, or lost-response failure."
+            "Backend writes smb.conf via stdin to a temp path, validates with "
+            "testparm, snapshots the active config, activates the candidate, "
+            "reloads Samba, and restores the snapshot on any post-snapshot "
+            "failure."
         ),
     ),
     "service.samba_1.config_rollback": representative(

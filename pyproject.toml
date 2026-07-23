@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-rpc"
-version = "0.1.5"
+version = "0.1.6"
 requires-python = ">=3.12.0"
 dependencies = [
     "jsonschema>=4.0",
@@ -21,6 +21,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: Django",
+    "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
     "Intended Audience :: System Administrators",
     "Programming Language :: Python :: 3 :: Only",
@@ -30,13 +31,19 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-nms = ["netbox-nms>=0.1.2,<0.2.0"]
+nms = ["netbox-nms>=0.1.8,<0.2.0"]
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["netbox_rpc*"]
+
+[tool.setuptools.package-data]
+# include-package-data only picks up VCS/MANIFEST-tracked files for sdists;
+# wheels need the template globs declared explicitly or /plugins/rpc/ fails
+# with TemplateDoesNotExist on non-editable installs.
+netbox_rpc = ["templates/netbox_rpc/*.html"]
 
 [tool.pytest.ini_options]
 # Put the repository root on sys.path so `pytest tests/` (the console-script

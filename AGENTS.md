@@ -227,8 +227,15 @@ done; the procedures (with their commands) declare *how*. See
   ordered `intent_procedures` and the form/serializer reconcile the through rows
   **before** the model save on the update path (Django never fires `m2m_changed`
   for a through-M2M with extra fields).
-- The plugin's real floor is NetBox **4.6.0** (`min_version = "4.6.0"`): the
-  migration graph depends on `extras.0138` (a 4.6 migration).
+- The supported NetBox range is **4.5.8 through 4.6.x**
+  (`min_version = "4.5.8"`, `max_version = "4.6.99"`), covering Django 5.2 and
+  Django 6.0. External `extras` dependencies are intentionally anchored to
+  `extras.0134_owner`, the final NetBox 4.5.8 migration and an ancestor in
+  4.6.x. Do not regenerate them against a newer NetBox migration leaf without
+  preserving the 4.5.8 floor.
+- NetBox APIs used by the plugin must exist on 4.5.8. Guard or provide a
+  fallback before adopting a 4.6-only model action, declarative UI/layout, or
+  serializer resolver API.
 
 ## LLM Agent Safety Guardrails
 
@@ -731,7 +738,8 @@ Two tiers (see `docs/architecture.md` → Testing):
    the rebuild oracle, the append-only ledger, the command handlers, and the
    command-only REST API. `.gitea/workflows/integration.yml` runs them against
    the self-hosted NetBox; `.github/workflows/test.yml` `integration` job runs
-   them portably with a Postgres service. Config: `tests/ci/netbox_configuration.py`.
+   them portably with a Postgres service against NetBox 4.5.8 and 4.6.5.
+   Config: `tests/ci/netbox_configuration.py`.
 
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.

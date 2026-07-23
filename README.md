@@ -14,6 +14,21 @@ guarded layer. `netbox-nms` is one supported integration: when installed,
 existing nms-backend dispatch URL, auth headers, TLS verification flag, and
 empty `{}` POST body.
 
+## Compatibility
+
+`netbox-rpc` supports NetBox **4.5.8 through 4.6.x**. The plugin declares
+`min_version = "4.5.8"` and `max_version = "4.6.99"`, covering the Django 5.2
+runtime shipped by NetBox 4.5.x and the Django 6.0 runtime shipped by NetBox
+4.6.x. Its external `extras` migration dependencies are anchored to
+`0134_owner`, the final `extras` migration in NetBox 4.5.8 and an ancestor of
+the 4.6.x migration graph.
+
+`netbox-nms` remains optional: fresh installs have no `netbox_nms` migration
+dependency, while deployments that install it retain the guarded runtime
+adapter. The `nms` extra installs `netbox-nms>=0.1.8,<0.2.0`; NMS integration
+on NetBox 4.5.x requires netbox-nms 0.1.8 or newer because that release
+retargeted its migration dependencies to the NetBox 4.5.8-safe migration graph.
+
 The procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
@@ -747,6 +762,8 @@ behavior — `event_store`, the rebuild oracle, the append-only ledger, the
 command handlers, and the command-only REST API — and runs in the
 `integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
 Postgres-service) workflows using `tests/ci/netbox_configuration.py`.
+The fail-closed Gitea compatibility job and the portable GitHub integration job
+both run this DB-backed suite against NetBox 4.5.8 and 4.6.5.
 
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is

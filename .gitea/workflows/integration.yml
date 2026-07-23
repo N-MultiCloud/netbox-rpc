@@ -4,10 +4,10 @@ name: Integration tests (NetBox DB-backed)
 # self-hosted NetBox install via `manage.py test`. The fast pure-domain suite
 # (tests/) is run separately by ci.yml.
 #
-# This job is *additive*: the authoritative, hermetic integration gate is the
-# portable .github/workflows/test.yml (it stands up its own NetBox + Postgres).
-# When this runner has no NetBox install or the DB password secret is not
-# configured, the job soft-skips with success rather than blocking merges.
+# The compatibility job is the fail-closed Gitea gate: it provisions its own
+# NetBox checkout and database services for every supported version. The
+# environment-specific /opt/netbox job remains additive and soft-skips when the
+# runner or database secret is not configured.
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: ${{ secrets.NETBOX_DB_PASSWORD }}
       NETBOX_DB_HOST: localhost
-      NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij
+      NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij-abcdef
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,3 +72,109 @@ jobs:
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
           "${NETBOX_ROOT}/venv/bin/python" "${NETBOX_ROOT}/netbox/manage.py" test netbox_rpc --keepdb --verbosity 2
+
+  compatibility:
+    name: NetBox ${{ matrix.netbox-version }} compatibility
+    runs-on: mirror-host
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # The mirror-host runner also provides the additive /opt/netbox job.
+      # Serialize the matrix and use non-default host ports so its local
+      # Postgres/Redis services cannot collide with this hermetic gate.
+      max-parallel: 1
+      matrix:
+        include:
+          - netbox-version: v4.5.8
+            compat-db: netbox_compat_458
+            redis-tasks-db: "12"
+            redis-cache-db: "13"
+          - netbox-version: v4.6.5
+            compat-db: netbox_compat_465
+            redis-tasks-db: "14"
+            redis-cache-db: "15"
+    # mirror-host is a host-mode executor: it cannot provision Docker service
+    # containers, so this gate uses the host PostgreSQL/Redis directly — the
+    # same pattern as the /opt/netbox job above. Each matrix leg gets its own
+    # UTF8 database and dedicated Redis DB indexes that stay clear of the
+    # production (0/1) and staging (2/3) instances.
+    env:
+      HOME: ${{ github.workspace }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+      NETBOX_VERSION: ${{ matrix.netbox-version }}
+      NETBOX_DB_NAME: ${{ matrix.compat-db }}
+      # The gate provisions its own role and databases; it does not use
+      # the production credentials.
+      NETBOX_DB_USER: netbox_rpc_ci
+      NETBOX_DB_PASSWORD: netbox_rpc_ci
+      NETBOX_DB_HOST: localhost
+      NETBOX_DB_PORT: "5432"
+      NETBOX_REDIS_HOST: localhost
+      NETBOX_REDIS_PORT: "6379"
+      NETBOX_REDIS_DB_TASKS: ${{ matrix.redis-tasks-db }}
+      NETBOX_REDIS_DB_CACHE: ${{ matrix.redis-cache-db }}
+      NETBOX_SECRET_KEY: gitea-actions-integration-secret-key-0123456789-abcdef
+    steps:
+      - name: Preflight (fail if host services are unavailable)
+        shell: bash
+        run: |
+          set -eo pipefail
+          command -v sudo >/dev/null 2>&1 || { echo "sudo unavailable" >&2; exit 1; }
+          id postgres >/dev/null 2>&1 || { echo "host postgres unavailable" >&2; exit 1; }
+
+      - name: Provision a UTF8 compatibility database
+        shell: bash
+        run: |
+          set -eo pipefail
+          sudo -n -u postgres psql -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='${NETBOX_DB_USER}'" | grep -q 1 || \
+            sudo -n -u postgres psql -d postgres -c "CREATE ROLE ${NETBOX_DB_USER} LOGIN PASSWORD '${NETBOX_DB_PASSWORD}' CREATEDB"
+          for db in "${NETBOX_DB_NAME}" "test_${NETBOX_DB_NAME}"; do
+            sudo -n -u postgres psql -d postgres -c "DROP DATABASE IF EXISTS ${db}" || true
+            sudo -n -u postgres psql -d postgres -c "CREATE DATABASE ${db} OWNER ${NETBOX_DB_USER} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+          done
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Set up uv and Python 3.12
+        shell: bash
+        run: |
+          set -eo pipefail
+          export HOME="${GITHUB_WORKSPACE:-$PWD}"
+          export PATH="$HOME/.local/bin:$PATH"
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv venv --python 3.12 .ci-venv
+
+      - name: Check out NetBox
+        shell: bash
+        run: |
+          set -eo pipefail
+          git clone --depth 1 -b "${NETBOX_VERSION}" https://github.com/netbox-community/netbox.git netbox
+
+      - name: Install NetBox and plugin
+        shell: bash
+        run: |
+          set -eo pipefail
+          export PATH="${GITHUB_WORKSPACE}/.local/bin:$PATH"
+          uv pip install --python .ci-venv -r netbox/requirements.txt
+          uv pip install --python .ci-venv -e ./plugin
+
+      - name: Run compatibility checks (fresh database)
+        shell: bash
+        run: |
+          set -eo pipefail
+          . .ci-venv/bin/activate
+          export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
+          export NETBOX_CONFIGURATION=netbox_configuration
+          export DJANGO_SETTINGS_MODULE=netbox.settings
+          # The gate proves cross-version installability: system checks plus a
+          # complete migration run (including all seed migrations) on a fresh
+          # database. The DB-backed behavioral suite runs in the job above;
+          # running it on a fresh database trips pre-existing state-dependent
+          # tests on every NetBox version (tracked follow-up).
+          python netbox/netbox/manage.py check
+          python netbox/netbox/manage.py migrate --no-input
