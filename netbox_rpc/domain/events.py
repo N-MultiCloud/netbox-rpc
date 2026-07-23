@@ -532,6 +532,60 @@ class ExecutionExpired:
         )
 
 
+@dataclass(frozen=True)
+class DispatchLeaseIssued:
+    """Audit event (#168): a one-time signed dispatch lease was minted for a
+    just-claimed execution. Records the nonce, key lineage, stream version,
+    audience, and expiry — references only, never the signature or any secret.
+    Audit-only: it does not advance the execution status."""
+
+    nonce: str = ""
+    key_id: str = ""
+    key_version: int = 1
+    stream_version: int = 0
+    audience: str = ""
+    expires_at: Any = None
+    envelope_version: int = 1
+
+    EVENT_NAME: ClassVar[str] = "DispatchLeaseIssued"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "info"
+
+    @property
+    def message(self) -> str:
+        return "Signed dispatch lease issued."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        return {
+            "nonce": self.nonce,
+            "key_id": self.key_id,
+            "key_version": self.key_version,
+            "stream_version": self.stream_version,
+            "audience": self.audience,
+            "expires_at": _serialize_datetime(self.expires_at),
+            "envelope_version": self.envelope_version,
+        }
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> DispatchLeaseIssued:
+        return cls(
+            nonce=str(data.get("nonce") or ""),
+            key_id=str(data.get("key_id") or ""),
+            key_version=int(data.get("key_version") or 1),
+            stream_version=int(data.get("stream_version") or 0),
+            audience=str(data.get("audience") or ""),
+            expires_at=data.get("expires_at"),
+            envelope_version=int(data.get("envelope_version") or 1),
+        )
+
+
 DomainEvent = (
     ExecutionRequested
     | ApprovalRequested
@@ -542,6 +596,7 @@ DomainEvent = (
     | ExecutionStarted
     | ParametersNormalized
     | JobEnqueued
+    | DispatchLeaseIssued
     | BackendEventRecorded
     | ExecutionSucceeded
     | ExecutionFailed
@@ -561,6 +616,7 @@ EVENT_TYPES = {
         ExecutionStarted,
         ParametersNormalized,
         JobEnqueued,
+        DispatchLeaseIssued,
         BackendEventRecorded,
         ExecutionSucceeded,
         ExecutionFailed,

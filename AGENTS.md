@@ -263,6 +263,36 @@ work in #165–#168.
   callers proceed — so enforcement is inert until the paired backend advertises
   a manifest (prod-safe; the current backend advertises none). Capability tests
   that create executions must mock `capabilities.fetch_backend_capabilities`.
+- **One-time signed dispatch leases (#168)**: `dispatch_lease.py` mints a
+  short-lived **ed25519-signed** dispatch lease after the atomic *queued →
+  claimed* (`start()`) transition and hands it to the paired `netbox-rpc-backend`
+  (verifier, nms-backend#583) in the `/rpc/executions/{id}/run` body. The
+  `LeaseClaims` envelope (Pydantic v2, `extra="forbid"`, all fields bounded)
+  binds execution id, `stream_version`, one-time `nonce`, `audience`, handler
+  contract + `effect`, `contract_hash` (the **same** value #167 verifies),
+  target/params fingerprints, credential-policy *reference*, requester/approver,
+  key `(key_id, key_version)` lineage, and a short expiry — **references and
+  hashes only, never a secret or exception chain**, and never trusted as command
+  input. `derive_command_contract_hash()` (#167) is reused so a lease and a
+  capability manifest agree by construction on what will run. `verify_dispatch_lease`
+  is the shared reference verifier (fail-closed on downgrade / unknown key
+  lineage / bad signature / wrong audience / expiry / execution-stream-contract
+  drift / replayed nonce). Issuance is audited as the **audit-only**
+  `DispatchLeaseIssued` domain event (does not advance status). **Nonce
+  ownership:** the issuer generates + ledgers the nonce; the verifier owns the
+  consumed-nonce (accept-once) store. **Graceful degradation / prod-safe:** with
+  no signing key configured (current prod), `issue_dispatch_lease` returns
+  `None`, the worker POSTs `{}` byte-for-byte as before (ID-only dispatch), and
+  leases stay inert until an operator configures a key *and* the backend
+  advertises verification (rollout mirrors #167). Keys, audience, and TTL come
+  from `PLUGINS_CONFIG["netbox_rpc"]` (`dispatch_lease_signing_keys` /
+  `dispatch_lease_audience` / `dispatch_lease_ttl_seconds`). Threat model, ADR,
+  and rotation/rollback/retirement ops live in
+  [`docs/dispatch-lease.md`](docs/dispatch-lease.md); the deterministic
+  cross-repo contract fixture (accept-once + reject replay/tamper/wrong-audience/
+  lineage) is `netbox_rpc/tests/fixtures/dispatch_lease/`. Tests that mint a
+  lease patch `dispatch_lease._plugin_setting`; crypto/DB-backed tests live in
+  the integration tier (`cryptography` + pydantic are not in the pure-domain env).
 
 ## Intents
 

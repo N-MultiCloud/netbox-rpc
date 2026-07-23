@@ -197,6 +197,38 @@ def mark_execution_running(execution: RPCExecution) -> None:
         _append_and_project(execution, domain_events.ExecutionStarted(started_at=now))
 
 
+def record_dispatch_lease_issued(
+    execution: RPCExecution,
+    *,
+    nonce: str,
+    key_id: str,
+    key_version: int,
+    stream_version: int,
+    audience: str,
+    expires_at: Any,
+    envelope_version: int,
+) -> None:
+    """Append the audit event for a minted signed dispatch lease (#168).
+
+    References only — the nonce, key lineage, stream version, audience, and
+    expiry. Never the signature or any secret; ``redact_event_data`` bounds the
+    payload like every other ledger event.
+    """
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.DispatchLeaseIssued(
+                nonce=nonce,
+                key_id=key_id,
+                key_version=key_version,
+                stream_version=stream_version,
+                audience=audience,
+                expires_at=expires_at,
+                envelope_version=envelope_version,
+            ),
+        )
+
+
 def mark_execution_failed(
     execution: RPCExecution,
     message: str,

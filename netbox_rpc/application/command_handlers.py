@@ -190,7 +190,12 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
             jobs._hash_json(normalized.get("command_fingerprint")),
         )
 
-        response = jobs._call_backend(target, execution)
+        # #168: mint a one-time signed dispatch lease bound to this just-claimed
+        # execution + current stream version. Graceful: ``None`` when no signing
+        # key is configured, so dispatch stays ID-only (byte-for-byte as before).
+        lease = _issue_dispatch_lease(execution, aggregate, normalized)
+
+        response = jobs._call_backend(target, execution, lease=lease)
         aggregate.record_backend_response(response)
     except Exception as exc:
         code = getattr(exc, "code", "RPC_EXECUTION_FAILED")
@@ -199,6 +204,63 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         except RPCExecutionAggregateError:
             pass
         raise
+
+
+def _current_stream_version(execution: object) -> int:
+    """The event-stream version at issuance — the sequence of the most recent
+    (pre-lease) event. Bounds the lease to a specific point in the stream so a
+    replay against an advanced stream is caught."""
+    events = getattr(execution, "events", None)
+    if events is None:
+        return 0
+    latest = events.order_by("-sequence").values_list("sequence", flat=True).first()
+    return int(latest or 0)
+
+
+def _credential_policy_reference(normalized: dict, execution: object) -> str:
+    """A bounded, non-secret reference describing the credential policy in force
+    (a DeviceCredential PK reference or the procedure effect) — never a secret."""
+    cred_pk = (normalized or {}).get("rpc_ssh_credential_pk")
+    if cred_pk is not None:
+        return f"device_credential:{cred_pk}"[:255]
+    procedure = getattr(execution, "procedure", None)
+    effect = str(getattr(procedure, "effect", "") or "")
+    return f"procedure_effect:{effect}"[:255]
+
+
+def _issue_dispatch_lease(
+    execution: object, aggregate: object, normalized: dict
+) -> object | None:
+    """Mint + audit a signed dispatch lease for a just-claimed execution (#168).
+
+    Returns the signed lease, or ``None`` when no signing key is configured
+    (graceful ID-only dispatch). Issuance sits behind the atomic ``start()``
+    transition, so at most one lease is ever minted per claim.
+    """
+    from django.utils import timezone
+
+    from .. import dispatch_lease as dl
+
+    stream_version = _current_stream_version(execution)
+    lease = dl.issue_dispatch_lease(
+        execution,
+        stream_version=stream_version,
+        normalized_params=normalized,
+        now=timezone.now(),
+        credential_policy=_credential_policy_reference(normalized, execution),
+    )
+    if lease is None:
+        return None
+    aggregate.record_dispatch_lease_issued(
+        nonce=lease.claims.nonce,
+        key_id=lease.claims.key_id,
+        key_version=lease.claims.key_version,
+        stream_version=lease.claims.stream_version,
+        audience=lease.claims.audience,
+        expires_at=lease.claims.expires_at,
+        envelope_version=lease.claims.envelope_version,
+    )
+    return lease
 
 
 def cancel_execution(execution: object, user: object) -> object:

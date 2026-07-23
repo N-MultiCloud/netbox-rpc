@@ -126,14 +126,25 @@ class RPCExecutionJob(JobRunner):
         mark_execution_failed(execution, message, code)
 
 
-def _call_backend(target: BackendTarget, execution: RPCExecution) -> dict[str, Any]:
+def _call_backend(
+    target: BackendTarget,
+    execution: RPCExecution,
+    *,
+    lease: Any = None,
+) -> dict[str, Any]:
     url = f"{target.url.rstrip('/')}/rpc/executions/{execution.pk}/run"
     timeout = (10, max(execution.procedure.timeout_seconds + 10, 30))
+    # #168: when a signed dispatch lease was minted, hand it to the backend in
+    # the body. Prod-safe: with no signing key configured the lease is None and
+    # the body stays ``{}`` byte-for-byte, exactly as before.
+    body: dict[str, Any] = {}
+    if lease is not None:
+        body["dispatch_lease"] = lease.to_body()
     try:
         resp = requests.post(
             url,
             headers=target.headers,
-            json={},
+            json=body,
             verify=target.verify_ssl,
             timeout=timeout,
         )

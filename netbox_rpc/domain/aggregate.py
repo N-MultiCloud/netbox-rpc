@@ -86,6 +86,41 @@ class RPCExecutionAggregate:
 
         event_store.record_backend_response(self.execution, response)
 
+    def record_dispatch_lease_issued(
+        self,
+        *,
+        nonce: str,
+        key_id: str,
+        key_version: int,
+        stream_version: int,
+        audience: str,
+        expires_at: Any,
+        envelope_version: int,
+    ) -> None:
+        """Audit a minted signed dispatch lease (#168).
+
+        Only a running execution — one that has passed the atomic queued →
+        claimed (``start``) transition — can have a lease issued, so a
+        cancelled / terminal / expired stream can never mint one.
+        """
+        self._ensure_not_terminal()
+        if self.status != ExecutionStatus.RUNNING.value:
+            raise RPCExecutionAggregateError(
+                "Only a running execution can issue a dispatch lease."
+            )
+        from .. import event_store
+
+        event_store.record_dispatch_lease_issued(
+            self.execution,
+            nonce=nonce,
+            key_id=key_id,
+            key_version=key_version,
+            stream_version=stream_version,
+            audience=audience,
+            expires_at=expires_at,
+            envelope_version=envelope_version,
+        )
+
     def succeed(self, result: dict[str, Any]) -> None:
         self._ensure_not_terminal()
         from .. import event_store

@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from .events import (
     ApprovalRequested,
     BackendEventRecorded,
+    DispatchLeaseIssued,
     DomainEvent,
     ExecutionApproved,
     ExecutionCancelled,
@@ -115,6 +116,10 @@ def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
         )
     if isinstance(event, JobEnqueued):
         return replace(state, job_id=event.job_id)
+    if isinstance(event, DispatchLeaseIssued):
+        # Audit-only (#168): issuing a signed dispatch lease does not advance
+        # the execution status — the stream already sits at RUNNING via start().
+        return state
     if isinstance(event, BackendEventRecorded):
         return state
     if isinstance(event, ExecutionSucceeded):
