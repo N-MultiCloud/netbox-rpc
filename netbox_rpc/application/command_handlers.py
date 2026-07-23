@@ -13,10 +13,42 @@ from ..domain.normalization import RPCExecutionError, normalize_execution_params
 from ..event_store import mark_execution_failed
 
 
+def _require_enabled_and_authoritative_backend(user: object) -> object | None:
+    """Enforce the authoritative RPC opt-in + selected backend (issue #166).
+
+    The ``RpcPluginSettings`` singleton is the authority for both the opt-in
+    gate and the selected backend at command-creation time. Rejects new work
+    when the integration is disabled or no backend is resolvable, and returns
+    the authoritative backend id (``None`` = defer to the settings resolver
+    chain) that the requester's ``backend_id`` must NOT override.
+    """
+    from ..models import RpcPluginSettings
+
+    settings_row = RpcPluginSettings.get_solo()
+    if not settings_row.enabled:
+        raise PermissionDenied(
+            "The netbox-rpc integration is disabled. Enable it in RPC settings "
+            "before creating executions."
+        )
+    if settings_row.resolved_backend_target() is None:
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    "No RPC backend is configured. Select a backend in RPC "
+                    "settings before creating executions."
+                )
+            }
+        )
+    return settings_row.backend_id
+
+
 def create_execution(*, serializer: Any, user: object) -> object:
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
     serializer.is_valid(raise_exception=True)
+
+    # #166: opt-in + selected backend are authoritative at creation time.
+    authoritative_backend_id = _require_enabled_and_authoritative_backend(user)
 
     procedure = serializer.validated_data["procedure"]
     if not procedure.enabled:
@@ -36,7 +68,10 @@ def create_execution(*, serializer: Any, user: object) -> object:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
     with transaction.atomic():
-        execution = serializer.save(requested_by=user)
+        # #166: a normal requester cannot select an arbitrary backend — the
+        # authoritative selected backend from RPC settings always wins over any
+        # client-supplied ``backend_id``.
+        execution = serializer.save(requested_by=user, backend=authoritative_backend_id)
         RPCExecutionAggregate(execution).queue()
 
     try:
@@ -82,6 +117,20 @@ def _transition_locked(execution: object, transition) -> object:
 
 
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
+    # #166: the opt-in is authoritative at the worker claim too — a claim on a
+    # disabled integration must fail closed rather than dispatch.
+    from ..models import RpcPluginSettings
+
+    if not RpcPluginSettings.get_solo().enabled:
+        try:
+            RPCExecutionAggregate(execution).fail(
+                "The netbox-rpc integration is disabled; execution not dispatched.",
+                "RPC_INTEGRATION_DISABLED",
+            )
+        except RPCExecutionAggregateError:
+            pass
+        return
+
     try:
         execution = _transition_locked(execution, lambda agg: agg.start())
     except RPCExecutionAggregateError:

@@ -236,6 +236,18 @@ work in #165–#168.
   and single-decision concurrency guards; `get_object()` already object-restricts
   the execution row. The endpoints are dormant in production until the request
   routing that produces `pending_approval` executions lands (#166+).
+- **Authoritative opt-in + selected backend (#166)**: `RpcPluginSettings.enabled`
+  and its selected backend are now enforced by `command_handlers`. At execution
+  **creation** a disabled integration is rejected (403) and an unconfigured
+  backend is rejected (400); a normal requester's `backend_id` is IGNORED — the
+  singleton's selected backend always wins (no arbitrary backend selection). At
+  the **worker claim** (`run_execution`) a disabled integration fails the run
+  closed (`RPC_INTEGRATION_DISABLED`) rather than dispatching. Migration `0050`
+  preserves current behaviour: an install that already has execution history is
+  opted in idempotently (enabled + the single `RPCBackend` selected when
+  unambiguous), so enforcing the gate never rejects an already-active install;
+  fresh installs keep the `enabled=False` default. Tests that create/dispatch
+  executions must call `_common.enable_rpc_integration()`.
 
 ## Intents
 
