@@ -11,7 +11,13 @@ from rest_framework.test import APIClient
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 from netbox_rpc.models import RPCExecution
 
-from ._common import make_device, make_execution, make_procedure, make_user
+from ._common import (
+    enable_rpc_integration,
+    make_device,
+    make_execution,
+    make_procedure,
+    make_user,
+)
 
 
 class _FakeJob:
@@ -24,12 +30,17 @@ class ExecutionApiTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.proc = make_procedure("os.linux.test.echo")
+        # #166: creating executions requires the integration to be opted in.
+        enable_rpc_integration()
 
     def _detail_url(self, ex):
         return reverse("plugins-api:netbox_rpc-api:rpcexecution-detail", args=[ex.pk])
 
+    @mock.patch(
+        "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
+    )
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue", return_value=_FakeJob())
-    def test_create_emits_queued_and_job_enqueued(self, _enqueue):
+    def test_create_emits_queued_and_job_enqueued(self, _enqueue, _fetch):
         device = make_device()
         url = reverse("plugins-api:netbox_rpc-api:rpcexecution-list")
         resp = self.client.post(

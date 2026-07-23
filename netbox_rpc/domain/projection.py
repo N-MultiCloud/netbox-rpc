@@ -5,12 +5,18 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from .events import (
+    ApprovalRequested,
     BackendEventRecorded,
+    DispatchLeaseIssued,
     DomainEvent,
+    ExecutionApproved,
     ExecutionCancelled,
     ExecutionEnqueueFailed,
+    ExecutionExpired,
     ExecutionFailed,
     ExecutionQueued,
+    ExecutionRejected,
+    ExecutionRequested,
     ExecutionStarted,
     ExecutionSucceeded,
     JobEnqueued,
@@ -72,6 +78,28 @@ class ProjectionState:
 
 
 def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
+    if isinstance(event, ExecutionRequested):
+        return replace(state, status=ExecutionStatus.REQUESTED.value)
+    if isinstance(event, ApprovalRequested):
+        return replace(state, status=ExecutionStatus.PENDING_APPROVAL.value)
+    if isinstance(event, ExecutionApproved):
+        return replace(state, status=ExecutionStatus.APPROVED.value)
+    if isinstance(event, ExecutionRejected):
+        return replace(
+            state,
+            status=ExecutionStatus.REJECTED.value,
+            error_code="",
+            error_message="",
+            finished_at=_coerce_datetime(event.decided_at),
+        )
+    if isinstance(event, ExecutionExpired):
+        return replace(
+            state,
+            status=ExecutionStatus.EXPIRED.value,
+            error_code="",
+            error_message="",
+            finished_at=_coerce_datetime(event.expired_at),
+        )
     if isinstance(event, ExecutionQueued):
         return replace(state, status=ExecutionStatus.QUEUED.value)
     if isinstance(event, ExecutionStarted):
@@ -88,6 +116,10 @@ def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
         )
     if isinstance(event, JobEnqueued):
         return replace(state, job_id=event.job_id)
+    if isinstance(event, DispatchLeaseIssued):
+        # Audit-only (#168): issuing a signed dispatch lease does not advance
+        # the execution status — the stream already sits at RUNNING via start().
+        return state
     if isinstance(event, BackendEventRecorded):
         return state
     if isinstance(event, ExecutionSucceeded):

@@ -1023,7 +1023,7 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    assert len(extras_dependencies) == 4
+    assert len(extras_dependencies) == 5
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
@@ -1035,3 +1035,21 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
         # remains an ancestor of the 4.6 migration graph.
         assert "0134_owner" in migration_sources[name]
+def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
+    # The migration graph uses extras.0134 because it is present in both
+    # NetBox 4.5.8 and 4.6.x. Do not move these anchors back to 4.6-only
+    # migrations unless the declared floor is raised intentionally.
+    init = read("netbox_rpc/__init__.py")
+    assert 'min_version = "4.5.8"' in init
+    assert 'max_version = "4.6.99"' in init
+
+    migration_paths = (
+        "netbox_rpc/migrations/0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",
+        "netbox_rpc/migrations/0033_rpcbackend.py",
+        "netbox_rpc/migrations/0039_rpcintent.py",
+        "netbox_rpc/migrations/0044_rpcpluginsettings.py",
+    )
+    for path in migration_paths:
+        migration = read(path)
+        assert "0134_owner" in migration
+        assert "0138_customfieldchoiceset_choice_colors" not in migration

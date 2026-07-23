@@ -651,12 +651,25 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
 
 class RPCExecution(NetBoxModel):
     # Status vocabulary is single-sourced from the domain value object.
+    # Approval-workflow states (issue #164) are additive; the pre-existing
+    # direct flow still starts at QUEUED. Enforcement (routing
+    # approval-required work through requested/pending) lands in #165.
+    STATUS_REQUESTED = ExecutionStatus.REQUESTED.value
+    STATUS_PENDING_APPROVAL = ExecutionStatus.PENDING_APPROVAL.value
+    STATUS_APPROVED = ExecutionStatus.APPROVED.value
+    STATUS_REJECTED = ExecutionStatus.REJECTED.value
+    STATUS_EXPIRED = ExecutionStatus.EXPIRED.value
     STATUS_QUEUED = ExecutionStatus.QUEUED.value
     STATUS_RUNNING = ExecutionStatus.RUNNING.value
     STATUS_SUCCEEDED = ExecutionStatus.SUCCEEDED.value
     STATUS_FAILED = ExecutionStatus.FAILED.value
     STATUS_CANCELLED = ExecutionStatus.CANCELLED.value
     STATUS_CHOICES = (
+        (STATUS_REQUESTED, "Requested"),
+        (STATUS_PENDING_APPROVAL, "Pending approval"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_EXPIRED, "Expired"),
         (STATUS_QUEUED, "Queued"),
         (STATUS_RUNNING, "Running"),
         (STATUS_SUCCEEDED, "Succeeded"),
@@ -857,6 +870,122 @@ class RPCExecutionEvent(NetBoxModel):
 
     def delete(self, *args, **kwargs) -> None:
         raise ValidationError("RPCExecutionEvent rows are append-only.")
+
+
+def compute_approval_snapshot_hash(protected: dict[str, object]) -> str:
+    """Canonical, tamper-evident sha256 over an approval request's protected fields.
+
+    Shared by :class:`RPCApprovalRequest` (to stamp its own hash) and by the
+    approval aggregate (to recompute the *current* execution/procedure state
+    and detect a snapshot-invalidating drift). Same canonicalisation as the
+    event ledger's ``hash_payload`` so hashes are comparable across the domain.
+    """
+    canonical = json.dumps(
+        protected,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class RPCApprovalRequest(NetBoxModel):
+    """Immutable approval snapshot for an approval-gated ``RPCExecution`` (issue #164).
+
+    Created exactly once when an approval-required execution is requested. It
+    pins every value a distinct second-actor approval must decide against, plus
+    a tamper-evident ``payload_hash`` over those protected fields. Any later
+    change to the procedure version/effect, target snapshot, normalized
+    params/command fingerprint, backend, or credential policy recomputes to a
+    different hash and therefore invalidates the request (a fresh request is
+    required — see :meth:`matches_current`). References only: it stores
+    credential-policy/backend *references*, never secrets. Rows are append-only:
+    direct updates and deletes are rejected at the ORM layer, mirroring
+    ``RPCExecutionEvent`` (execution-cascade deletes still work — the collector
+    bypasses the model ``delete``).
+
+    This is additive foundation state for #164. Routing ``approval_required``
+    work through it (enforcement) is deferred to #165.
+    """
+
+    execution = models.OneToOneField(
+        RPCExecution,
+        on_delete=models.CASCADE,
+        related_name="approval_request",
+    )
+    # Procedure snapshot — captured values, never a live read at decision time.
+    procedure_id = models.PositiveBigIntegerField()
+    procedure_version = models.CharField(max_length=64, blank=True)
+    effect = models.CharField(max_length=20)
+    # Target snapshot.
+    target_type_id = models.PositiveBigIntegerField()
+    target_id = models.PositiveBigIntegerField()
+    target_snapshot_hash = models.CharField(max_length=128, blank=True)
+    # Normalized command inputs (redacted/bounded upstream — no secrets).
+    normalized_params = models.JSONField(default=dict, blank=True)
+    command_fingerprint = models.JSONField(default=dict, blank=True)
+    # Authoritative backend + credential policy — references, not secrets.
+    backend_id = models.PositiveBigIntegerField(null=True, blank=True)
+    credential_policy_ref = models.CharField(max_length=200, blank=True)
+    # Requester + expiry + optimistic-concurrency stream version at request time.
+    requested_by_id = models.PositiveBigIntegerField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    stream_version = models.PositiveIntegerField(default=0)
+    payload_hash = models.CharField(max_length=128, blank=True)
+
+    # Fields folded into the tamper-evident hash. ``expires_at`` and
+    # ``stream_version`` are deliberately excluded — expiry/replay are handled by
+    # the event stream, not by invalidating the decision surface.
+    PROTECTED_FIELDS = (
+        "procedure_id",
+        "procedure_version",
+        "effect",
+        "target_type_id",
+        "target_id",
+        "target_snapshot_hash",
+        "normalized_params",
+        "command_fingerprint",
+        "backend_id",
+        "credential_policy_ref",
+        "requested_by_id",
+    )
+
+    class Meta:
+        app_label = "netbox_rpc"
+        verbose_name = "RPC Approval Request"
+        verbose_name_plural = "RPC Approval Requests"
+
+    def __str__(self) -> str:
+        return f"approval:{self.execution_id}"
+
+    def protected_payload(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.PROTECTED_FIELDS}
+
+    def compute_hash(self) -> str:
+        return compute_approval_snapshot_hash(self.protected_payload())
+
+    def matches_current(self, current: dict[str, object]) -> bool:
+        """True when ``current`` protected values still hash to this snapshot.
+
+        The approval aggregate builds ``current`` from the live
+        execution/procedure state at decision time; a mismatch means a
+        protected field drifted and the request is invalidated.
+        """
+        expected_keys = set(self.PROTECTED_FIELDS)
+        scoped = {key: current.get(key) for key in expected_keys}
+        return bool(self.payload_hash) and (
+            self.payload_hash == compute_approval_snapshot_hash(scoped)
+        )
+
+    def save(self, *args, **kwargs) -> None:
+        if not self._state.adding:
+            raise ValidationError("RPCApprovalRequest rows are immutable.")
+        if not self.payload_hash:
+            self.payload_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs) -> None:
+        raise ValidationError("RPCApprovalRequest rows are immutable.")
 
 
 class RPCIntent(NetBoxModel):

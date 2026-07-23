@@ -196,6 +196,104 @@ under the `_intent`-prefixed keys so this attribution stays correct.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
+### Two-person approval workflow — foundation (#164)
+
+The execution aggregate carries an additive **approval-workflow** surface (the
+foundation of the P0 two-person-approval epic #163). This is infrastructure
+only — it does **not** yet change behaviour; routing `approval_required`
+procedures through it (enforcement, API/UI, signed dispatch leases) is the paired
+work in #165–#168.
+
+- **States** (`domain.value_objects.ExecutionStatus`): `requested`,
+  `pending_approval`, `approved`, `rejected`, `expired` precede the existing
+  `queued → running → …` lifecycle. `rejected`/`expired` are terminal
+  (`ExecutionStatus.approval_terminal()`); the pre-existing direct flow still
+  starts at `queued`.
+- **Events** (`domain.events`): `ExecutionRequested`, `ApprovalRequested`,
+  `ExecutionApproved`, `ExecutionRejected`, `ExecutionExpired`. As always,
+  status folds only from the append-only stream via `projection.apply()`; all
+  transitions go through `event_store` (never mutate status directly).
+- **Immutable snapshot** (`models.RPCApprovalRequest`, one-to-one with the
+  execution): pins procedure id/version/effect, target snapshot hash, normalized
+  params + command fingerprint, backend, credential-policy *reference*,
+  requester, expiry, and stream version, plus a tamper-evident `payload_hash`
+  over the protected fields (`compute_approval_snapshot_hash`). It is append-only
+  like `RPCExecutionEvent` (save-after-create and delete raise; execution-cascade
+  still works), stores references not secrets, and `matches_current()` detects a
+  snapshot-invalidating drift.
+- **Aggregate transitions** (`domain.aggregate`): `request` → `request_approval`
+  (never enqueues) → `approve` / `reject` / `expire`. `approve`/`reject` enforce
+  **segregation of duties** (the requester cannot decide their own request) and
+  `approve` re-checks the snapshot; the decision is serialised with a
+  `select_for_update` row lock + in-transaction status recheck so
+  double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
+  to a single deterministic event.
+- **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
+  `approve` / `reject` actions (`command_handlers.approve_execution` /
+  `reject_execution`) — no mutable status CRUD (PUT/PATCH/DELETE stay 405).
+  Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
+  to the execution's procedure on top of the aggregate's segregation-of-duties
+  and single-decision concurrency guards; `get_object()` already object-restricts
+  the execution row. The endpoints are dormant in production until the request
+  routing that produces `pending_approval` executions lands (#166+).
+- **Authoritative opt-in + selected backend (#166)**: `RpcPluginSettings.enabled`
+  and its selected backend are now enforced by `command_handlers`. At execution
+  **creation** a disabled integration is rejected (403) and an unconfigured
+  backend is rejected (400); a normal requester's `backend_id` is IGNORED — the
+  singleton's selected backend always wins (no arbitrary backend selection). At
+  the **worker claim** (`run_execution`) a disabled integration fails the run
+  closed (`RPC_INTEGRATION_DISABLED`) rather than dispatching. Migration `0050`
+  preserves current behaviour: an install that already has execution history is
+  opted in idempotently (enabled + the single `RPCBackend` selected when
+  unambiguous), so enforcing the gate never rejects an already-active install;
+  fresh installs keep the `enabled=False` default. Tests that create/dispatch
+  executions must call `_common.enable_rpc_integration()`.
+- **Backend capability handshake (#167)**: `capabilities.py` consumes a manifest
+  the paired `netbox-rpc-backend` advertises at `GET {backend_url}/capabilities`
+  (per handler: `handler_id`/`version`/`effect`/`contract_hash`, plus a top-level
+  `envelope_version`). The fetch is bounded (≤512 KiB), authenticated (backend
+  target headers), cached (30 s TTL), Pydantic-v2-validated, and **never trusted
+  as command input**; `derive_command_contract_hash()` is the shared hash both
+  sides compute over a procedure's identity + ordered command contract. Before
+  enqueue, `create_execution` fails closed (400) on a capability **mismatch**
+  (missing handler / version / effect / contract-hash / unsupported envelope),
+  and `procedures/available` filters mismatched procedures out. **Graceful
+  degradation:** when the backend advertises nothing (no route / unreachable /
+  malformed / oversized), the fetch is `None`, verification is `UNKNOWN`, and
+  callers proceed — so enforcement is inert until the paired backend advertises
+  a manifest (prod-safe; the current backend advertises none). Capability tests
+  that create executions must mock `capabilities.fetch_backend_capabilities`.
+- **One-time signed dispatch leases (#168)**: `dispatch_lease.py` mints a
+  short-lived **ed25519-signed** dispatch lease after the atomic *queued →
+  claimed* (`start()`) transition and hands it to the paired `netbox-rpc-backend`
+  (verifier, nms-backend#583) in the `/rpc/executions/{id}/run` body. The
+  `LeaseClaims` envelope (Pydantic v2, `extra="forbid"`, all fields bounded)
+  binds execution id, `stream_version`, one-time `nonce`, `audience`, handler
+  contract + `effect`, `contract_hash` (the **same** value #167 verifies),
+  target/params fingerprints, credential-policy *reference*, requester/approver,
+  key `(key_id, key_version)` lineage, and a short expiry — **references and
+  hashes only, never a secret or exception chain**, and never trusted as command
+  input. `derive_command_contract_hash()` (#167) is reused so a lease and a
+  capability manifest agree by construction on what will run. `verify_dispatch_lease`
+  is the shared reference verifier (fail-closed on downgrade / unknown key
+  lineage / bad signature / wrong audience / expiry / execution-stream-contract
+  drift / replayed nonce). Issuance is audited as the **audit-only**
+  `DispatchLeaseIssued` domain event (does not advance status). **Nonce
+  ownership:** the issuer generates + ledgers the nonce; the verifier owns the
+  consumed-nonce (accept-once) store. **Graceful degradation / prod-safe:** with
+  no signing key configured (current prod), `issue_dispatch_lease` returns
+  `None`, the worker POSTs `{}` byte-for-byte as before (ID-only dispatch), and
+  leases stay inert until an operator configures a key *and* the backend
+  advertises verification (rollout mirrors #167). Keys, audience, and TTL come
+  from `PLUGINS_CONFIG["netbox_rpc"]` (`dispatch_lease_signing_keys` /
+  `dispatch_lease_audience` / `dispatch_lease_ttl_seconds`). Threat model, ADR,
+  and rotation/rollback/retirement ops live in
+  [`docs/dispatch-lease.md`](docs/dispatch-lease.md); the deterministic
+  cross-repo contract fixture (accept-once + reject replay/tamper/wrong-audience/
+  lineage) is `netbox_rpc/tests/fixtures/dispatch_lease/`. Tests that mint a
+  lease patch `dispatch_lease._plugin_setting`; crypto/DB-backed tests live in
+  the integration tier (`cryptography` + pydantic are not in the pure-domain env).
+
 ## Intents
 
 `RPCIntent` groups one or more `RPCProcedure`s and declares *what* needs to be
@@ -236,6 +334,9 @@ done; the procedures (with their commands) declare *how*. See
 - NetBox APIs used by the plugin must exist on 4.5.8. Guard or provide a
   fallback before adopting a 4.6-only model action, declarative UI/layout, or
   serializer resolver API.
+- The plugin's real floor is NetBox **4.5.8** (`min_version = "4.5.8"`): the
+  migration graph depends only on NetBox migration anchors present in both
+  NetBox 4.5.8 and 4.6.x.
 
 ## LLM Agent Safety Guardrails
 

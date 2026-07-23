@@ -1,0 +1,58 @@
+{
+  "_comment": "Cross-repo dispatch-lease contract fixture for issue #168 / nms-backend#583. TEST-ONLY ed25519 key material derived from a fixed seed; never used in production. ed25519 is deterministic (RFC 8032), so re-signing 'canonical_message_b64' with the seed MUST reproduce 'signature_b64' byte-for-byte in both repositories.",
+  "algorithm": "ed25519",
+  "audience": "netbox-rpc-backend",
+  "canonical_message_b64": "eyJhcHByb3ZlZF9ieV9pZCI6bnVsbCwiYXVkaWVuY2UiOiJuZXRib3gtcnBjLWJhY2tlbmQiLCJjb250cmFjdF9oYXNoIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImNyZWRlbnRpYWxfcG9saWN5IjoicHJvY2VkdXJlX2VmZmVjdDpyZWFkIiwiZWZmZWN0IjoicmVhZCIsImVudmVsb3BlX3ZlcnNpb24iOjEsImV4ZWN1dGlvbl9pZCI6NDI0MiwiZXhwaXJlc19hdCI6IjIwMjYtMDctMjNUMTI6MDI6MDArMDA6MDAiLCJoYW5kbGVyX2lkIjoib3MubGludXgudGVzdC5lY2hvIiwiaGFuZGxlcl92ZXJzaW9uIjoyLCJpc3N1ZWRfYXQiOiIyMDI2LTA3LTIzVDEyOjAwOjAwKzAwOjAwIiwia2V5X2lkIjoicnBjLXNpZ24iLCJrZXlfdmVyc2lvbiI6Mywibm9uY2UiOiJmaXhlZG5vbmNlMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NSIsInBhcmFtc19maW5nZXJwcmludCI6ImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJyZXF1ZXN0ZWRfYnlfaWQiOjcsInN0cmVhbV92ZXJzaW9uIjo1LCJ0YXJnZXRfc25hcHNob3RfaGFzaCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJ0cmFjZV9pZCI6InRyYWNlLWFiYyJ9",
+  "claims": {
+    "approved_by_id": null,
+    "audience": "netbox-rpc-backend",
+    "contract_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credential_policy": "procedure_effect:read",
+    "effect": "read",
+    "envelope_version": 1,
+    "execution_id": 4242,
+    "expires_at": "2026-07-23T12:02:00+00:00",
+    "handler_id": "os.linux.test.echo",
+    "handler_version": 2,
+    "issued_at": "2026-07-23T12:00:00+00:00",
+    "key_id": "rpc-sign",
+    "key_version": 3,
+    "nonce": "fixednonce0123456789abcdef012345",
+    "params_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requested_by_id": 7,
+    "stream_version": 5,
+    "target_snapshot_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "trace_id": "trace-abc"
+  },
+  "expired_now_iso": "2026-07-23T12:05:00+00:00",
+  "key_lineage": {
+    "key_id": "rpc-sign",
+    "key_version": 3
+  },
+  "negatives": {
+    "replay": {
+      "note": "nonce already consumed",
+      "seen_nonce": "fixednonce0123456789abcdef012345"
+    },
+    "tamper": {
+      "claims_override": {
+        "effect": "destructive"
+      },
+      "note": "effect flipped to destructive; signature must fail"
+    },
+    "unknown_lineage": {
+      "claims_override": {
+        "key_version": 99
+      },
+      "note": "key_version not in verifier map"
+    },
+    "wrong_audience": {
+      "note": "verifier audience differs from claim",
+      "verify_audience": "some-other-service"
+    }
+  },
+  "public_key_b64": "PM0kHP/Js2GARLl9A22GFFk9iwF8NA8d7odzOFUXZUs=",
+  "signature_b64": "7d8tN6GkMY/2DjdzDFH+rQFUzKfuEKOXU3cuu4cvZjZm1NXkJvs8udEnr1zYd4ofALQbkKAgNz4VZmN0G2FqDA==",
+  "test_private_seed_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+  "verify_now_iso": "2026-07-23T12:01:00+00:00"
+}
