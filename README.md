@@ -108,9 +108,9 @@ The procedure object page has a **Runs** tab
 (`/plugins/rpc/procedures/<pk>/runs/`) listing every `RPCExecution` for that
 procedure, newest first, with a badge of the run count. Each row shows the run's
 user owner (`requested_by`), how it was issued (**Source** — `Direct`, or
-`Intent: <name>` when a future intent executor stamps an `_intent_name`/`_intent`
-marker into `params`), status, target, backend, and timing, and links to the
-execution detail. The execution detail additionally renders a **Command Output**
+`Intent: <name>` when the intent executor stamped an `_intent_name`/`_intent`
+marker into `params`, see **Intents** below), status, target, backend, and
+timing, and links to the execution detail. The execution detail additionally renders a **Command Output**
 card built from `result.steps[]` — the exact command(s) issued on the target and
 each command's stdout/stderr/exit code — so a run's issued commands and their
 output are visible end-to-end. The `RPCExecution.source_label`,
@@ -160,12 +160,18 @@ captured by the `RPCIntentProcedure` through model (`intent`, `procedure`,
 `sequence`), with `(intent, procedure)` unique per intent.
 
 Intents are declarative reference-data — plain NetBox CRUD, `ObjectChange`
-audited, and not event-sourced. An intent only *declares* work; actually
-executing it (fanning out one `RPCExecution` per grouped procedure) is a
-separate, future capability. Any such executor MUST continue to honour each
-procedure's `approval_required` / `effect` gating and the LLM Agent Safety
-Guardrails — an intent must never be a way to bypass approval on a destructive
-procedure.
+audited, and not event-sourced. An intent *declares* work; *executing* one
+(fanning out one child `RPCExecution` per grouped procedure) is a separate
+application-layer capability, `command_handlers.execute_intent()` (issue
+#130), triggered via `POST /api/plugins/rpc/intents/{id}/run/`. It creates
+every child through the exact same command path a direct `RPCExecution` POST
+uses (`create_execution()`), so each child independently re-runs every
+existing gate — permission, the authoritative opt-in + selected-backend
+enforcement, the procedure's `enabled` check, `approval_required`, params
+validation, and the backend capability check. An intent grouping an
+`approval_required` or destructive procedure does **not** auto-run that
+child; it is never a way to bypass approval or destructive gating — see the
+LLM Agent Safety Guardrails in `AGENTS.md`.
 
 ### Intent API
 
@@ -176,8 +182,15 @@ procedure.
   through `sequence`. The read representation returns `procedures` as an ordered
   list of `{id, name, handler_id, effect, approval_required, sequence}`.
 - Filter with `?execution_mode=`, `?enabled=`, and `?procedure_id=`.
+- `POST /api/plugins/rpc/intents/{id}/run/` — execute the intent, fanning out
+  one child `RPCExecution` per grouped procedure in `sequence` order. Requires
+  `netbox_rpc.execute_rpcintent` on the intent, in addition to each grouped
+  procedure's own per-child gates. Returns `201` with the created children, or
+  the first gated child's normal failure status (`403`/`400`) with no further
+  children created.
 
-See [`docs/intents.md`](docs/intents.md) for the full model, ordering semantics,
+See [`docs/intents.md`](docs/intents.md) for the full model, ordering
+semantics, the executor's fail-fast/no-rollback and origin-marker contract,
 and worked API examples.
 
 ## Standalone usage

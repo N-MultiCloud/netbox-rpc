@@ -15,11 +15,13 @@ from ..application.command_handlers import (
     approve_execution,
     cancel_execution,
     create_execution,
+    execute_intent,
     reject_execution,
 )
 from ..application.queries import execution_events
 from .serializers import (
     RPCBackendSerializer,
+    RPCIntentRunSerializer,
     RPCIntentSerializer,
     RPCLinuxServiceAllowlistSerializer,
     RPCExecutionEventSerializer,
@@ -152,6 +154,33 @@ class RPCIntentViewSet(NetBoxModelViewSet):
         "tags", "intent_procedures__procedure"
     )
     serializer_class = RPCIntentSerializer
+
+    @extend_schema(
+        request=RPCIntentRunSerializer,
+        responses={201: RPCExecutionSerializer(many=True)},
+    )
+    @action(detail=True, methods=["post"], url_path="run")
+    def run(self, request: Request, pk: str | None = None) -> Response:
+        # Trigger surface for issue #130: fans out one child RPCExecution per
+        # grouped procedure through execute_intent(), which re-runs every
+        # create_execution() gate (permission, #166 opt-in/backend, approval,
+        # params, #167 capability) per child -- see command_handlers.py for
+        # the full no-bypass contract. get_object() applies NetBox's normal
+        # object-scoped restrictions to the intent itself.
+        intent = self.get_object()
+        run_serializer = RPCIntentRunSerializer(data=request.data)
+        run_serializer.is_valid(raise_exception=True)
+        children = execute_intent(
+            intent,
+            request.user,
+            assigned_object_type=run_serializer.validated_data["assigned_object_type"],
+            assigned_object_id=run_serializer.validated_data["assigned_object_id"],
+            params=run_serializer.validated_data.get("params") or {},
+        )
+        output = RPCExecutionSerializer(
+            children, many=True, context={"request": request}
+        )
+        return Response(output.data, status=status.HTTP_201_CREATED)
 
 
 class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):

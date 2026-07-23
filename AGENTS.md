@@ -148,13 +148,14 @@ that procedure's `RPCExecution` history — a pure query-side projection with no
 new mutation surface. It reuses `RPCExecutionTable` (with a `source` column) and
 three read-only `RPCExecution` presentation properties:
 
-- `source_label` / `intent_reference` — how the run was issued. Executing an
-  `RPCIntent` is out of scope for the aggregate today (see **Intents** below), so
-  every run currently reads as `Direct`. The helpers are forward-compatible: when
-  a future intent executor stamps an underscore-prefixed `_intent_name`/`_intent`
-  marker into `params`, the tab attributes the run as `Intent: <name>`. Do **not**
-  reuse a bare `intent` params key for a procedure's own parameter — only the
-  underscore-prefixed internal keys are treated as origin markers.
+- `source_label` / `intent_reference` — how the run was issued. A run created
+  directly (API/UI `RPCExecution` POST) reads as `Direct`. A run created by the
+  intent executor (`command_handlers.execute_intent()`, see **Intents** above)
+  reads as `Intent: <name>`, because `execute_intent()` stamps the
+  underscore-prefixed `_intent_name`/`_intent` marker into that child's stored
+  `params` after creation. Do **not** reuse a bare `intent` params key for a
+  procedure's own parameter — only the underscore-prefixed internal keys are
+  treated as origin markers.
 - `result_steps` — returns `result.steps[]` (empty when absent/malformed). The
   execution detail template renders it as a **Command Output** card (command,
   operation, exit code, stdout, stderr). Keep this output bounded/redacted per the
@@ -309,13 +310,31 @@ done; the procedures (with their commands) declare *how*. See
   The form and the API write channel (`procedure_ids`) both renumber `sequence`
   from 1 in submitted order.
 - Intents are declarative reference-data (plain CRUD, not event-sourced). This
-  model layer only **declares** intents; it does not execute them.
-- **Execution is out of scope for the model and must stay gated.** A future
-  intent executor MUST create each child run through
-  `create_execution()` (so it is event-sourced) and MUST keep enforcing every
-  grouped procedure's `approval_required`/`effect` gating and the LLM Agent
-  Safety Guardrails below. An intent must never bypass approval on a destructive
-  procedure. Seeded by additive migration `0039_rpcintent` (depends on the
+  model layer only **declares** intents; *executing* one is a separate command,
+  `command_handlers.execute_intent()` (issue #130), triggered via `POST
+  /api/plugins/rpc/intents/{id}/run/` on `RPCIntentViewSet`.
+- **Execution never bypasses gating — every child re-runs the full
+  `create_execution()` gate stack.** `execute_intent()` creates one child
+  `RPCExecution` per grouped procedure, in ascending `RPCIntentProcedure.sequence`
+  order, exclusively through `create_execution()` — never a side channel — so
+  each child independently re-checks the `execute_rpcprocedure` permission, the
+  #166 authoritative opt-in + selected-backend enforcement, `procedure.enabled`,
+  the `approval_required`/`approve_rpcprocedure` gate, `params_schema`
+  validation, and the #167 capability check, exactly as a direct create would.
+  An intent grouping an `approval_required` or destructive procedure does
+  **not** auto-run that child: the same exception a direct create would raise
+  propagates out of `execute_intent()` unmodified (fail-fast — no partial
+  silent continuation past a refused child; earlier, already-created siblings
+  are not rolled back, since each child is its own independent commit outside
+  any shared outer transaction). This is the hard invariant — an intent must
+  never bypass approval on a destructive procedure. `sequential` and `parallel`
+  both fan out synchronously in sequence order today (v1); the mode distinction
+  for true concurrent/chained dispatch is a documented future enhancement, not
+  required by this safety contract. A successful child is stamped with the
+  underscore-prefixed `_intent`/`_intent_name` origin marker in `params` *after*
+  creation (so it never collides with `params_schema` validation) — see
+  "Procedure Runs Tab" below and `docs/intents.md` → "Running an intent" for
+  the full request/response contract. Seeded by additive migration `0039_rpcintent` (depends on the
   `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
   dependency). `0040_rpcintentprocedure_sequence_min` adds the `sequence >= 1`
   validator + DB `CheckConstraint`.

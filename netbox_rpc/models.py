@@ -760,22 +760,23 @@ class RPCExecution(NetBoxModel):
             return f"{self.target_model_label}:{self.assigned_object_id}"
         return str(getattr(target, "name", None) or target)
 
-    # Underscore-prefixed internal keys a future intent executor may stamp into
-    # ``params`` to record that a run originated from an ``RPCIntent`` rather
-    # than a direct API/UI request. Prefixed to avoid colliding with a
-    # procedure's own declared parameters.
+    # Underscore-prefixed internal keys the intent executor
+    # (``command_handlers.execute_intent()``, issue #130) stamps into ``params``
+    # to record that a run originated from an ``RPCIntent`` rather than a
+    # direct API/UI request. Prefixed to avoid colliding with a procedure's own
+    # declared parameters.
     _INTENT_PARAM_KEYS = ("_intent_name", "_intent")
 
     @property
     def intent_reference(self) -> str | None:
         """Best-effort intent name when this run was dispatched via an intent.
 
-        Executing an ``RPCIntent`` is intentionally out of scope for the
-        aggregate today (see ``AGENTS.md`` → Intents), so no run currently
-        carries an intent marker and this returns ``None`` — such runs read as
-        directly issued. When a future intent executor records its origin in
-        ``params`` under one of ``_INTENT_PARAM_KEYS``, this surfaces the intent
-        name so the procedure Runs tab can attribute the run to it.
+        A run created directly (API/UI ``RPCExecution`` POST) has no marker and
+        this returns ``None``. A run created by the intent executor (see
+        ``AGENTS.md`` → Intents and ``docs/intents.md``) has its origin
+        recorded in ``params`` under one of ``_INTENT_PARAM_KEYS`` after
+        creation, so this surfaces the intent name and the procedure Runs tab
+        can attribute the run to it.
         """
         params = self.params or {}
         for key in self._INTENT_PARAM_KEYS:
@@ -1004,11 +1005,15 @@ class RPCIntent(NetBoxModel):
     ObjectChange-audited, and NOT event-sourced — consistent with
     ``RPCProcedure``, ``RPCLinuxServiceAllowlist``, and ``RPCBackend``.
 
-    Actually *executing* an intent (fanning out one child ``RPCExecution`` per
-    grouped procedure) is intentionally out of scope for this model. Any future
-    executor MUST continue to honour each procedure's ``approval_required`` /
-    ``effect`` gating and the LLM Agent Safety Guardrails; an intent must never
-    become a way to bypass approval on a destructive procedure.
+    Actually *executing* an intent — fanning out one child ``RPCExecution`` per
+    grouped procedure — is a separate application-layer capability,
+    ``command_handlers.execute_intent()`` (issue #130), triggered via the
+    ``RPCIntentViewSet.run`` action (``POST .../intents/{id}/run/``). It creates
+    every child through the same ``create_execution()`` command path a direct
+    ``RPCExecution`` POST uses, so each child independently re-runs every
+    existing gate, including each procedure's ``approval_required`` /
+    ``effect`` gating and the LLM Agent Safety Guardrails; an intent is never a
+    way to bypass approval on a destructive procedure. See ``docs/intents.md``.
     """
 
     # Execution-mode vocabulary is single-sourced from the domain value object.

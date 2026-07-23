@@ -289,6 +289,21 @@ class RPCIntentSerializer(NetBoxModelSerializer):
         return super().update(instance, validated_data)
 
 
+class RPCIntentRunSerializer(serializers.Serializer):
+    """Request body for ``POST /api/plugins/rpc/intents/{id}/run/`` (issue #130).
+
+    Not a ``ModelSerializer`` — this is a command input shape, not a stored
+    row. ``params`` (optional) is applied to every fanned-out child exactly as
+    supplied; the intent executor stamps the ``_intent``/``_intent_name``
+    origin marker onto each child's stored params *after* creation (see
+    ``command_handlers.execute_intent``), never into this input.
+    """
+
+    assigned_object_type = ContentTypeField(queryset=ContentType.objects.all())
+    assigned_object_id = serializers.IntegerField()
+    params = serializers.JSONField(required=False, default=dict)
+
+
 class RPCExecutionEventSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rpc-api:rpcexecutionevent-detail",

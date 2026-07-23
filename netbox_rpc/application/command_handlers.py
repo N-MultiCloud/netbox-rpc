@@ -325,3 +325,119 @@ def reject_execution(execution: object, user: object, *, reason: str = "") -> ob
         raise drf_serializers.ValidationError({"status": str(exc)}) from exc
     execution.refresh_from_db()
     return execution
+
+
+def execute_intent(
+    intent: object,
+    user: object,
+    *,
+    assigned_object_type: object,
+    assigned_object_id: int,
+    params: dict | None = None,
+) -> list[object]:
+    """Fan out one child ``RPCExecution`` per grouped procedure (issue #130).
+
+    Every child is created through :func:`create_execution` — the exact same
+    event-sourced command path a direct ``RPCExecution`` POST uses. Nothing
+    here duplicates, weakens, or short-circuits any of that path's gates: each
+    child independently re-runs the ``execute_rpcprocedure`` permission check,
+    the #166 authoritative opt-in + selected-backend enforcement,
+    ``procedure.enabled``, the ``approval_required`` gate (raises
+    ``PermissionDenied`` for a caller lacking ``approve_rpcprocedure`` —
+    *exactly* as a direct create would), ``params_schema`` validation, and the
+    #167 backend capability check.
+
+    This function never bypasses approval/destructive gating: it does not
+    catch or suppress any exception raised by ``create_execution()``. The
+    first child that fails any gate raises immediately out of this function,
+    aborting the run (no partial silent continuation past a refused child).
+    Any earlier children already created in this call remain as independently
+    committed ``RPCExecution`` rows — there is no shared outer transaction
+    across children, because wrapping multiple ``create_execution()`` calls in
+    one outer transaction would risk leaving RQ jobs dangling against rows
+    rolled back by a later sibling's failure. Cancel an unwanted stray child
+    individually via the existing ``cancel`` command.
+
+    Ordering: children are created in ascending ``RPCIntentProcedure.sequence``
+    order (``RPCIntent.ordered_intent_procedures`` is already sorted that way)
+    regardless of ``execution_mode``. v1 note: today, both ``sequential`` and
+    ``parallel`` intents create their children synchronously, in that order,
+    within this one call — see ``docs/intents.md`` "Execution modes" for the
+    documented scope of what the mode currently affects (fail-fast abort
+    behaviour is identical for both; true concurrent/chained dispatch is a
+    future enhancement, not required for the safety contract in issue #130).
+
+    Origin marker: after a child is successfully created (i.e. *after*
+    ``params_schema`` validation has already run against the caller-supplied
+    ``params`` unmodified — stamping the marker beforehand would break any
+    procedure whose schema sets ``"additionalProperties": false``, the common
+    case for seeded procedures), the underscore-prefixed ``_intent`` /
+    ``_intent_name`` keys (``RPCExecution._INTENT_PARAM_KEYS``) are patched
+    into the child's stored ``params`` so the Runs tab attributes it as
+    ``Intent: <name>`` (see AGENTS.md "Procedure Runs Tab"). ``params`` is a
+    plain field, not part of the event-sourced projection (only
+    ``normalized_params`` is — see ``domain/projection.py``), so patching it
+    after creation does not touch the aggregate/event stream.
+    """
+    from ..models import RPCExecution
+
+    if not user.has_perm("netbox_rpc.execute_rpcintent"):
+        raise PermissionDenied("execute_rpcintent permission is required.")
+    if not intent.enabled:
+        raise drf_serializers.ValidationError({"intent": "This intent is disabled."})
+
+    # ``params`` is a bare JSONField on RPCIntentRunSerializer, so a caller can
+    # POST a non-object value (e.g. ``{"params": 5}``). Fail closed with a clean
+    # 400 rather than letting ``dict(params or {})`` below raise an uncaught 500.
+    if params is not None and not isinstance(params, dict):
+        raise drf_serializers.ValidationError(
+            {"params": "params must be a JSON object (mapping of param name to value)."}
+        )
+
+    ordered = list(intent.ordered_intent_procedures)
+    if not ordered:
+        raise drf_serializers.ValidationError(
+            {"intent": "This intent has no grouped procedures to run."}
+        )
+
+    from ..api.serializers import RPCExecutionSerializer
+
+    # RPCExecutionSerializer.assigned_object_type is a ContentTypeField, which
+    # deserializes the wire string form "<app_label>.<model>" (see
+    # netbox.api.fields.ContentTypeField.to_internal_value). assigned_object_type
+    # arrives here as an already-resolved ContentType instance, so it must be
+    # re-encoded to that string form before being fed back into a fresh
+    # serializer's `data=` -- passing the instance through directly would break
+    # `.split('.')` inside to_internal_value().
+    target_type_label = (
+        f"{assigned_object_type.app_label}.{assigned_object_type.model}"
+    )
+
+    base_params = dict(params or {})
+    children: list[object] = []
+    for intent_procedure in ordered:
+        procedure = intent_procedure.procedure
+        serializer = RPCExecutionSerializer(
+            data={
+                "procedure_id": procedure.pk,
+                "assigned_object_type": target_type_label,
+                "assigned_object_id": assigned_object_id,
+                "params": dict(base_params),
+            }
+        )
+        # No try/except: any gate failure here (PermissionDenied for
+        # approval_required, ValidationError for params/capability/etc.)
+        # propagates unmodified out of execute_intent(), exactly as it would
+        # from a direct RPCExecution create — this IS the no-bypass proof.
+        execution = create_execution(serializer=serializer, user=user)
+
+        stamped_params = {
+            **(execution.params or {}),
+            "_intent": intent.pk,
+            "_intent_name": intent.name,
+        }
+        RPCExecution.objects.filter(pk=execution.pk).update(params=stamped_params)
+        execution.params = stamped_params
+        children.append(execution)
+
+    return children
