@@ -13,7 +13,7 @@ from netbox_rpc.backends import BackendTarget
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 from netbox_rpc.models import RPCExecution
 
-from ._common import event_names, make_execution, make_user
+from ._common import enable_rpc_integration, event_names, make_execution, make_user
 
 _TARGET = BackendTarget(url="http://backend.example", headers={}, verify_ssl=True)
 
@@ -25,6 +25,10 @@ def _queued():
 
 
 class RunExecutionTests(TestCase):
+    def setUp(self):
+        # #166: the worker claim is gated on the opt-in being enabled.
+        enable_rpc_integration()
+
     @mock.patch.object(command_handlers, "resolve_backend", return_value=_TARGET)
     @mock.patch.object(command_handlers, "normalize_execution_params",
                        return_value={"command_fingerprint": {"handler_id": "x"}})
@@ -61,6 +65,12 @@ class RunExecutionTests(TestCase):
 
 
 class CancelAndRaceTests(TestCase):
+    def setUp(self):
+        # Keep the cancel-vs-run race meaningful: run_execution is #166-gated on
+        # the opt-in, so enable it or run_execution short-circuits on "disabled"
+        # before it can exercise the cancel race.
+        enable_rpc_integration()
+
     def test_cancel_queued(self):
         ex = _queued()
         command_handlers.cancel_execution(ex, make_user())
