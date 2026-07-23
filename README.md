@@ -48,6 +48,12 @@ The procedure catalog is intentionally narrow:
 
 Operators call named procedures, not arbitrary SSH commands.
 
+## Compatibility
+
+This release supports NetBox 4.5.8 through 4.6.x, including NetBox 4.6.5.
+The plugin pins `max_version = "4.6.99"` and its migration dependencies target
+NetBox migration anchors that exist in both 4.5.8 and 4.6.x.
+
 ## Procedure command source of truth
 
 Each `RPCProcedure` can own ordered `RPCProcedureCommand` rows. These rows are

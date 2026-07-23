@@ -9,9 +9,8 @@ class NetBoxRPCConfig(PluginConfig):
     base_url = "rpc"
     author = "Emerson Felipe"
     author_email = "emerson.felipe@nmultifibra.com.br"
-    # The migration graph depends on extras.0138 (ships with NetBox 4.6), so the
-    # real floor is 4.6.0 despite earlier 4.5 compatibility claims.
-    min_version = "4.6.0"
+    # Migration dependencies target anchors present in both NetBox 4.5.8 and 4.6.x.
+    min_version = "4.5.8"
     max_version = "4.6.99"
     required_settings = []
     default_settings = {}
