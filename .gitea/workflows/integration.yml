@@ -103,8 +103,10 @@ jobs:
       UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
       NETBOX_VERSION: ${{ matrix.netbox-version }}
       NETBOX_DB_NAME: ${{ matrix.compat-db }}
-      NETBOX_DB_USER: netbox
-      NETBOX_DB_PASSWORD: ${{ secrets.NETBOX_DB_PASSWORD }}
+      # The gate provisions its own role and databases; it does not use
+      # the production credentials.
+      NETBOX_DB_USER: netbox_rpc_ci
+      NETBOX_DB_PASSWORD: netbox_rpc_ci
       NETBOX_DB_HOST: localhost
       NETBOX_DB_PORT: "5432"
       NETBOX_REDIS_HOST: localhost
@@ -117,10 +119,6 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          if [ -z "${NETBOX_DB_PASSWORD}" ]; then
-            echo "NETBOX_DB_PASSWORD secret is required for the compatibility gate." >&2
-            exit 1
-          fi
           command -v sudo >/dev/null 2>&1 || { echo "sudo unavailable" >&2; exit 1; }
           id postgres >/dev/null 2>&1 || { echo "host postgres unavailable" >&2; exit 1; }
 
@@ -128,7 +126,8 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          sudo -n -u postgres psql -d postgres -c "ALTER ROLE ${NETBOX_DB_USER} CREATEDB" || true
+          sudo -n -u postgres psql -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='${NETBOX_DB_USER}'" | grep -q 1 || \
+            sudo -n -u postgres psql -d postgres -c "CREATE ROLE ${NETBOX_DB_USER} LOGIN PASSWORD '${NETBOX_DB_PASSWORD}' CREATEDB"
           for db in "${NETBOX_DB_NAME}" "test_${NETBOX_DB_NAME}"; do
             sudo -n -u postgres psql -d postgres -c "DROP DATABASE IF EXISTS ${db}" || true
             sudo -n -u postgres psql -d postgres -c "CREATE DATABASE ${db} OWNER ${NETBOX_DB_USER} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
