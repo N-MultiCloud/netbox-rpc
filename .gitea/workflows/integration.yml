@@ -171,4 +171,4 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
-          python netbox/netbox/manage.py test netbox_rpc --verbosity 2
+          python netbox/netbox/manage.py test netbox_rpc --keepdb --verbosity 2
