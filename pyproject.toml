@@ -39,6 +39,12 @@ include-package-data = true
 [tool.setuptools.packages.find]
 include = ["netbox_rpc*"]
 
+[tool.setuptools.package-data]
+# include-package-data only picks up VCS/MANIFEST-tracked files for sdists;
+# wheels need the template globs declared explicitly or /plugins/rpc/ fails
+# with TemplateDoesNotExist on non-editable installs.
+netbox_rpc = ["templates/netbox_rpc/*.html"]
+
 [tool.pytest.ini_options]
 # Put the repository root on sys.path so `pytest tests/` (the console-script
 # invocation used by CI) can import the in-tree `netbox_rpc` package without an
