@@ -44,6 +44,17 @@ COMMAND_RUNTIME_KEYS = frozenset(
         "rpc_ssh_strict_host_key_checking",
         "target",
         "item",
+        # Normalizer-derived (never caller-supplied) substitution values. Like
+        # ``target``/``item`` these are produced at normalization time, not
+        # declared in ``params_schema``, so they must be allowed here for
+        # ``RPCProcedureCommand.clean()``/``full_clean()`` to accept a seeded
+        # argv that references them. ``members_csv`` is the comma-joined form of
+        # the Samba identity ``members`` list param (safe-charset-validated
+        # per-entry by ``_normalize_samba_member_list`` before the join), used by
+        # ``service.samba_1.group_add_members``/``group_remove_members``. It is
+        # deliberately NOT a ``params_schema`` property: declaring it there would
+        # let a caller pass a pre-joined string and bypass per-member validation.
+        "members_csv",
     }
 )
 
@@ -144,6 +155,18 @@ EXEMPT_HANDLER_RATIONALE = {
     "service.samba_1.share_delete": (
         "Removes one safe share definition from Samba config through backend-owned "
         "parse/edit/validate/snapshot/reload orchestration."
+    ),
+    "service.samba_1.user_create": (
+        "Creates a Samba/AD user with a caller-supplied password delivered to "
+        "samba-tool over stdin. The password is scrubbed to a sha256+byte-count "
+        "fingerprint at execution-creation time and is never persisted or "
+        "represented as an argv token."
+    ),
+    "service.samba_1.user_set_password": (
+        "Resets a Samba/AD user password delivered to samba-tool over stdin. The "
+        "password is scrubbed to a sha256+byte-count fingerprint at "
+        "execution-creation time and is never persisted or represented as an "
+        "argv token."
     ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "

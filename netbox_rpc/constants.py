@@ -143,6 +143,33 @@ SAMBA_1_SHARE_DELETE = "service.samba.1.share_delete"
 SAMBA_1_SHARE_DELETE_HANDLER = "service.samba_1.share_delete"
 SAMBA_1_SERVICE_CONTROL = "service.samba.1.service_control"
 SAMBA_1_SERVICE_CONTROL_HANDLER = "service.samba_1.service_control"
+
+# Identity-management procedures (issue #160). user_create and
+# user_set_password accept a password that is scrubbed to a sha256+byte-count
+# fingerprint at execution-creation time (command_handlers.create_execution())
+# and is never persisted in params/normalized_params/result/events; both
+# handlers are EXEMPT_HANDLER_RATIONALE entries (stdin-secret delivery, no
+# faithful fixed-argv representation). user_delete/group_delete are
+# destructive and approval-gated.
+SAMBA_1_USER_CREATE = "service.samba.1.user_create"
+SAMBA_1_USER_CREATE_HANDLER = "service.samba_1.user_create"
+SAMBA_1_USER_DELETE = "service.samba.1.user_delete"
+SAMBA_1_USER_DELETE_HANDLER = "service.samba_1.user_delete"
+SAMBA_1_USER_SET_PASSWORD = "service.samba.1.user_set_password"
+SAMBA_1_USER_SET_PASSWORD_HANDLER = "service.samba_1.user_set_password"
+SAMBA_1_USER_ENABLE = "service.samba.1.user_enable"
+SAMBA_1_USER_ENABLE_HANDLER = "service.samba_1.user_enable"
+SAMBA_1_USER_DISABLE = "service.samba.1.user_disable"
+SAMBA_1_USER_DISABLE_HANDLER = "service.samba_1.user_disable"
+SAMBA_1_GROUP_CREATE = "service.samba.1.group_create"
+SAMBA_1_GROUP_CREATE_HANDLER = "service.samba_1.group_create"
+SAMBA_1_GROUP_DELETE = "service.samba.1.group_delete"
+SAMBA_1_GROUP_DELETE_HANDLER = "service.samba_1.group_delete"
+SAMBA_1_GROUP_ADD_MEMBERS = "service.samba.1.group_add_members"
+SAMBA_1_GROUP_ADD_MEMBERS_HANDLER = "service.samba_1.group_add_members"
+SAMBA_1_GROUP_REMOVE_MEMBERS = "service.samba.1.group_remove_members"
+SAMBA_1_GROUP_REMOVE_MEMBERS_HANDLER = "service.samba_1.group_remove_members"
+
 SAMBA_1_PROCEDURE_NAMES = frozenset(
     {
         SAMBA_1_CONFIG_READ,
@@ -164,8 +191,22 @@ SAMBA_1_PROCEDURE_NAMES = frozenset(
         SAMBA_1_SHARE_UPSERT,
         SAMBA_1_SHARE_DELETE,
         SAMBA_1_SERVICE_CONTROL,
+        SAMBA_1_USER_CREATE,
+        SAMBA_1_USER_DELETE,
+        SAMBA_1_USER_SET_PASSWORD,
+        SAMBA_1_USER_ENABLE,
+        SAMBA_1_USER_DISABLE,
+        SAMBA_1_GROUP_CREATE,
+        SAMBA_1_GROUP_DELETE,
+        SAMBA_1_GROUP_ADD_MEMBERS,
+        SAMBA_1_GROUP_REMOVE_MEMBERS,
     }
 )
+
+# Declarative fileserver.samba intents (issue #160) — reference-data grouping
+# names only; no live import elsewhere (seed migration inlines the strings).
+FILESERVER_SAMBA_COLLECT_STATE = "fileserver.samba.collect_state"
+FILESERVER_SAMBA_DEPLOY_CONFIG = "fileserver.samba.deploy_config"
 
 MINECRAFT_PLUGIN_INSTALL_URL = "services.minecraft.plugin.install_url"
 MINECRAFT_PLUGIN_INSTALL_URL_HANDLER = "services.minecraft.plugin.install_url"

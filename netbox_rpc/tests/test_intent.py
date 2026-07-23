@@ -311,3 +311,74 @@ class IntentFormTests(TestCase):
             )
         )
         assert rows == [(b.pk, 1), (a.pk, 2)]
+
+
+class FileserverSambaIntentSeedTests(TestCase):
+    """DB proof that migration 0057 seeds the two #160 fileserver.samba
+    RPCIntents with the documented membership, ordering, and execution mode.
+
+    Executing an intent is out of scope here -- command_handlers.execute_intent()
+    (#130) is covered by test_intent_executor.py and is unmodified by #160; this
+    only proves the migration's declarative reference data landed correctly.
+    """
+
+    def test_collect_state_intent_is_parallel_with_the_nine_read_procedures(self):
+        intent = RPCIntent.objects.get(name="fileserver.samba.collect_state")
+        assert intent.execution_mode == RPCIntent.MODE_PARALLEL
+        assert intent.enabled is True
+
+        ordered_names = [
+            ip.procedure.name for ip in intent.ordered_intent_procedures
+        ]
+        assert ordered_names == [
+            "service.samba.1.version",
+            "service.samba.1.service_status",
+            "service.samba.1.config_read",
+            "service.samba.1.config_test",
+            "service.samba.1.list_shares",
+            "service.samba.1.status_report",
+            "service.samba.1.user_list",
+            "service.samba.1.group_list",
+            "service.samba.1.domain_info",
+        ]
+        for ip in intent.ordered_intent_procedures:
+            assert ip.procedure.effect == "read"
+
+    def test_deploy_config_intent_is_sequential_with_the_four_write_procedures(self):
+        intent = RPCIntent.objects.get(name="fileserver.samba.deploy_config")
+        assert intent.execution_mode == RPCIntent.MODE_SEQUENTIAL
+        assert intent.enabled is True
+
+        ordered_names = [
+            ip.procedure.name for ip in intent.ordered_intent_procedures
+        ]
+        assert ordered_names == [
+            "service.samba.1.config_test",
+            "service.samba.1.config_deploy",
+            "service.samba.1.service_control",
+            "service.samba.1.service_status",
+        ]
+
+    def test_identity_procedures_are_not_grouped_into_either_intent(self):
+        # #160's nine identity procedures are standalone actions, not part of
+        # the read-sweep or the config-deploy lifecycle groupings.
+        identity_names = {
+            "service.samba.1.user_create",
+            "service.samba.1.user_delete",
+            "service.samba.1.user_set_password",
+            "service.samba.1.user_enable",
+            "service.samba.1.user_disable",
+            "service.samba.1.group_create",
+            "service.samba.1.group_delete",
+            "service.samba.1.group_add_members",
+            "service.samba.1.group_remove_members",
+        }
+        grouped_names = set(
+            RPCIntentProcedure.objects.filter(
+                intent__name__in=[
+                    "fileserver.samba.collect_state",
+                    "fileserver.samba.deploy_config",
+                ]
+            ).values_list("procedure__name", flat=True)
+        )
+        assert grouped_names.isdisjoint(identity_names)

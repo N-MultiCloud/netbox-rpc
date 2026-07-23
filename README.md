@@ -533,6 +533,67 @@ These procedures never return credential material — the `user_list` and
 state persisted by `netbox-fileserver` satisfies its no-secrets-at-rest
 invariant.
 
+### `service.samba.1.*` — Samba/AD identity management (#160)
+
+Migration `0055` seeds nine procedures completing the Samba catalog with
+user/group lifecycle actions; migration `0056` seeds their command rows.
+Target models and handler-ID mapping are the same as the observability/config
+family above.
+
+| Procedure | Effect | Approval | Timeout | Purpose |
+|---|---|---|---|---|
+| `service.samba.1.user_create` | write | no | 60s | Create a Samba/AD user (`username`, `password`, optional `full_name`, `disabled`) |
+| `service.samba.1.user_delete` | **destructive** | **yes** | 60s | Delete a user by `username` |
+| `service.samba.1.user_set_password` | write | no | 60s | Reset a user's password (`username`, `password`) |
+| `service.samba.1.user_enable` | write | no | 30s | Enable a user account by `username` |
+| `service.samba.1.user_disable` | write | no | 30s | Disable a user account by `username` |
+| `service.samba.1.group_create` | write | no | 60s | Create a group (`group_name`) |
+| `service.samba.1.group_delete` | **destructive** | **yes** | 60s | Delete a group by `group_name` |
+| `service.samba.1.group_add_members` | write | no | 60s | Add 1–128 members to a group |
+| `service.samba.1.group_remove_members` | write | no | 60s | Remove 1–128 members from a group |
+
+`user_create` and `user_set_password` are the only two procedures in the
+catalog whose `params_schema` declares a `password` field, and it is handled
+as a secret end to end:
+
+- The password is delivered to `samba-tool` over **stdin only** — it is never
+  an argv token. Both handlers are `EXEMPT_HANDLER_RATIONALE` entries in
+  `netbox_rpc.command_contract`, seeded with one representative
+  `backend-orchestrated` command row each.
+- At execution-creation time, `command_handlers._scrub_password_param()` pops
+  the raw `password` out of `params` and replaces it with a `password_sha256`
+  (sha256 hex digest) + `password_bytes` (byte length) fingerprint **before**
+  the `RPCExecution` row is saved — the plaintext is never written to the
+  database, not even transiently.
+- The normalizer's `_extract_samba_password_fingerprint()` never receives a
+  raw password; it only forwards the pre-computed fingerprint fields and
+  rejects (`RPC_PARAM_INVALID`) a missing or malformed fingerprint.
+- No password or hash of it is ever present in `params`, `normalized_params`,
+  `result`, or any `RPCExecutionEvent` — proven by
+  `tests/test_jobs_samba_normalization.py` (pure-domain) and
+  `netbox_rpc/tests/test_samba_identity_password_redaction.py` (DB-backed, a
+  real created + run `RPCExecution` row and its events).
+
+`username`, `group_name`, and each `members` entry are validated in both the
+`params_schema` and the normalizer with the same charset-confined,
+safe-first-character pattern used elsewhere in this family, so a value can
+never be read as a `samba-tool` option.
+
+### `fileserver.samba.*` — seeded RPCIntents (#160)
+
+Migration `0057` seeds two `RPCIntent` rows grouping the Samba procedures
+above — declarative reference data only, adding no executor and no new
+mutation surface (see [Intents](#intents)):
+
+| Intent | Mode | Grouped procedures |
+|---|---|---|
+| `fileserver.samba.collect_state` | `parallel` | `version`, `service_status`, `config_read`, `config_test`, `list_shares`, `status_report`, `user_list`, `group_list`, `domain_info` |
+| `fileserver.samba.deploy_config` | `sequential` | `config_test` → `config_deploy` → `service_control` → `service_status` |
+
+The nine identity procedures above are deliberately not grouped into either
+intent — they are standalone actions. See
+[`docs/intents.md`](docs/intents.md) → "Seeded intents" for the full contract.
+
 ### Minecraft stack SSH procedures
 
 Migration `0029` adds structured SSH fallback procedures for game nodes and

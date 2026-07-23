@@ -709,6 +709,95 @@ be used autonomously on destructive procedures.
   before a single trailing newline. The `user_list` and `domain_info`
   `result_schema`s contain no password/hash fields (asserted in
   `tests/test_jobs_samba_normalization.py`).
+- Samba/AD **identity management** procedures (#160) are seeded by migration
+  `0055` (command rows in `0056`). Nine procedures complete the Samba catalog
+  with user/group create/delete/enable/disable/password/membership actions,
+  all targeting `["netbox_fileserver.sambadomain", "virtualization.virtualmachine", "dcim.device"]`
+  like the rest of the Samba catalog. Handler IDs follow the same
+  `samba.1` → `samba_1` mapping (e.g. `service.samba_1.user_create`).
+  - `user_create` (write, 60s, no approval) — creates a Samba/AD user.
+    Required `username`, `password`; optional `full_name`, `disabled`.
+  - `user_delete` (**destructive, 60s, approval required**) — deletes a user
+    by `username`.
+  - `user_set_password` (write, 60s, no approval) — resets a user's password.
+    Required `username`, `password`.
+  - `user_enable` / `user_disable` (write, 30s, no approval) — enable/disable
+    a user account by `username`.
+  - `group_create` (write, 60s, no approval) — creates a group. Required
+    `group_name`.
+  - `group_delete` (**destructive, 60s, approval required**) — deletes a
+    group by `group_name`.
+  - `group_add_members` / `group_remove_members` (write, 60s, no approval) —
+    add/remove one or more users from a group. Required `group_name`,
+    `members` (1–128 unique identifiers).
+
+  **Password handling (hard security invariant).** `user_create` and
+  `user_set_password` are the only two procedures in the whole netbox-rpc
+  catalog whose `params_schema` declares a `password` property. The raw
+  password is **never** represented as an argv token and **never** persisted
+  anywhere in netbox-rpc:
+  1. It travels to `samba-tool` over **stdin only** — both handlers are
+     backend-orchestrated `EXEMPT_HANDLER_RATIONALE` entries in
+     `netbox_rpc.command_contract` (seeded with one representative
+     `backend-orchestrated` command row each in migration `0056`), because a
+     stdin-secret delivery has no faithful fixed-argv representation.
+  2. At execution-**creation** time (`command_handlers.create_execution()`),
+     immediately after `params_schema` validation and before
+     `serializer.save()`, `_scrub_password_param()` pops `password` from the
+     in-place `params` dict and replaces it with `password_sha256`
+     (`hashlib.sha256`) and `password_bytes` (byte length) — so the
+     `RPCExecution` row is never written to the database with the plaintext
+     value, not even transiently. `_PASSWORD_BEARING_HANDLER_IDS` in
+     `command_handlers.py` is the single source of truth for which two
+     handler IDs this applies to.
+  3. The async normalizer (`_extract_samba_password_fingerprint()` in
+     `netbox_rpc.domain.normalization`) never receives, reads, or forwards a
+     raw password — it only reads and forwards the pre-computed
+     `password_sha256`/`password_bytes` fingerprint fields, and defensively
+     rejects a malformed or missing fingerprint (`RPC_PARAM_INVALID`) rather
+     than falling back to any raw value.
+  4. `tests/test_jobs_samba_normalization.py` proves the normalizer never
+     leaks a password even if one is still present in `params` (belt and
+     suspenders), and `netbox_rpc/tests/test_samba_identity_password_redaction.py`
+     proves the same end to end against a real DB row: the persisted `params`,
+     the post-run `normalized_params`, and every `RPCExecutionEvent.data`
+     contain only the fingerprint, never the plaintext.
+
+  **Backend implementation is a deliberately separate, not-yet-shipped step
+  (catalog-first convention).** Like every prior Samba procedure (migrations
+  `0049`–`0052`) and every `EXEMPT_HANDLER_RATIONALE` entry, `netbox-rpc` seeds
+  the audited catalog first; the matching `service.samba_1.*` `@rpc_handler`
+  lands separately in the execution backend and is **not part of this change**
+  (no `samba` handler exists in `netbox-rpc-backend`/`nms-backend` yet). A direct
+  consequence of the invariant above: because the scrub replaces the plaintext
+  with an **irreversible** `password_sha256`, the fingerprint that reaches the
+  backend (via the pull-side execution fetch) can confirm *which* password was
+  requested but can never reconstruct it. Secure plaintext delivery to
+  `samba-tool` stdin for `user_create`/`user_set_password` therefore requires a
+  **separate operator-driven secure channel in the backend handler** (never
+  netbox-rpc's stored params/events) — designing that channel is the paired
+  backend follow-up, tracked outside #160. Until it ships, these two procedures
+  are catalog/audit-only.
+
+  Usernames, group names, and member-list entries are validated in *both* the
+  `params_schema` (migration `0055`) and the normalizer
+  (`_normalize_samba_username` / `_normalize_samba_group_name` /
+  `_normalize_samba_member_list`) with a charset-confined, safe-first-character
+  pattern, so a value can never be read as a `samba-tool` option or shell
+  metacharacter.
+
+  **`fileserver.samba.collect_state` / `fileserver.samba.deploy_config`
+  (#160, migration `0057`)** are two `RPCIntent` rows grouping the pre-existing
+  Samba read/write catalog above — `collect_state` (`execution_mode="parallel"`)
+  groups the nine read procedures (`version`, `service_status`, `config_read`,
+  `config_test`, `list_shares`, `status_report`, `user_list`, `group_list`,
+  `domain_info`); `deploy_config` (`execution_mode="sequential"`) chains
+  `config_test` → `config_deploy` → `service_control` → `service_status`. Both
+  are declarative reference data only — no executor was added; running one goes
+  through the existing `execute_intent()` (#130) fan-out, which re-applies
+  every gate per child. See [`docs/intents.md`](docs/intents.md) → "Seeded
+  intents" for the full contract. The nine identity procedures above are
+  deliberately not grouped into either intent.
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.

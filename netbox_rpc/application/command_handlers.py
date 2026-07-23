@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import jsonschema
@@ -11,6 +12,34 @@ from ..backends import resolve_backend
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import RPCExecutionError, normalize_execution_params
 from ..event_store import mark_execution_failed
+
+# Handler IDs whose params_schema declares a "password" property (issue #160:
+# service.samba.1.user_create / user_set_password). The raw password must
+# never reach a persisted RPCExecution row: _scrub_password_param() replaces
+# it with a sha256+byte-count fingerprint before serializer.save() writes the
+# row, so params/normalized_params/result/events never contain the plaintext.
+_PASSWORD_BEARING_HANDLER_IDS = frozenset(
+    {
+        "service.samba_1.user_create",
+        "service.samba_1.user_set_password",
+    }
+)
+
+
+def _scrub_password_param(params: dict[str, Any]) -> None:
+    """Replace an in-place ``password`` param with a non-reversible fingerprint.
+
+    Mutates ``params`` (the same dict object DRF will persist via
+    ``serializer.save()``) so the raw password value is never written to the
+    database, not even transiently. Downstream normalization only ever sees
+    ``password_sha256`` / ``password_bytes``.
+    """
+    if "password" not in params:
+        return
+    raw_password = params.pop("password")
+    password_bytes = str(raw_password).encode("utf-8")
+    params["password_sha256"] = hashlib.sha256(password_bytes).hexdigest()
+    params["password_bytes"] = len(password_bytes)
 
 
 def _require_enabled_and_authoritative_backend(user: object) -> object | None:
@@ -93,6 +122,13 @@ def create_execution(*, serializer: Any, user: object) -> object:
             jsonschema.validate(params, procedure.params_schema)
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
+
+    # #160: scrub a raw password to a fingerprint AFTER schema validation (so
+    # the caller-visible validation error still names "password") and BEFORE
+    # anything is persisted, so the plaintext value is never written to the
+    # database even transiently.
+    if procedure.handler_id in _PASSWORD_BEARING_HANDLER_IDS:
+        _scrub_password_param(params)
 
     # #167: fail closed before enqueue on a backend capability mismatch.
     _verify_backend_capability(procedure)

@@ -64,6 +64,15 @@ from ..constants import (
     SAMBA_1_SHARE_DELETE,
     SAMBA_1_SHARE_UPSERT,
     SAMBA_1_SERVICE_CONTROL,
+    SAMBA_1_USER_CREATE,
+    SAMBA_1_USER_DELETE,
+    SAMBA_1_USER_SET_PASSWORD,
+    SAMBA_1_USER_ENABLE,
+    SAMBA_1_USER_DISABLE,
+    SAMBA_1_GROUP_CREATE,
+    SAMBA_1_GROUP_DELETE,
+    SAMBA_1_GROUP_ADD_MEMBERS,
+    SAMBA_1_GROUP_REMOVE_MEMBERS,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -175,6 +184,16 @@ _SAMBA_PRINCIPAL_RE = re.compile(r"@?[A-Za-z0-9_][A-Za-z0-9_.@+\\-]{0,127}$")
 _SAMBA_MASK_RE = re.compile(r"[0-7]{3,4}$")
 _SAMBA_SERVICE_UNITS = frozenset({"smbd", "nmbd", "winbind", "samba-ad-dc"})
 _SAMBA_SERVICE_ACTIONS = frozenset({"start", "stop", "restart", "reload"})
+# Samba/AD user and group identifiers (issue #160). The first character must
+# be a safe alphanumeric/underscore so a value can never be read as a
+# samba-tool option (e.g. "--force"); "-", ".", and "@" (UPN-style names) are
+# only allowed after the first character.
+_SAMBA_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
+_SAMBA_MAX_GROUP_MEMBERS = 128
+# Defensive shape check for the password fingerprint computed and persisted by
+# command_handlers._scrub_password_param() before this normalizer ever runs;
+# this normalizer never sees a raw password.
+_HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}$")
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
 # "* action", plus the preexec/postexec family. "root preexec" runs as root, so
@@ -1011,6 +1030,63 @@ def _normalize_samba_1_execution(
         normalized["command_fingerprint"]["action"] = action
         normalized["command_fingerprint"]["systemd_unit"] = systemd_unit
 
+    if procedure_name in {
+        SAMBA_1_USER_CREATE,
+        SAMBA_1_USER_DELETE,
+        SAMBA_1_USER_SET_PASSWORD,
+        SAMBA_1_USER_ENABLE,
+        SAMBA_1_USER_DISABLE,
+    }:
+        username = _normalize_samba_username(params.get("username"))
+        normalized["username"] = username
+        normalized["command_fingerprint"]["username"] = username
+
+    if procedure_name in {SAMBA_1_USER_CREATE, SAMBA_1_USER_SET_PASSWORD}:
+        # #160: the raw password never reaches this normalizer. It is scrubbed
+        # to password_sha256/password_bytes in command_handlers.create_execution()
+        # before the execution row is ever persisted; this only re-validates
+        # and forwards that already-computed, non-reversible fingerprint.
+        fingerprint = _extract_samba_password_fingerprint(params)
+        normalized["password_sha256"] = fingerprint["password_sha256"]
+        normalized["password_bytes"] = fingerprint["password_bytes"]
+        normalized["command_fingerprint"]["password_sha256"] = fingerprint[
+            "password_sha256"
+        ]
+        normalized["command_fingerprint"]["password_bytes"] = fingerprint[
+            "password_bytes"
+        ]
+
+    if procedure_name == SAMBA_1_USER_CREATE:
+        full_name = _normalize_samba_share_text(params.get("full_name"))
+        if full_name:
+            normalized["full_name"] = full_name
+            normalized["command_fingerprint"]["full_name_sha256"] = _hash_text(
+                full_name
+            )
+        disabled = _bool_param(params, "disabled", False)
+        normalized["disabled"] = disabled
+        normalized["command_fingerprint"]["disabled"] = disabled
+
+    if procedure_name in {SAMBA_1_GROUP_CREATE, SAMBA_1_GROUP_DELETE}:
+        group_name = _normalize_samba_group_name(params.get("group_name"))
+        normalized["group_name"] = group_name
+        normalized["command_fingerprint"]["group_name"] = group_name
+
+    if procedure_name in {SAMBA_1_GROUP_ADD_MEMBERS, SAMBA_1_GROUP_REMOVE_MEMBERS}:
+        group_name = _normalize_samba_group_name(params.get("group_name"))
+        members = _normalize_samba_member_list(params.get("members"), "members")
+        if not members:
+            raise RPCExecutionError(
+                "members must contain at least one safe Samba/AD identifier.",
+                code="RPC_PARAM_INVALID",
+            )
+        members_csv = ",".join(members)
+        normalized["group_name"] = group_name
+        normalized["members"] = members
+        normalized["members_csv"] = members_csv
+        normalized["command_fingerprint"]["group_name"] = group_name
+        normalized["command_fingerprint"]["members"] = members
+
     _copy_optional_ssh_overrides(params, normalized)
     return normalized
 
@@ -1343,6 +1419,87 @@ def _normalize_samba_share_name(raw_name: object) -> str:
             code="RPC_PARAM_INVALID",
         )
     return share_name
+
+
+def _normalize_samba_username(raw_username: object) -> str:
+    username = str(raw_username or "").strip()
+    if not username or not _SAMBA_IDENTIFIER_RE.fullmatch(username):
+        raise RPCExecutionError(
+            "username must be a safe Samba/AD identifier without shell "
+            "metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return username
+
+
+def _normalize_samba_group_name(raw_group_name: object) -> str:
+    group_name = str(raw_group_name or "").strip()
+    if not group_name or not _SAMBA_IDENTIFIER_RE.fullmatch(group_name):
+        raise RPCExecutionError(
+            "group_name must be a safe Samba/AD identifier without shell "
+            "metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return group_name
+
+
+def _normalize_samba_member_list(raw_values: object, field_name: str) -> list[str]:
+    if raw_values in (None, ""):
+        return []
+    if not isinstance(raw_values, (list, tuple)):
+        raise RPCExecutionError(
+            f"{field_name} must be a list of safe Samba/AD identifiers.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(raw_values) > _SAMBA_MAX_GROUP_MEMBERS:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most {_SAMBA_MAX_GROUP_MEMBERS} entries.",
+            code="RPC_PARAM_INVALID",
+        )
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        value = _normalize_samba_username(raw_value)
+        if value in seen:
+            raise RPCExecutionError(
+                f"{field_name} entries must be unique.",
+                code="RPC_PARAM_INVALID",
+            )
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _extract_samba_password_fingerprint(params: dict[str, Any]) -> dict[str, Any]:
+    """Re-validate the already-scrubbed password fingerprint.
+
+    This function NEVER receives, reads, or forwards a raw password. By the
+    time this normalizer runs, command_handlers.create_execution() has already
+    replaced any caller-supplied ``password`` with ``password_sha256`` /
+    ``password_bytes`` before the execution row was persisted (see #160). This
+    only defensively re-validates the shape of that fingerprint.
+    """
+    password_sha256 = str(params.get("password_sha256") or "").strip().lower()
+    if not password_sha256 or not _HEX_SHA256_RE.fullmatch(password_sha256):
+        raise RPCExecutionError(
+            "password_sha256 must be a 64-character lowercase hex sha256 "
+            "digest computed by the server; a raw password was never expected "
+            "here.",
+            code="RPC_PARAM_INVALID",
+        )
+    password_bytes = params.get("password_bytes")
+    if not isinstance(password_bytes, int) or isinstance(password_bytes, bool):
+        raise RPCExecutionError(
+            "password_bytes must be an integer byte count computed by the "
+            "server.",
+            code="RPC_PARAM_INVALID",
+        )
+    if password_bytes < 1 or password_bytes > 4096:
+        raise RPCExecutionError(
+            "password_bytes must be between 1 and 4096.",
+            code="RPC_PARAM_INVALID",
+        )
+    return {"password_sha256": password_sha256, "password_bytes": password_bytes}
 
 
 def _normalize_passbolt_migration_execution(
