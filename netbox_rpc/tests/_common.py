@@ -39,10 +39,18 @@ def make_device(name: str = "rpc-test-device"):
     from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
     site, _ = Site.objects.get_or_create(name="RPC Test Site", slug="rpc-test-site")
-    mfr, _ = Manufacturer.objects.get_or_create(name="RPC Test Mfr", slug="rpc-test-mfr")
-    dtype, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="RPC Test Model", slug="rpc-test-model")
-    role, _ = DeviceRole.objects.get_or_create(name="RPC Test Role", slug="rpc-test-role")
-    device, _ = Device.objects.get_or_create(name=name, defaults={"device_type": dtype, "role": role, "site": site})
+    mfr, _ = Manufacturer.objects.get_or_create(
+        name="RPC Test Mfr", slug="rpc-test-mfr"
+    )
+    dtype, _ = DeviceType.objects.get_or_create(
+        manufacturer=mfr, model="RPC Test Model", slug="rpc-test-model"
+    )
+    role, _ = DeviceRole.objects.get_or_create(
+        name="RPC Test Role", slug="rpc-test-role"
+    )
+    device, _ = Device.objects.get_or_create(
+        name=name, defaults={"device_type": dtype, "role": role, "site": site}
+    )
     return device
 
 
@@ -73,10 +81,32 @@ def make_intent(
         models.RPCIntentProcedure.objects.filter(intent=intent).delete()
         models.RPCIntentProcedure.objects.bulk_create(
             [
-                models.RPCIntentProcedure(
-                    intent=intent, procedure=proc, sequence=index
-                )
+                models.RPCIntentProcedure(intent=intent, procedure=proc, sequence=index)
                 for index, proc in enumerate(procedures, start=1)
             ]
         )
     return intent
+
+
+def make_backend(
+    name: str = "rpc-test-backend",
+    base_url: str = "http://rpc-backend.test:16005",
+) -> "models.RPCBackend":
+    backend, _ = models.RPCBackend.objects.get_or_create(
+        name=name, defaults={"base_url": base_url}
+    )
+    return backend
+
+
+def enable_rpc_integration(*, backend=None) -> "models.RpcPluginSettings":
+    """Opt the netbox-rpc integration in for tests that exercise create/run.
+
+    #166 makes ``RpcPluginSettings.enabled`` + the selected backend
+    authoritative, so any test that creates or dispatches an execution must
+    first opt in (the singleton defaults to ``enabled=False``).
+    """
+    settings_row = models.RpcPluginSettings.get_solo()
+    settings_row.enabled = True
+    settings_row.backend = backend or make_backend()
+    settings_row.save()
+    return settings_row

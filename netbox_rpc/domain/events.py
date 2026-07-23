@@ -319,11 +319,284 @@ class ExecutionCancelled:
         )
 
 
+@dataclass(frozen=True)
+class ExecutionRequested:
+    """First event of an approval-gated stream (issue #164).
+
+    Marks that a requester has asked for an execution that requires approval.
+    It intentionally carries no command detail — the immutable snapshot in
+    ``ApprovalRequested`` is the authoritative, hashed record.
+    """
+
+    requested_by_id: Any | None = None
+
+    EVENT_NAME: ClassVar[str] = "ExecutionRequested"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "info"
+
+    @property
+    def message(self) -> str:
+        return "RPC execution requested (approval required)."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"status": ExecutionStatus.REQUESTED.value}
+        if self.requested_by_id is not None:
+            data["requested_by_id"] = self.requested_by_id
+        return data
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> ExecutionRequested:
+        return cls(requested_by_id=data.get("requested_by_id"))
+
+
+@dataclass(frozen=True)
+class ApprovalRequested:
+    """Pending-approval decision point with the immutable snapshot fingerprint.
+
+    ``snapshot_hash`` is the tamper-evident hash over the protected snapshot
+    fields (procedure id/version/effect, target snapshot, normalized params /
+    command fingerprint, backend, credential policy, requester, expiry). A
+    later approval must re-present the same hash or it is invalidated.
+    """
+
+    snapshot_hash: str
+    expires_at: Any | None = None
+    requested_by_id: Any | None = None
+
+    EVENT_NAME: ClassVar[str] = "ApprovalRequested"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "info"
+
+    @property
+    def message(self) -> str:
+        return "Approval requested; execution is pending a second-actor decision."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "status": ExecutionStatus.PENDING_APPROVAL.value,
+            "snapshot_hash": self.snapshot_hash,
+        }
+        if self.expires_at is not None:
+            data["expires_at"] = _serialize_datetime(self.expires_at)
+        if self.requested_by_id is not None:
+            data["requested_by_id"] = self.requested_by_id
+        return data
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> ApprovalRequested:
+        return cls(
+            snapshot_hash=str(data.get("snapshot_hash") or ""),
+            expires_at=data.get("expires_at"),
+            requested_by_id=data.get("requested_by_id"),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionApproved:
+    """Second-actor approval. ``approved_by_id`` MUST differ from the requester
+    (segregation of duties is enforced in the aggregate)."""
+
+    approved_by_id: Any
+    snapshot_hash: str
+    decided_at: Any
+    reason: str = ""
+
+    EVENT_NAME: ClassVar[str] = "ExecutionApproved"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "info"
+
+    @property
+    def message(self) -> str:
+        return self.reason or "RPC execution approved."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "status": ExecutionStatus.APPROVED.value,
+            "approved_by_id": self.approved_by_id,
+            "snapshot_hash": self.snapshot_hash,
+            "decided_at": _serialize_datetime(self.decided_at),
+        }
+        if self.reason:
+            data["reason"] = self.reason
+        return data
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> ExecutionApproved:
+        return cls(
+            approved_by_id=data.get("approved_by_id"),
+            snapshot_hash=str(data.get("snapshot_hash") or ""),
+            decided_at=data.get("decided_at"),
+            reason=str(data.get("reason") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionRejected:
+    """Terminal rejection decision by a distinct second actor."""
+
+    rejected_by_id: Any
+    decided_at: Any
+    reason: str = ""
+
+    EVENT_NAME: ClassVar[str] = "ExecutionRejected"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "warning"
+
+    @property
+    def message(self) -> str:
+        return self.reason or "RPC execution rejected."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "status": ExecutionStatus.REJECTED.value,
+            "rejected_by_id": self.rejected_by_id,
+            "decided_at": _serialize_datetime(self.decided_at),
+        }
+        if self.reason:
+            data["reason"] = self.reason
+        return data
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> ExecutionRejected:
+        return cls(
+            rejected_by_id=data.get("rejected_by_id"),
+            decided_at=data.get("decided_at"),
+            reason=str(data.get("reason") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionExpired:
+    """Terminal expiry of a pending approval that was never decided in time."""
+
+    expired_at: Any
+    reason: str = ""
+
+    EVENT_NAME: ClassVar[str] = "ExecutionExpired"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "warning"
+
+    @property
+    def message(self) -> str:
+        return self.reason or "Approval request expired before a decision."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "status": ExecutionStatus.EXPIRED.value,
+            "expired_at": _serialize_datetime(self.expired_at),
+        }
+        if self.reason:
+            data["reason"] = self.reason
+        return data
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> ExecutionExpired:
+        return cls(
+            expired_at=data.get("expired_at"),
+            reason=str(data.get("reason") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class DispatchLeaseIssued:
+    """Audit event (#168): a one-time signed dispatch lease was minted for a
+    just-claimed execution. Records the nonce, key lineage, stream version,
+    audience, and expiry — references only, never the signature or any secret.
+    Audit-only: it does not advance the execution status."""
+
+    nonce: str = ""
+    key_id: str = ""
+    key_version: int = 1
+    stream_version: int = 0
+    audience: str = ""
+    expires_at: Any = None
+    envelope_version: int = 1
+
+    EVENT_NAME: ClassVar[str] = "DispatchLeaseIssued"
+
+    @property
+    def event_name(self) -> str:
+        return self.EVENT_NAME
+
+    @property
+    def level(self) -> str:
+        return "info"
+
+    @property
+    def message(self) -> str:
+        return "Signed dispatch lease issued."
+
+    @property
+    def data(self) -> dict[str, Any]:
+        return {
+            "nonce": self.nonce,
+            "key_id": self.key_id,
+            "key_version": self.key_version,
+            "stream_version": self.stream_version,
+            "audience": self.audience,
+            "expires_at": _serialize_datetime(self.expires_at),
+            "envelope_version": self.envelope_version,
+        }
+
+    @classmethod
+    def from_data(cls, data: dict[str, Any]) -> DispatchLeaseIssued:
+        return cls(
+            nonce=str(data.get("nonce") or ""),
+            key_id=str(data.get("key_id") or ""),
+            key_version=int(data.get("key_version") or 1),
+            stream_version=int(data.get("stream_version") or 0),
+            audience=str(data.get("audience") or ""),
+            expires_at=data.get("expires_at"),
+            envelope_version=int(data.get("envelope_version") or 1),
+        )
+
+
 DomainEvent = (
-    ExecutionQueued
+    ExecutionRequested
+    | ApprovalRequested
+    | ExecutionApproved
+    | ExecutionRejected
+    | ExecutionExpired
+    | ExecutionQueued
     | ExecutionStarted
     | ParametersNormalized
     | JobEnqueued
+    | DispatchLeaseIssued
     | BackendEventRecorded
     | ExecutionSucceeded
     | ExecutionFailed
@@ -334,10 +607,16 @@ DomainEvent = (
 EVENT_TYPES = {
     event_type.EVENT_NAME: event_type
     for event_type in (
+        ExecutionRequested,
+        ApprovalRequested,
+        ExecutionApproved,
+        ExecutionRejected,
+        ExecutionExpired,
         ExecutionQueued,
         ExecutionStarted,
         ParametersNormalized,
         JobEnqueued,
+        DispatchLeaseIssued,
         BackendEventRecorded,
         ExecutionSucceeded,
         ExecutionFailed,

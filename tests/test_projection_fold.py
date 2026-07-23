@@ -24,6 +24,7 @@ _install_netbox_stub()
 
 from netbox_rpc.domain.events import (  # noqa: E402
     BackendEventRecorded,
+    DispatchLeaseIssued,
     ExecutionCancelled,
     ExecutionEnqueueFailed,
     ExecutionFailed,
@@ -145,6 +146,33 @@ def test_backend_events_do_not_change_projection() -> None:
                 backend_data={"line": "bounded"},
                 event_level="debug",
                 event_message="backend emitted progress",
+            ),
+        )
+        == state
+    )
+
+
+def test_dispatch_lease_issued_does_not_change_projection() -> None:
+    # Audit-only (#168): minting a signed dispatch lease leaves the RUNNING
+    # projection untouched — status advances only via start()/backend result.
+    state = ProjectionState(
+        status="running",
+        started_at=STARTED_AT,
+        normalized_params={"target": "edge-01"},
+        resolved_command_hash="hash",
+    )
+
+    assert (
+        apply(
+            state,
+            DispatchLeaseIssued(
+                nonce="deadbeef",
+                key_id="rpc-sign",
+                key_version=3,
+                stream_version=5,
+                audience="netbox-rpc-backend",
+                expires_at=FINISHED_AT,
+                envelope_version=1,
             ),
         )
         == state

@@ -25,6 +25,7 @@ _install_netbox_stub()
 from netbox_rpc.domain.events import (  # noqa: E402
     EVENT_TYPES,
     BackendEventRecorded,
+    DispatchLeaseIssued,
     ExecutionCancelled,
     ExecutionEnqueueFailed,
     ExecutionFailed,
@@ -42,10 +43,19 @@ NOW = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 def test_event_registry_contains_every_transition_type() -> None:
     assert set(EVENT_TYPES) == {
+        # Approval workflow (issue #164).
+        "ExecutionRequested",
+        "ApprovalRequested",
+        "ExecutionApproved",
+        "ExecutionRejected",
+        "ExecutionExpired",
+        # Existing execution lifecycle.
         "ExecutionQueued",
         "ExecutionStarted",
         "ParametersNormalized",
         "JobEnqueued",
+        # Signed dispatch lease (issue #168).
+        "DispatchLeaseIssued",
         "BackendEventRecorded",
         "ExecutionSucceeded",
         "ExecutionFailed",
@@ -60,6 +70,15 @@ def test_typed_events_round_trip_through_record_data() -> None:
         ExecutionStarted(started_at=NOW),
         ParametersNormalized({"target": "edge-01"}, "hash"),
         JobEnqueued(job_id=12),
+        DispatchLeaseIssued(
+            nonce="abc123",
+            key_id="rpc-sign",
+            key_version=3,
+            stream_version=5,
+            audience="netbox-rpc-backend",
+            expires_at=NOW,
+            envelope_version=1,
+        ),
         ExecutionSucceeded({"value": 1}, NOW),
         ExecutionFailed("boom", "RPC_BOOM", NOW),
         ExecutionEnqueueFailed("queue down", "RPC_ENQUEUE_FAILED", NOW),

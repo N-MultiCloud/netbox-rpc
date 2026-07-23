@@ -197,6 +197,38 @@ def mark_execution_running(execution: RPCExecution) -> None:
         _append_and_project(execution, domain_events.ExecutionStarted(started_at=now))
 
 
+def record_dispatch_lease_issued(
+    execution: RPCExecution,
+    *,
+    nonce: str,
+    key_id: str,
+    key_version: int,
+    stream_version: int,
+    audience: str,
+    expires_at: Any,
+    envelope_version: int,
+) -> None:
+    """Append the audit event for a minted signed dispatch lease (#168).
+
+    References only — the nonce, key lineage, stream version, audience, and
+    expiry. Never the signature or any secret; ``redact_event_data`` bounds the
+    payload like every other ledger event.
+    """
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.DispatchLeaseIssued(
+                nonce=nonce,
+                key_id=key_id,
+                key_version=key_version,
+                stream_version=stream_version,
+                audience=audience,
+                expires_at=expires_at,
+                envelope_version=envelope_version,
+            ),
+        )
+
+
 def mark_execution_failed(
     execution: RPCExecution,
     message: str,
@@ -267,6 +299,92 @@ def record_execution_cancelled(
                 cancelled_by_id=cancelled_by_id,
                 reason=reason,
             ),
+        )
+
+
+def record_execution_requested(
+    execution: RPCExecution,
+    *,
+    requested_by_id: object | None = None,
+) -> None:
+    if requested_by_id is None:
+        requested_by = getattr(execution, "requested_by", None)
+        requested_by_id = getattr(requested_by, "pk", None) or getattr(
+            execution, "requested_by_id", None
+        )
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionRequested(requested_by_id=requested_by_id),
+        )
+
+
+def record_approval_requested(
+    execution: RPCExecution,
+    *,
+    snapshot_hash: str,
+    expires_at: object | None = None,
+    requested_by_id: object | None = None,
+) -> None:
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ApprovalRequested(
+                snapshot_hash=snapshot_hash,
+                expires_at=expires_at,
+                requested_by_id=requested_by_id,
+            ),
+        )
+
+
+def record_execution_approved(
+    execution: RPCExecution,
+    *,
+    approved_by_id: object,
+    snapshot_hash: str,
+    reason: str = "",
+) -> None:
+    decided_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionApproved(
+                approved_by_id=approved_by_id,
+                snapshot_hash=snapshot_hash,
+                decided_at=decided_at,
+                reason=reason,
+            ),
+        )
+
+
+def record_execution_rejected(
+    execution: RPCExecution,
+    *,
+    rejected_by_id: object,
+    reason: str = "",
+) -> None:
+    decided_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionRejected(
+                rejected_by_id=rejected_by_id,
+                decided_at=decided_at,
+                reason=reason,
+            ),
+        )
+
+
+def record_execution_expired(
+    execution: RPCExecution,
+    *,
+    reason: str = "",
+) -> None:
+    expired_at = timezone.now()
+    with transaction.atomic():
+        _append_and_project(
+            execution,
+            domain_events.ExecutionExpired(expired_at=expired_at, reason=reason),
         )
 
 
