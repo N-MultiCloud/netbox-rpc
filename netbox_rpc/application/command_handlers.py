@@ -130,3 +130,57 @@ def cancel_execution(execution: object, user: object) -> object:
     except RPCExecutionAggregateError as exc:
         raise drf_serializers.ValidationError({"status": str(exc)}) from exc
     return execution
+
+
+def _require_approval_authorization(execution: object, user: object) -> None:
+    """Gate an approve/reject decision (issue #165).
+
+    Layered on top of the aggregate's segregation-of-duties + concurrency
+    guards (#164): the actor must hold ``approve_rpcprocedure`` AND have
+    object-scoped view access to the execution's procedure, so an object-
+    restricted actor cannot decide a procedure outside their scope. The
+    execution row itself is already object-restricted by the viewset's
+    ``get_object()`` (a non-viewer 404s before reaching here).
+    """
+    if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
+        raise PermissionDenied("approve_rpcprocedure permission is required.")
+
+    from ..models import RPCProcedure
+
+    procedure_id = getattr(execution, "procedure_id", None)
+    if (
+        procedure_id is not None
+        and not RPCProcedure.objects.restrict(user, "view")
+        .filter(pk=procedure_id)
+        .exists()
+    ):
+        raise PermissionDenied(
+            "You do not have object-scoped access to this procedure."
+        )
+
+
+def approve_execution(execution: object, user: object, *, reason: str = "") -> object:
+    """Second-actor approval command (POST). Never mutates state via CRUD.
+
+    Authorization is enforced here; the aggregate enforces segregation of
+    duties, the pending-approval status guard, and single-decision concurrency
+    (``select_for_update`` + status recheck).
+    """
+    _require_approval_authorization(execution, user)
+    try:
+        RPCExecutionAggregate(execution).approve(approver_id=user.pk, reason=reason)
+    except RPCExecutionAggregateError as exc:
+        raise drf_serializers.ValidationError({"status": str(exc)}) from exc
+    execution.refresh_from_db()
+    return execution
+
+
+def reject_execution(execution: object, user: object, *, reason: str = "") -> object:
+    """Terminal rejection command (POST) by a distinct second actor."""
+    _require_approval_authorization(execution, user)
+    try:
+        RPCExecutionAggregate(execution).reject(rejecter_id=user.pk, reason=reason)
+    except RPCExecutionAggregateError as exc:
+        raise drf_serializers.ValidationError({"status": str(exc)}) from exc
+    execution.refresh_from_db()
+    return execution

@@ -11,7 +11,12 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import models
-from ..application.command_handlers import cancel_execution, create_execution
+from ..application.command_handlers import (
+    approve_execution,
+    cancel_execution,
+    create_execution,
+    reject_execution,
+)
 from ..application.queries import execution_events
 from .serializers import (
     RPCBackendSerializer,
@@ -158,6 +163,30 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request: Request, pk: str | None = None) -> Response:
         execution = cancel_execution(self.get_object(), request.user)
+        serializer = self.get_serializer(execution)
+        return Response(serializer.data)
+
+    @extend_schema(responses={200: RPCExecutionSerializer})
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request: Request, pk: str | None = None) -> Response:
+        # get_object() applies NetBox object restrictions: an actor without
+        # object-scoped view access to this execution 404s before deciding.
+        execution = approve_execution(
+            self.get_object(),
+            request.user,
+            reason=str(request.data.get("reason") or ""),
+        )
+        serializer = self.get_serializer(execution)
+        return Response(serializer.data)
+
+    @extend_schema(responses={200: RPCExecutionSerializer})
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request: Request, pk: str | None = None) -> Response:
+        execution = reject_execution(
+            self.get_object(),
+            request.user,
+            reason=str(request.data.get("reason") or ""),
+        )
         serializer = self.get_serializer(execution)
         return Response(serializer.data)
 
