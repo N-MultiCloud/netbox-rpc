@@ -228,6 +228,14 @@ work in #165–#168.
   `select_for_update` row lock + in-transaction status recheck so
   double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
   to a single deterministic event.
+- **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
+  `approve` / `reject` actions (`command_handlers.approve_execution` /
+  `reject_execution`) — no mutable status CRUD (PUT/PATCH/DELETE stay 405).
+  Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
+  to the execution's procedure on top of the aggregate's segregation-of-duties
+  and single-decision concurrency guards; `get_object()` already object-restricts
+  the execution row. The endpoints are dormant in production until the request
+  routing that produces `pending_approval` executions lands (#166+).
 
 ## Intents
 
