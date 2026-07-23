@@ -57,6 +57,15 @@ command behavior changes.
 
 @AGENTS.md
 
+## Package Publishing (Gitea Package Registry)
+
+`.gitea/workflows/publish-pypi.yml` builds sdist+wheel and publishes to the
+internal registry (`git.nmulti.cloud/api/packages/N-MultiCloud/pypi`) on
+`v*` tag push, or via `workflow_dispatch` with a `version` input (used when a
+tag predates the workflow). Registry-only: production deploys stay with
+`deploy-production.yml`. Verify a published version with `nms git packages`
+and confirm the wheel contains `templates/netbox_rpc/*.html` (package-data).
+
 ## Automatic Production Deployment
 
 **Starting with the deploy-production workflow**, new commits to `main` automatically deploy to the production NetBox instance (deploy target configured per-environment via the `deploy-production` workflow's `DEPLOY_*` variables/secrets).
