@@ -4,10 +4,10 @@ name: Integration tests (NetBox DB-backed)
 # self-hosted NetBox install via `manage.py test`. The fast pure-domain suite
 # (tests/) is run separately by ci.yml.
 #
-# This job is *additive*: the authoritative, hermetic integration gate is the
-# portable .github/workflows/test.yml (it stands up its own NetBox + Postgres).
-# When this runner has no NetBox install or the DB password secret is not
-# configured, the job soft-skips with success rather than blocking merges.
+# The compatibility job is the fail-closed Gitea gate: it provisions its own
+# NetBox checkout and database services for every supported version. The
+# environment-specific /opt/netbox job remains additive and soft-skips when the
+# runner or database secret is not configured.
 
 on:
   push:
@@ -72,3 +72,88 @@ jobs:
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
           "${NETBOX_ROOT}/venv/bin/python" "${NETBOX_ROOT}/netbox/manage.py" test netbox_rpc --keepdb --verbosity 2
+
+  compatibility:
+    name: NetBox ${{ matrix.netbox-version }} compatibility
+    runs-on: mirror-host
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # The mirror-host runner also provides the additive /opt/netbox job.
+      # Serialize the matrix and use non-default host ports so its local
+      # Postgres/Redis services cannot collide with this hermetic gate.
+      max-parallel: 1
+      matrix:
+        netbox-version:
+          - v4.5.8
+          - v4.6.5
+    env:
+      HOME: ${{ github.workspace }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+      NETBOX_VERSION: ${{ matrix.netbox-version }}
+      NETBOX_DB_NAME: netbox
+      NETBOX_DB_USER: netbox
+      NETBOX_DB_PASSWORD: netbox
+      NETBOX_DB_HOST: localhost
+      NETBOX_DB_PORT: "55432"
+      NETBOX_REDIS_HOST: localhost
+      NETBOX_REDIS_PORT: "56379"
+      NETBOX_SECRET_KEY: gitea-actions-integration-secret-key-0123456789-abcdef
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+          POSTGRES_DB: netbox
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["56379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Set up uv and Python 3.12
+        shell: bash
+        run: |
+          set -eo pipefail
+          export HOME="${GITHUB_WORKSPACE:-$PWD}"
+          export PATH="$HOME/.local/bin:$PATH"
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv venv --python 3.12 .ci-venv
+
+      - name: Check out NetBox
+        shell: bash
+        run: |
+          set -eo pipefail
+          git clone --depth 1 -b "${NETBOX_VERSION}" https://github.com/netbox-community/netbox.git netbox
+
+      - name: Install NetBox and plugin
+        shell: bash
+        run: |
+          set -eo pipefail
+          export PATH="${GITHUB_WORKSPACE}/.local/bin:$PATH"
+          uv pip install --python .ci-venv -r netbox/requirements.txt
+          uv pip install --python .ci-venv -e ./plugin
+
+      - name: Run the integration suite
+        shell: bash
+        run: |
+          set -eo pipefail
+          . .ci-venv/bin/activate
+          export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
+          export NETBOX_CONFIGURATION=netbox_configuration
+          export DJANGO_SETTINGS_MODULE=netbox.settings
+          python netbox/netbox/manage.py test netbox_rpc --verbosity 2

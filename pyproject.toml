@@ -31,7 +31,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-nms = ["netbox-nms>=0.1.2,<0.2.0"]
+nms = ["netbox-nms>=0.1.8,<0.2.0"]
 
 [tool.setuptools]
 include-package-data = true

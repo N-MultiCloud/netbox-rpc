@@ -31,7 +31,7 @@ def test_backend_adapter_contract_is_local_and_optional() -> None:
     assert "class RPCBackend" in models
     assert "def get_auth_headers" in models
     assert "netbox-nms" not in pyproject.split("[project.optional-dependencies]")[0]
-    assert 'nms = ["netbox-nms>=0.1.2,<0.2.0"]' in pyproject
+    assert 'nms = ["netbox-nms>=0.1.8,<0.2.0"]' in pyproject
 
 
 def test_procedure_catalog_stores_handler_ids_not_commands() -> None:
@@ -995,8 +995,19 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
 
 def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     init = read("netbox_rpc/__init__.py")
+    gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
     assert 'max_version = "4.6.99"' in init
+    assert "\n  compatibility:\n" in gitea_workflow
+    compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
+    assert "runs-on: mirror-host" in compatibility_job
+    assert "fail-fast: false" in compatibility_job
+    assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
+    assert "services:" in compatibility_job
+    assert "v4.5.8" in compatibility_job
+    assert "v4.6.5" in compatibility_job
+    assert "if:" not in compatibility_job
+    assert "soft-skip" not in compatibility_job
 
     migrations_dir = ROOT / "netbox_rpc" / "migrations"
     migration_sources = {
