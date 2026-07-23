@@ -31,7 +31,7 @@ def test_backend_adapter_contract_is_local_and_optional() -> None:
     assert "class RPCBackend" in models
     assert "def get_auth_headers" in models
     assert "netbox-nms" not in pyproject.split("[project.optional-dependencies]")[0]
-    assert 'nms = ["netbox-nms>=0.1.2,<0.2.0"]' in pyproject
+    assert 'nms = ["netbox-nms>=0.1.8,<0.2.0"]' in pyproject
 
 
 def test_procedure_catalog_stores_handler_ids_not_commands() -> None:
@@ -993,6 +993,48 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
     assert '"sequence": ip.sequence' in models
 
 
+def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
+    init = read("netbox_rpc/__init__.py")
+    gitea_workflow = read(".gitea/workflows/integration.yml")
+    assert 'min_version = "4.5.8"' in init
+    assert 'max_version = "4.6.99"' in init
+    assert "\n  compatibility:\n" in gitea_workflow
+    compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
+    assert "runs-on: mirror-host" in compatibility_job
+    assert "fail-fast: false" in compatibility_job
+    assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
+    # Host-mode executor: the gate provisions per-leg UTF8 databases on the
+    # host PostgreSQL instead of Docker service containers.
+    assert "Provision a UTF8 compatibility database" in compatibility_job
+    assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
+    assert "v4.5.8" in compatibility_job
+    assert "v4.6.5" in compatibility_job
+    assert "if:" not in compatibility_job
+    assert "soft-skip" not in compatibility_job
+
+    migrations_dir = ROOT / "netbox_rpc" / "migrations"
+    migration_sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in migrations_dir.glob("*.py")
+    }
+    extras_dependencies = [
+        line.strip()
+        for source in migration_sources.values()
+        for line in source.splitlines()
+        if line.strip().startswith(("('extras',", '("extras",'))
+    ]
+    assert len(extras_dependencies) == 5
+    assert all("0134_owner" in dependency for dependency in extras_dependencies)
+
+    for name in (
+        "0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",
+        "0033_rpcbackend.py",
+        "0039_rpcintent.py",
+        "0044_rpcpluginsettings.py",
+    ):
+        # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
+        # remains an ancestor of the 4.6 migration graph.
+        assert "0134_owner" in migration_sources[name]
 def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
     # The migration graph uses extras.0134 because it is present in both
     # NetBox 4.5.8 and 4.6.x. Do not move these anchors back to 4.6-only

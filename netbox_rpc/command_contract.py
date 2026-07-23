@@ -106,6 +106,45 @@ EXEMPT_HANDLER_RATIONALE = {
         "Removes operator-approved staging directories on source and target hosts "
         "after a successful migration."
     ),
+    "service.samba_1.config_list_files": (
+        "Recursively enumerates /etc/samba/**/*.conf, stats each file, and "
+        "computes per-file sha256 values; the loop and path confinement are "
+        "backend-owned rather than a single fixed argv invocation."
+    ),
+    "service.samba_1.group_list": (
+        "Lists groups and then expands members for each discovered group; the "
+        "dynamic per-group member loop depends on previous command output."
+    ),
+    "service.samba_1.config_deploy": (
+        "Writes caller-provided smb.conf content through stdin to a temp path, "
+        "validates that candidate with testparm, snapshots the active config, "
+        "and only then activates and reloads it. On any failure after the "
+        "snapshot is taken (activation, reload, timeout, or lost response), the "
+        "backend must restore the snapshot, re-validate and reload the restored "
+        "config, and report rolled_back plus rollback_error."
+    ),
+    "service.samba_1.config_rollback": (
+        "Restores a backend-owned Samba config snapshot, validates the restored "
+        "candidate, and reloads Samba without exposing snapshot paths as argv; "
+        "the result reports lifecycle and rollback-outcome fields."
+    ),
+    "service.samba_1.include_file_write": (
+        "Writes caller-provided include-file content through stdin to a confined "
+        "temp path, validates the resulting Samba config, and atomically "
+        "activates or rolls back through backend-owned orchestration."
+    ),
+    "service.samba_1.include_file_delete": (
+        "Deletes one confined include file only after backend snapshot/validation "
+        "guardrails can restore the previous config on failure."
+    ),
+    "service.samba_1.share_upsert": (
+        "Renders an allowlisted share definition from structured params, validates "
+        "the generated Samba config, snapshots, activates, and reloads it."
+    ),
+    "service.samba_1.share_delete": (
+        "Removes one safe share definition from Samba config through backend-owned "
+        "parse/edit/validate/snapshot/reload orchestration."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."

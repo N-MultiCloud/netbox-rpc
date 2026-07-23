@@ -6,6 +6,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
+        # Final extras migration in NetBox 4.5.8; also an ancestor in 4.6.x.
         ("extras", "0134_owner"),
         ("netbox_rpc", "0043_rpcbackend_ip_domain"),
     ]

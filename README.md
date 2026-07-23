@@ -14,6 +14,21 @@ guarded layer. `netbox-nms` is one supported integration: when installed,
 existing nms-backend dispatch URL, auth headers, TLS verification flag, and
 empty `{}` POST body.
 
+## Compatibility
+
+`netbox-rpc` supports NetBox **4.5.8 through 4.6.x**. The plugin declares
+`min_version = "4.5.8"` and `max_version = "4.6.99"`, covering the Django 5.2
+runtime shipped by NetBox 4.5.x and the Django 6.0 runtime shipped by NetBox
+4.6.x. Its external `extras` migration dependencies are anchored to
+`0134_owner`, the final `extras` migration in NetBox 4.5.8 and an ancestor of
+the 4.6.x migration graph.
+
+`netbox-nms` remains optional: fresh installs have no `netbox_nms` migration
+dependency, while deployments that install it retain the guarded runtime
+adapter. The `nms` extra installs `netbox-nms>=0.1.8,<0.2.0`; NMS integration
+on NetBox 4.5.x requires netbox-nms 0.1.8 or newer because that release
+retargeted its migration dependencies to the NetBox 4.5.8-safe migration graph.
+
 The procedure catalog is intentionally narrow:
 
 - `network.device.huawei.olt.ma5800.r024.start_ont`
@@ -34,6 +49,8 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_listeners`
 - `os.linux.ubuntu.24.ookla.check_tls`
 - `os.linux.ubuntu.24.ookla.check_firewall`
+- `os.linux.ubuntu.24.{status,start,stop,reload,enable,disable}_service` and
+  `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb` service
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`
@@ -406,6 +423,103 @@ container at execution time.
 Operator instructions live in
 [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md).
 
+### `service.samba.1.*` — Samba file-server observability and config lifecycle
+
+Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,
+`approval_required=False`) that observe a managed Samba file server; migration
+`0050` seeds their command rows. Migration `0051` adds seven config
+write/lifecycle procedures and migration `0052` adds their command rows. Target models are
+`netbox_fileserver.sambadomain`, `virtualization.virtualmachine`, and
+`dcim.device` — `target_models` is a plain content-type label list, so this
+creates no import or FK dependency on `netbox-fileserver`. Handler IDs are the
+procedure name with `samba.1` → `samba_1`; the handlers live in nms-backend.
+
+| Procedure | Timeout | Purpose |
+|---|---|---|
+| `service.samba.1.config_read` | 30s | `/etc/samba/smb.conf` content + sha256 |
+| `service.samba.1.config_test` | 30s | `testparm -s` validation of the running config |
+| `service.samba.1.config_list_files` | 60s | Enumerate `/etc/samba/**/*.conf` with size, mtime, sha256 |
+| `service.samba.1.include_file_read` | 30s | Read one include file (`include_path`) |
+| `service.samba.1.service_status` | 30s | active/sub/unit-file state for `smbd`, `nmbd`, `winbind`, `samba-ad-dc` |
+| `service.samba.1.version` | 30s | `smbd -V` |
+| `service.samba.1.list_shares` | 30s | Effective share definitions |
+| `service.samba.1.status_report` | 30s | `smbstatus --json` → sessions, tcons, open files |
+| `service.samba.1.domain_info` | 60s | `samba-tool domain info` + `domain level show` |
+| `service.samba.1.user_list` | 60s | Directory usernames, SIDs, enabled state |
+| `service.samba.1.group_list` | 90s | Groups and their members |
+| `service.samba.1.share_acl_read` | 30s | `sharesec --view` for one share (`share_name`) |
+| `service.samba.1.config_deploy` | 120s | Write smb.conf via temp file, `testparm`, snapshot, activate, reload, and post-snapshot rollback |
+| `service.samba.1.config_rollback` | 60s | Restore a backend-issued config snapshot with lifecycle/rollback evidence; destructive, approval required |
+| `service.samba.1.include_file_write` | 60s | Write one confined include file via stdin and validate |
+| `service.samba.1.include_file_delete` | 60s | Delete one confined include file; destructive, approval required |
+| `service.samba.1.share_upsert` | 60s | Create or update one share from structured fields |
+| `service.samba.1.share_delete` | 60s | Delete one share definition; destructive, approval required |
+| `service.samba.1.service_control` | 30s | Enum-constrained systemctl action for one Samba unit |
+
+`status_report` pins `output_parser="json"` with an `output_schema` describing
+the **raw** `smbstatus --json` document. Per Samba's `source3/utils/status.c`,
+each section is emitted by `add_section_to_json()` → `json_new_object()`, so
+`sessions`, `tcons`, `open_files`, `byte_range_locks`, and `notifies` are
+**objects keyed by id, not arrays** — and there is no top-level `locks` key
+(`--locks` is a CLI flag, not a JSON section). Which sections appear depends on
+the flags smbstatus was invoked with, so none are required. The handler's own
+`result_schema` flattens each section into an array, giving downstream consumers
+(the `netbox-fileserver` observed state) stable lists instead of id-keyed maps.
+
+`config_list_files`, `group_list`, and the config-editing write procedures are
+exempt handlers. Their recursive reads, per-group expansion, stdin content,
+temp-file validation, snapshots, atomic activation, reloads, and rollback
+semantics are backend-orchestrated and cannot be reduced to fixed argv.
+For `config_deploy`, any failure after the active config snapshot is taken
+(activation, reload, timeout, or lost response) must make the backend restore
+the snapshot, re-validate and reload the restored config, and report the
+`stage`, `snapshot_id`, `activated`, `reloaded`, `rolled_back`, and nullable
+`rollback_error` fields. `config_rollback` reports the same rollback-outcome
+fields where applicable.
+`service_control` is fixed argv because `unit` is one of `smbd`, `nmbd`,
+`winbind`, or `samba-ad-dc`, and `action` is one of `start`, `stop`, `restart`,
+or `reload` in both schema and normalizer.
+
+Every procedure in this family also accepts the shared, optional `rpc_ssh_*`
+connection overrides (`rpc_ssh_host`, `rpc_ssh_port`, `rpc_ssh_credential_pk`,
+`rpc_ssh_known_hosts_entry`, `rpc_ssh_strict_host_key_checking`), forwarded by
+`_copy_optional_ssh_overrides()` like the other SSH-backed families.
+Procedure-specific params are confined in the `params_schema` and again in the
+normalizer, so pure-domain execution paths fail closed before nms-backend
+repeats the checks:
+
+- `include_path` must be a `.conf` file under `/etc/samba`, rejected on traversal
+  or shell metacharacters by regex **and** a `PurePosixPath.is_relative_to`
+  confinement check. The normalizer forwards the **resolved absolute path**, not
+  the caller's raw value — the command rows run `cat {include_path}`, so a
+  relative value would otherwise read relative to the backend process cwd.
+- `share_name` must match a safe charset whose first character is
+  alphanumeric/underscore, so a value can never be read as a command option.
+- `config_content` and include-file `content` are never argv. They are passed to
+  backend handlers for stdin use, while the command fingerprint stores sha256 and
+  byte-count metadata. Before persistence/dispatch the normalizer scans every
+  assignment's parameter name case-insensitively and whitespace-insensitively,
+  rejecting command-executing Samba directives: any name ending in `script`,
+  `command`, or `action`, plus the `preexec`/`postexec` family. `include`
+  directives inside these bodies must resolve under `/etc/samba`;
+  `include = registry` and unconfined paths such as `/tmp/evil.conf` are
+  rejected. The scan first joins smb.conf line-continuations (a physical line ending in `\\`, per Samba's `lib/util/tini.c`) into one logical line before splitting the parameter name, so a directive cannot be smuggled past the denylist by splitting its name across a backslash continuation (`root pree\\` / `xec = ...`).
+- `share_upsert` accepts allowlisted fields only (`path`, booleans, principal
+  lists, masks, and comment), not arbitrary Samba option names or command text.
+- `config_rollback`, `include_file_delete`, and `share_delete` are
+  `effect="destructive"` and `approval_required=True`.
+
+Both normalizers `.strip()` before validating, so surrounding whitespace is
+sanitized rather than propagated downstream. The seed patterns deliberately
+anchor with `(?![\s\S])` instead of `$`: `jsonschema` enforces `pattern` with
+`re.search`, and Python's `$` matches *before* a single trailing newline, so a
+`$`-anchored pattern would accept `"smb.conf\n"`.
+
+These procedures never return credential material — the `user_list` and
+`domain_info` result schemas contain no password or hash fields, so the observed
+state persisted by `netbox-fileserver` satisfies its no-secrets-at-rest
+invariant.
+
 ### Minecraft stack SSH procedures
 
 Migration `0029` adds structured SSH fallback procedures for game nodes and
@@ -654,6 +768,8 @@ behavior — `event_store`, the rebuild oracle, the append-only ledger, the
 command handlers, and the command-only REST API — and runs in the
 `integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
 Postgres-service) workflows using `tests/ci/netbox_configuration.py`.
+The fail-closed Gitea compatibility job and the portable GitHub integration job
+both run this DB-backed suite against NetBox 4.5.8 and 4.6.5.
 
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is

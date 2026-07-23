@@ -17,23 +17,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pytest-asyncio requests jinja2 ruff
+      - run: pip install pytest pytest-asyncio requests jinja2 jsonschema ruff
       - run: ruff check netbox_rpc tests
       - run: python -m compileall netbox_rpc tests
       - run: pytest tests/ -q
 
   integration:
-    name: NetBox DB-backed integration tests (manage.py test)
+    name: NetBox ${{ matrix.netbox-version }} DB-backed integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        netbox-version:
+          - v4.5.8
+          - v4.6.5
     env:
-      NETBOX_VERSION: v4.6.2
+      NETBOX_VERSION: ${{ matrix.netbox-version }}
       NETBOX_DB_NAME: netbox
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: netbox
       NETBOX_DB_HOST: localhost
       NETBOX_REDIS_HOST: localhost
-      NETBOX_SECRET_KEY: github-actions-integration-secret-key-0123456789
+      NETBOX_SECRET_KEY: github-actions-integration-secret-key-0123456789-abcdef
     services:
       postgres:
         image: postgres:16

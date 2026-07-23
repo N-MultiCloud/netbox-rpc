@@ -23,6 +23,14 @@ When `netbox-nms` is installed and no custom resolver is configured,
 the same tiny runtime contract. Treat netbox-nms as one optional integration,
 not as a required plugin dependency.
 
+## Compatibility
+
+Support NetBox 4.5.8 through 4.6.x (`min_version = "4.5.8"`,
+`max_version = "4.6.99"`), including Django 5.2 and 6.0. Keep external
+`extras` migration dependencies anchored to `extras.0134_owner`, the final
+NetBox 4.5.8 migration and an ancestor in 4.6.x. Any adoption of NetBox
+4.6-only APIs must have a 4.5.8 guard or fallback.
+
 ## Transport-driver & output-parser selection
 
 Use [`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md)

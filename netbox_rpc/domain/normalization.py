@@ -54,6 +54,16 @@ from ..constants import (
     PTERODACTYL_WINGS_LOGS,
     PTERODACTYL_WINGS_RESTART,
     PTERODACTYL_WINGS_STATUS,
+    SAMBA_1_CONFIG_DEPLOY,
+    SAMBA_1_CONFIG_ROLLBACK,
+    SAMBA_1_INCLUDE_FILE_READ,
+    SAMBA_1_INCLUDE_FILE_DELETE,
+    SAMBA_1_INCLUDE_FILE_WRITE,
+    SAMBA_1_PROCEDURE_NAMES,
+    SAMBA_1_SHARE_ACL_READ,
+    SAMBA_1_SHARE_DELETE,
+    SAMBA_1_SHARE_UPSERT,
+    SAMBA_1_SERVICE_CONTROL,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -151,6 +161,36 @@ _PASSBOLT_HOST_RE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
 _PASSBOLT_POSIX_USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}$")
+_SAMBA_INCLUDE_FILE_RE = re.compile(
+    r"^(?!.*(?:^|/)\.\.(?:/|$))(?:/etc/samba/)?"
+    r"[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*\.conf$"
+)
+_SAMBA_SHARE_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@+-]{0,79}$")
+_SAMBA_CONF_ROOT = PurePosixPath("/etc/samba")
+_SAMBA_MAX_CONFIG_BODY_LEN = 1024 * 1024
+_SAMBA_SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_SAMBA_SHARE_PATH_RE = re.compile(r"/[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$")
+_SAMBA_SHARE_TEXT_MAX_LEN = 240
+_SAMBA_PRINCIPAL_RE = re.compile(r"@?[A-Za-z0-9_][A-Za-z0-9_.@+\\-]{0,127}$")
+_SAMBA_MASK_RE = re.compile(r"[0-7]{3,4}$")
+_SAMBA_SERVICE_UNITS = frozenset({"smbd", "nmbd", "winbind", "samba-ad-dc"})
+_SAMBA_SERVICE_ACTIONS = frozenset({"start", "stop", "restart", "reload"})
+# Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
+# Several parameter families execute host commands: "* script", "* command", and
+# "* action", plus the preexec/postexec family. "root preexec" runs as root, so
+# config bodies must be rejected before persistence/dispatch when these names
+# appear in caller-controlled smb.conf or include-file content.
+_SAMBA_COMMAND_DIRECTIVE_SUFFIXES = ("script", "command", "action")
+_SAMBA_COMMAND_DIRECTIVE_NAMES = frozenset(
+    {
+        "preexec",
+        "postexec",
+        "rootpreexec",
+        "rootpostexec",
+        "preexecclose",
+        "rootpreexecclose",
+    }
+)
 # systemd unit-name allowlist charset for os.linux.proxmox.show_systemctl_services.
 # The first character must be alphanumeric/underscore so a value can never be
 # mistaken for a `systemctl` option (e.g. "--user"); "-", ".", ":" and "@" are
@@ -472,6 +512,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in PASSBOLT_PROCEDURE_NAMES:
         return _normalize_passbolt_migration_execution(execution, target)
+
+    if procedure_name in SAMBA_1_PROCEDURE_NAMES:
+        return _normalize_samba_1_execution(execution, target)
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
@@ -886,6 +929,420 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_samba_1_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize Samba catalog procedures.
+
+    The backend handlers own Samba command execution and parsing; netbox-rpc
+    forwards only bounded, schema-shaped parameters. Caller-supplied path/share
+    values are revalidated here so pure-domain execution paths fail closed even
+    before nms-backend repeats the same confinement checks.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+        },
+    }
+
+    if procedure_name == SAMBA_1_CONFIG_DEPLOY:
+        content = _normalize_samba_config_body(
+            params.get("config_content"),
+            "config_content",
+        )
+        normalized["config_content"] = content
+        normalized["command_fingerprint"]["config_content_sha256"] = _hash_text(
+            content
+        )
+        normalized["command_fingerprint"]["config_content_bytes"] = len(
+            content.encode("utf-8")
+        )
+
+    if procedure_name == SAMBA_1_CONFIG_ROLLBACK:
+        snapshot_id = _normalize_samba_snapshot_id(params.get("snapshot_id"))
+        normalized["snapshot_id"] = snapshot_id
+        normalized["command_fingerprint"]["snapshot_id"] = snapshot_id
+
+    if procedure_name in {
+        SAMBA_1_INCLUDE_FILE_READ,
+        SAMBA_1_INCLUDE_FILE_WRITE,
+        SAMBA_1_INCLUDE_FILE_DELETE,
+    }:
+        include_path = _normalize_samba_include_path(params.get("include_path"))
+        normalized["include_path"] = include_path
+        normalized["command_fingerprint"]["include_path"] = include_path
+
+    if procedure_name == SAMBA_1_INCLUDE_FILE_WRITE:
+        content = _normalize_samba_config_body(params.get("content"), "content")
+        normalized["content"] = content
+        normalized["command_fingerprint"]["content_sha256"] = _hash_text(content)
+        normalized["command_fingerprint"]["content_bytes"] = len(
+            content.encode("utf-8")
+        )
+
+    if procedure_name in {
+        SAMBA_1_SHARE_ACL_READ,
+        SAMBA_1_SHARE_UPSERT,
+        SAMBA_1_SHARE_DELETE,
+    }:
+        share_name = _normalize_samba_share_name(params.get("share_name"))
+        normalized["share_name"] = share_name
+        normalized["command_fingerprint"]["share_name"] = share_name
+
+    if procedure_name == SAMBA_1_SHARE_UPSERT:
+        _copy_samba_share_upsert_params(params, normalized)
+
+    if procedure_name == SAMBA_1_SERVICE_CONTROL:
+        unit = _normalize_samba_service_unit(params.get("unit"))
+        action = _normalize_samba_service_action(params.get("action"))
+        systemd_unit = f"{unit}.service"
+        normalized["unit"] = unit
+        normalized["action"] = action
+        normalized["systemd_unit"] = systemd_unit
+        normalized["command_fingerprint"]["unit"] = unit
+        normalized["command_fingerprint"]["action"] = action
+        normalized["command_fingerprint"]["systemd_unit"] = systemd_unit
+
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _normalize_samba_config_body(raw_content: object, field_name: str) -> str:
+    content = str(raw_content or "")
+    if not content.strip():
+        raise RPCExecutionError(
+            f"{field_name} must be a non-empty string.",
+            code="RPC_PARAM_INVALID",
+        )
+    if "\x00" in content:
+        raise RPCExecutionError(
+            f"{field_name} must not contain NUL bytes.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(content) > _SAMBA_MAX_CONFIG_BODY_LEN:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most {_SAMBA_MAX_CONFIG_BODY_LEN} characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    _validate_samba_config_body_directives(content, field_name)
+    return content
+
+
+def _validate_samba_config_body_directives(content: str, field_name: str) -> None:
+    for line_number, raw_name, raw_value in _iter_samba_config_assignments(content):
+        name = _normalize_samba_config_param_name(raw_name)
+        if not name:
+            continue
+        if name in _SAMBA_COMMAND_DIRECTIVE_NAMES or name.endswith(
+            _SAMBA_COMMAND_DIRECTIVE_SUFFIXES
+        ):
+            raise RPCExecutionError(
+                f"{field_name} line {line_number} uses forbidden Samba command "
+                f"directive {raw_name.strip()!r}.",
+                code="RPC_PARAM_INVALID",
+            )
+        if name == "include":
+            _validate_samba_config_include_directive(
+                raw_value,
+                field_name,
+                line_number,
+            )
+
+
+def _iter_samba_config_assignments(content: str):
+    for line_number, raw_line in _iter_samba_logical_lines(content):
+        stripped = raw_line.strip()
+        if (
+            not stripped
+            or stripped.startswith(("#", ";"))
+            or stripped.startswith("[")
+            or "=" not in raw_line
+        ):
+            continue
+        raw_name, raw_value = raw_line.split("=", 1)
+        if not raw_name.strip():
+            continue
+        yield line_number, raw_name, raw_value
+
+
+def _iter_samba_logical_lines(content: str):
+    """Yield ``(line_number, logical_line)`` after joining smb.conf line
+    continuations, exactly the way Samba's own parser does.
+
+    Samba (``lib/util/tini.c``) accumulates characters into one buffer and, when
+    a physical line ends in ``\\`` (or ``\\`` followed by whitespace), drops the
+    backslash and keeps reading the *next* physical line into the same buffer —
+    all **before** the parameter name is split off at ``=``. So
+    ``root pree\\`` / ``xec = /bin/sh`` is one logical directive ``root preexec``
+    to Samba. Scanning physical lines independently would see two harmless
+    fragments and miss the command directive, so we must join first.
+    """
+    joined = ""
+    start_line = None
+    for line_number, physical in enumerate(content.splitlines(), start=1):
+        if start_line is None:
+            start_line = line_number
+        # Match tini's trailing-whitespace zap before testing for continuation:
+        # a line ending in ``\`` or ``\ `` continues onto the next one.
+        trimmed = physical.rstrip()
+        if trimmed.endswith("\\"):
+            joined += trimmed[:-1]
+            continue
+        joined += physical
+        yield start_line, joined
+        joined = ""
+        start_line = None
+    if start_line is not None:
+        # Trailing continuation with no following line: emit what we have.
+        yield start_line, joined
+
+
+def _normalize_samba_config_param_name(raw_name: str) -> str:
+    return "".join(str(raw_name).lower().split())
+
+
+def _validate_samba_config_include_directive(
+    raw_value: str,
+    field_name: str,
+    line_number: int,
+) -> None:
+    include_target = _strip_samba_config_value(raw_value)
+    if include_target.lower() == "registry":
+        raise RPCExecutionError(
+            f"{field_name} line {line_number} uses forbidden Samba registry include.",
+            code="RPC_PARAM_INVALID",
+        )
+    try:
+        _normalize_samba_include_path(include_target)
+    except RPCExecutionError as exc:
+        raise RPCExecutionError(
+            f"{field_name} line {line_number} include target must be confined "
+            "under /etc/samba.",
+            code="RPC_PARAM_INVALID",
+        ) from exc
+
+
+def _strip_samba_config_value(raw_value: str) -> str:
+    value = str(raw_value or "").strip()
+    for marker in ("#", ";"):
+        value = _strip_samba_inline_comment(value, marker)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    return value
+
+
+def _strip_samba_inline_comment(value: str, marker: str) -> str:
+    for index, char in enumerate(value):
+        if char == marker and (index == 0 or value[index - 1].isspace()):
+            return value[:index].strip()
+    return value.strip()
+
+
+def _normalize_samba_snapshot_id(raw_snapshot_id: object) -> str:
+    snapshot_id = str(raw_snapshot_id or "").strip()
+    if not snapshot_id or not _SAMBA_SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        raise RPCExecutionError(
+            "snapshot_id must be a safe backend-issued Samba snapshot identifier.",
+            code="RPC_PARAM_INVALID",
+        )
+    return snapshot_id
+
+
+def _copy_samba_share_upsert_params(
+    params: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    share_path = _normalize_samba_share_path(params.get("path"))
+    normalized["path"] = share_path
+    normalized["command_fingerprint"]["path"] = share_path
+
+    comment = _normalize_samba_share_text(params.get("comment"))
+    if comment:
+        normalized["comment"] = comment
+        normalized["command_fingerprint"]["comment_sha256"] = _hash_text(comment)
+
+    for key, default in {
+        "read_only": True,
+        "browseable": True,
+        "guest_ok": False,
+    }.items():
+        value = _bool_param(params, key, default)
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = value
+
+    for key in ("valid_users", "write_list"):
+        values = _normalize_samba_principal_list(params.get(key), key)
+        if values:
+            normalized[key] = values
+            normalized["command_fingerprint"][key] = values
+
+    for key in ("create_mask", "directory_mask"):
+        value = _normalize_samba_octal_mask(params.get(key), key)
+        if value:
+            normalized[key] = value
+            normalized["command_fingerprint"][key] = value
+
+    force_group = _normalize_samba_optional_principal(
+        params.get("force_group"),
+        "force_group",
+    )
+    if force_group:
+        normalized["force_group"] = force_group
+        normalized["command_fingerprint"]["force_group"] = force_group
+
+
+def _normalize_samba_share_path(raw_path: object) -> str:
+    value = str(raw_path or "").strip()
+    if not value or len(value) > 255 or not _SAMBA_SHARE_PATH_RE.fullmatch(value):
+        raise RPCExecutionError(
+            "path must be an absolute safe POSIX path without traversal or shell "
+            "metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    path = PurePosixPath(value)
+    if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+        raise RPCExecutionError(
+            "path must be an absolute safe POSIX path below a concrete directory.",
+            code="RPC_PARAM_INVALID",
+        )
+    return str(path)
+
+
+def _normalize_samba_share_text(raw_text: object) -> str:
+    text = str(raw_text or "").strip()
+    if len(text) > _SAMBA_SHARE_TEXT_MAX_LEN or any(
+        ord(ch) < 32 for ch in text
+    ):
+        raise RPCExecutionError(
+            "comment must not contain control characters and may contain at most "
+            f"{_SAMBA_SHARE_TEXT_MAX_LEN} characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return text
+
+
+def _normalize_samba_principal_list(raw_values: object, field_name: str) -> list[str]:
+    if raw_values in (None, ""):
+        return []
+    if not isinstance(raw_values, (list, tuple)):
+        raise RPCExecutionError(
+            f"{field_name} must be a list of safe Samba principals.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(raw_values) > 64:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most 64 entries.",
+            code="RPC_PARAM_INVALID",
+        )
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        value = _normalize_samba_optional_principal(raw_value, field_name)
+        if not value:
+            raise RPCExecutionError(
+                f"{field_name} entries must be non-empty.",
+                code="RPC_PARAM_INVALID",
+            )
+        if value in seen:
+            raise RPCExecutionError(
+                f"{field_name} entries must be unique.",
+                code="RPC_PARAM_INVALID",
+            )
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _normalize_samba_optional_principal(raw_value: object, field_name: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if not _SAMBA_PRINCIPAL_RE.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} must contain only safe Samba principal characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_samba_octal_mask(raw_value: object, field_name: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if not _SAMBA_MASK_RE.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} must be a three- or four-digit octal mask.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_samba_service_unit(raw_unit: object) -> str:
+    unit = str(raw_unit or "").strip()
+    if unit not in _SAMBA_SERVICE_UNITS:
+        raise RPCExecutionError(
+            "unit must be one of: samba-ad-dc, smbd, nmbd, winbind.",
+            code="RPC_PARAM_INVALID",
+        )
+    return unit
+
+
+def _normalize_samba_service_action(raw_action: object) -> str:
+    action = str(raw_action or "").strip()
+    if action not in _SAMBA_SERVICE_ACTIONS:
+        raise RPCExecutionError(
+            "action must be one of: start, stop, restart, reload.",
+            code="RPC_PARAM_INVALID",
+        )
+    return action
+
+
+def _normalize_samba_include_path(raw_path: object) -> str:
+    value = str(raw_path or "").strip()
+    if (
+        not value
+        or len(value) > 255
+        or not _SAMBA_INCLUDE_FILE_RE.fullmatch(value)
+    ):
+        raise RPCExecutionError(
+            "include_path must be a .conf file under /etc/samba without traversal "
+            "or shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    path = PurePosixPath(value)
+    confined_path = path if path.is_absolute() else _SAMBA_CONF_ROOT / path
+    if (
+        ".." in confined_path.parts
+        or not confined_path.is_relative_to(_SAMBA_CONF_ROOT)
+        or confined_path == _SAMBA_CONF_ROOT
+    ):
+        raise RPCExecutionError(
+            "include_path must be confined under /etc/samba.",
+            code="RPC_PARAM_INVALID",
+        )
+    # Return the resolved absolute path, not the caller's raw value. The command
+    # rows run `cat {include_path}`, so returning a relative value would read the
+    # file relative to the backend process cwd instead of /etc/samba.
+    return str(confined_path)
+
+
+def _normalize_samba_share_name(raw_name: object) -> str:
+    share_name = str(raw_name or "").strip()
+    if not share_name or not _SAMBA_SHARE_NAME_RE.fullmatch(share_name):
+        raise RPCExecutionError(
+            "share_name must be a safe Samba share name without shell metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return share_name
 
 
 def _normalize_passbolt_migration_execution(

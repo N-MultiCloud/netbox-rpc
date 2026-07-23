@@ -325,6 +325,15 @@ done; the procedures (with their commands) declare *how*. See
   ordered `intent_procedures` and the form/serializer reconcile the through rows
   **before** the model save on the update path (Django never fires `m2m_changed`
   for a through-M2M with extra fields).
+- The supported NetBox range is **4.5.8 through 4.6.x**
+  (`min_version = "4.5.8"`, `max_version = "4.6.99"`), covering Django 5.2 and
+  Django 6.0. External `extras` dependencies are intentionally anchored to
+  `extras.0134_owner`, the final NetBox 4.5.8 migration and an ancestor in
+  4.6.x. Do not regenerate them against a newer NetBox migration leaf without
+  preserving the 4.5.8 floor.
+- NetBox APIs used by the plugin must exist on 4.5.8. Guard or provide a
+  fallback before adopting a 4.6-only model action, declarative UI/layout, or
+  serializer resolver API.
 - The plugin's real floor is NetBox **4.5.8** (`min_version = "4.5.8"`): the
   migration graph depends only on NetBox migration anchors present in both
   NetBox 4.5.8 and 4.6.x.
@@ -423,6 +432,13 @@ be used autonomously on destructive procedures.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
+- InfluxDB service management is provided by the generic Ubuntu 24 systemd
+  procedures through the seeded `RPCLinuxServiceAllowlist` row
+  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
+  `dcim.device` and `virtualization.virtualmachine`. Do not add
+  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
+  a new typed procedure if a future operation cannot be modeled as service
+  lifecycle control.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.
@@ -595,6 +611,85 @@ be used autonomously on destructive procedures.
   every container, DB, env var, host, user, port, and path parameter; no real
   secret contents are accepted, returned, logged, or stored. Operator commands
   live in `docs/passbolt-migration-runbook.md`.
+- Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
+  migration `0049` (command rows in `0050`). Samba config write/lifecycle
+  procedures are seeded by migration `0051` (command rows in `0052`). The twelve
+  read procedures are `effect="read"`, `approval_required=False`, and target
+  `["netbox_fileserver.sambadomain", "virtualization.virtualmachine", "dcim.device"]`.
+  They are the observability half of the Samba catalog and drive the
+  `netbox-fileserver` observed-state sync. Handler IDs are the procedure name with `samba.1` →
+  `samba_1` (e.g. `service.samba_1.config_read`); the handlers live in
+  nms-backend.
+  - `config_read` (30s) — `/etc/samba/smb.conf` content + sha256.
+  - `config_test` (30s) — `testparm -s` validation of the running config.
+  - `config_list_files` (60s) — enumerates `/etc/samba/**/*.conf` with size,
+    mtime, and per-file sha256. **Exempt** (backend-owned recursive walk + stat
+    + hash loop).
+  - `include_file_read` (30s) — reads ONE include file. Required `include_path`.
+  - `service_status` (30s) — active/sub/unit-file state for `smbd`, `nmbd`,
+    `winbind`, `samba-ad-dc`.
+  - `version` (30s) — `smbd -V`.
+  - `list_shares` (30s) — effective share definitions.
+  - `status_report` (30s) — `smbstatus --json`; `output_parser="json"`. Its
+    `output_schema` describes the **raw** Samba document: per
+    `source3/utils/status.c`, sections are emitted via `add_section_to_json()` →
+    `json_new_object()`, so `sessions`/`tcons`/`open_files`/`byte_range_locks`/
+    `notifies` are **objects keyed by id, not arrays**, and there is **no
+    top-level `locks` key** (`--locks` is a CLI flag). Sections are
+    flag-dependent, so none are required. The `result_schema` is the handler's
+    own envelope and flattens each section into an array.
+  - `domain_info` (60s) — `samba-tool domain info` + `domain level show`.
+  - `user_list` (60s) — directory usernames/SIDs/enabled state only.
+  - `group_list` (90s) — groups + members. **Exempt** (per-group member
+    expansion depends on prior command output).
+  - `share_acl_read` (30s) — `sharesec --view`. Required `share_name`.
+  - `config_deploy` (120s, write) — writes `config_content` via stdin to a
+    temp candidate, runs `testparm` against the candidate, snapshots the
+    previous config, then activates + reloads. On any failure after the snapshot
+    is taken (activation, reload, timeout, or lost response), the backend must
+    restore the snapshot, re-validate and reload the restored config, and report
+    `stage`, `snapshot_id`, `activated`, `reloaded`, `rolled_back`, and
+    nullable `rollback_error`. **Never write smb.conf directly and validate
+    afterwards. Exempt** (stdin + validate/snapshot/activate/rollback
+    orchestration).
+  - `config_rollback` (60s, destructive, **approval required**) — restores a
+    backend-issued config snapshot and reloads, reporting lifecycle and
+    rollback-outcome fields where applicable. **Exempt**.
+  - `include_file_write` (60s, write) — writes one confined include file via
+    stdin, validates the full config, and activates atomically. Required
+    `include_path`, `content`. **Exempt**.
+  - `include_file_delete` (60s, destructive, **approval required**) — deletes
+    one confined include file with validation/rollback guardrails. **Exempt**.
+  - `share_upsert` (60s, write) — creates/updates one share from structured
+    fields only (`share_name`, `path`, booleans, principal lists, masks,
+    comment); no arbitrary Samba option map. **Exempt**.
+  - `share_delete` (60s, destructive, **approval required**) — deletes one safe
+    share definition with validation/rollback guardrails. **Exempt**.
+  - `service_control` (30s, write) — fixed argv `systemctl` action. `unit` enum
+    is `smbd`/`nmbd`/`winbind`/`samba-ad-dc`; `action` enum is
+    `start`/`stop`/`restart`/`reload`. No `RPCLinuxServiceAllowlist` rows.
+
+  **Security invariants.** Every procedure accepts the shared optional
+  `rpc_ssh_*` connection overrides; beyond those, caller-supplied values are
+  confined in *both* the `params_schema` and the normalizer, so pure-domain paths
+  fail closed before nms-backend repeats the checks. Reuse
+  `_normalize_samba_include_path` for write/delete include paths; it confines
+  `.conf` paths under `/etc/samba` and returns the **resolved absolute path**.
+  Reuse `_normalize_samba_share_name` for share names; it starts with a safe
+  alphanumeric/underscore character so it can never be read as an option. Config
+  bodies (`config_content`, include `content`) must never become argv; the
+  normalizer forwards content for backend stdin use and fingerprints sha256 +
+  byte count metadata. Before persistence/dispatch it scans every assignment's
+  smb.conf parameter name case-insensitively and whitespace-insensitively,
+  rejecting any name ending in `script`, `command`, or `action`, plus the
+  `preexec`/`postexec` family (`root preexec` runs as root). `include`
+  directives inside caller-supplied bodies must resolve under `/etc/samba`;
+  `include = registry` and unconfined paths such as `/tmp/evil.conf` are
+  rejected. The scan first joins smb.conf line-continuations (a physical line ending in `\\`, per Samba's `lib/util/tini.c`) into one logical line before splitting the parameter name, so a directive cannot be smuggled past the denylist by splitting its name across a backslash continuation (`root pree\\` / `xec = ...`). The seed patterns anchor with `(?![\s\S])` rather than `$` because
+  `jsonschema` enforces `pattern` via `re.search`, and Python's `$` matches
+  before a single trailing newline. The `user_list` and `domain_info`
+  `result_schema`s contain no password/hash fields (asserted in
+  `tests/test_jobs_samba_normalization.py`).
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.
@@ -744,7 +839,8 @@ Two tiers (see `docs/architecture.md` → Testing):
    the rebuild oracle, the append-only ledger, the command handlers, and the
    command-only REST API. `.gitea/workflows/integration.yml` runs them against
    the self-hosted NetBox; `.github/workflows/test.yml` `integration` job runs
-   them portably with a Postgres service. Config: `tests/ci/netbox_configuration.py`.
+   them portably with a Postgres service against NetBox 4.5.8 and 4.6.5.
+   Config: `tests/ci/netbox_configuration.py`.
 
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.

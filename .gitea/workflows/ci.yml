@@ -40,7 +40,7 @@ jobs:
           export HOME="${GITHUB_WORKSPACE:-$PWD}"
           export PATH="$HOME/.local/bin:$PATH"
           uv venv --python 3.12 .ci-venv
-          uv pip install --python .ci-venv pytest pytest-asyncio requests jinja2
+          uv pip install --python .ci-venv pytest pytest-asyncio requests jinja2 jsonschema
 
       - name: Syntax check (py_compile)
         shell: bash
