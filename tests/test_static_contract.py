@@ -1003,7 +1003,10 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     assert "runs-on: mirror-host" in compatibility_job
     assert "fail-fast: false" in compatibility_job
     assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
-    assert "services:" in compatibility_job
+    # Host-mode executor: the gate provisions per-leg UTF8 databases on the
+    # host PostgreSQL instead of Docker service containers.
+    assert "Provision a UTF8 compatibility database" in compatibility_job
+    assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
     assert "v4.5.8" in compatibility_job
     assert "v4.6.5" in compatibility_job
     assert "if:" not in compatibility_job
