@@ -6,7 +6,8 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("extras", "0138_customfieldchoiceset_choice_colors"),
+        # Final extras migration in NetBox 4.5.8; also an ancestor in 4.6.x.
+        ("extras", "0134_owner"),
         ("netbox_rpc", "0043_rpcbackend_ip_domain"),
     ]
 

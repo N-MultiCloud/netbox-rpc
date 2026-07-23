@@ -993,8 +993,31 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
     assert '"sequence": ip.sequence' in models
 
 
-def test_plugin_min_version_matches_extras_dependency() -> None:
-    # The migration graph depends on extras.0138 (NetBox 4.6), so the declared
-    # floor must be 4.6.0, not 4.5.0.
+def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     init = read("netbox_rpc/__init__.py")
-    assert 'min_version = "4.6.0"' in init
+    assert 'min_version = "4.5.8"' in init
+    assert 'max_version = "4.6.99"' in init
+
+    migrations_dir = ROOT / "netbox_rpc" / "migrations"
+    migration_sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in migrations_dir.glob("*.py")
+    }
+    extras_dependencies = [
+        line.strip()
+        for source in migration_sources.values()
+        for line in source.splitlines()
+        if line.strip().startswith(("('extras',", '("extras",'))
+    ]
+    assert len(extras_dependencies) == 4
+    assert all("0134_owner" in dependency for dependency in extras_dependencies)
+
+    for name in (
+        "0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",
+        "0033_rpcbackend.py",
+        "0039_rpcintent.py",
+        "0044_rpcpluginsettings.py",
+    ):
+        # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
+        # remains an ancestor of the 4.6 migration graph.
+        assert "0134_owner" in migration_sources[name]

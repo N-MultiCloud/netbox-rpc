@@ -23,17 +23,23 @@ jobs:
       - run: pytest tests/ -q
 
   integration:
-    name: NetBox DB-backed integration tests (manage.py test)
+    name: NetBox ${{ matrix.netbox-version }} DB-backed integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        netbox-version:
+          - v4.5.8
+          - v4.6.5
     env:
-      NETBOX_VERSION: v4.6.2
+      NETBOX_VERSION: ${{ matrix.netbox-version }}
       NETBOX_DB_NAME: netbox
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: netbox
       NETBOX_DB_HOST: localhost
       NETBOX_REDIS_HOST: localhost
-      NETBOX_SECRET_KEY: github-actions-integration-secret-key-0123456789
+      NETBOX_SECRET_KEY: github-actions-integration-secret-key-0123456789-abcdef
     services:
       postgres:
         image: postgres:16

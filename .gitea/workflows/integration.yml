@@ -27,7 +27,7 @@ jobs:
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: ${{ secrets.NETBOX_DB_PASSWORD }}
       NETBOX_DB_HOST: localhost
-      NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij
+      NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij-abcdef
     steps:
       - name: Checkout
         uses: actions/checkout@v4
