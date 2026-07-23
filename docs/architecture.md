@@ -23,9 +23,11 @@ lifecycle invariants:
 - normalized params and backend responses are recorded only for running
   executions.
 
-`RPCProcedure`, `RPCLinuxServiceAllowlist`, and `RPCBackend` are intentional
-reference-data/configuration entities. They are ordinary NetBox CRUD models,
-audited by NetBox `ObjectChange`, and are not event-sourced.
+`RPCProcedure`, `RPCProcedureCommand`, `RPCLinuxServiceAllowlist`, `RPCBackend`,
+`RPCIntent` (with its `RPCIntentProcedure` through model), and
+`RpcPluginSettings` are intentional reference-data/configuration entities. They
+are ordinary NetBox CRUD models, audited by NetBox `ObjectChange`, and are not
+event-sourced.
 
 ## Event Catalog
 

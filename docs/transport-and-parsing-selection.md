@@ -24,6 +24,25 @@ pipeline exemplars:
 | `os.linux.collect_facts` | `asyncssh` | Linux fact collection uses a fixed backend handler and a Linux parser |
 | `network.device.dell_os10.s5232f_on.show_version_structured` | `scrapli` | Dell OS10 is a network CLI target with structured prompt/session handling |
 
+### `transport_driver_chain` (ordered fallback)
+
+`RPCProcedure.transport_driver_chain` is an ordered **priority + fallback
+chain** of the same driver names as `transport_driver` (index 0 tried first).
+Populate it only when a procedure should try more than one driver at runtime —
+for example a network device reachable over `scrapli` but with `netmiko` as a
+fallback platform driver. Leave it empty (the default) to use the single
+`transport_driver` value; this is the right choice for the great majority of
+procedures, including all current pipeline exemplars above.
+
+`_apply_driver_pipeline_overrides()` injects `transport_driver_chain` into
+`normalized_params["transport_driver_chain"]` (and `command_fingerprint`) only
+when the list is non-empty, so legacy/single-driver procedures keep a
+byte-for-byte identical normalized payload. The `netbox-rpc-backend` executor
+tries the listed drivers in order, skips capability-mismatched entries,
+advances to the next driver on an unavailable/connection error, and stops the
+chain on a command-level result (a command failure is not a transport failure
+and must not trigger fallback to the next driver).
+
 ## Output-parser decision ladder
 
 1. Prefer native `json` or `xml` when the device can return structured output.
@@ -69,10 +88,12 @@ or templates rather than raw executable text.
 
 1. Add a data-only seed migration row for `RPCProcedure` with `name`,
    `handler_id`, `target_models`, `effect`, approval policy, timeout,
-   `params_schema`, `result_schema`, `transport_driver`, `output_parser`, and
-   `output_schema`.
-2. Add a `jobs.py` normalizer branch in `_dispatch_normalize_execution_params()`
-   keyed by the procedure name constant.
+   `params_schema`, `result_schema`, `transport_driver` (plus
+   `transport_driver_chain` only if the procedure needs an ordered
+   priority/fallback chain of drivers), `output_parser`, and `output_schema`.
+2. Add a normalizer branch in `_dispatch_normalize_execution_params()` in
+   `netbox_rpc.domain.normalization`, keyed by the procedure name constant
+   (`jobs.py` only re-exports this function for compatibility).
 3. Make the normalizer emit validated semantic params only. Do not emit
    `commands`, shell snippets, CLI text, script text, or unbounded strings.
 4. Add the matching nms-backend `@rpc_handler(handler_id=...)` that builds the
