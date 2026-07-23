@@ -84,9 +84,15 @@ jobs:
       # Postgres/Redis services cannot collide with this hermetic gate.
       max-parallel: 1
       matrix:
-        netbox-version:
-          - v4.5.8
-          - v4.6.5
+        include:
+          - netbox-version: v4.5.8
+            compat-db: netbox_compat_458
+            redis-tasks-db: "12"
+            redis-cache-db: "13"
+          - netbox-version: v4.6.5
+            compat-db: netbox_compat_465
+            redis-tasks-db: "14"
+            redis-cache-db: "15"
     # mirror-host is a host-mode executor: it cannot provision Docker service
     # containers, so this gate uses the host PostgreSQL/Redis directly — the
     # same pattern as the /opt/netbox job above. Each matrix leg gets its own
@@ -96,15 +102,15 @@ jobs:
       HOME: ${{ github.workspace }}
       UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
       NETBOX_VERSION: ${{ matrix.netbox-version }}
-      NETBOX_DB_NAME: netbox_compat_${{ strategy.job-index }}
+      NETBOX_DB_NAME: ${{ matrix.compat-db }}
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: ${{ secrets.NETBOX_DB_PASSWORD }}
       NETBOX_DB_HOST: localhost
       NETBOX_DB_PORT: "5432"
       NETBOX_REDIS_HOST: localhost
       NETBOX_REDIS_PORT: "6379"
-      NETBOX_REDIS_DB_TASKS: ${{ strategy.job-index == 0 && '12' || '14' }}
-      NETBOX_REDIS_DB_CACHE: ${{ strategy.job-index == 0 && '13' || '15' }}
+      NETBOX_REDIS_DB_TASKS: ${{ matrix.redis-tasks-db }}
+      NETBOX_REDIS_DB_CACHE: ${{ matrix.redis-cache-db }}
       NETBOX_SECRET_KEY: gitea-actions-integration-secret-key-0123456789-abcdef
     steps:
       - name: Preflight (fail if host services are unavailable)
