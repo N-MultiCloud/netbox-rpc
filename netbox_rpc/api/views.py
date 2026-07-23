@@ -63,13 +63,34 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
         from django.db.models import Q
 
         target_type = (request.query_params.get("target_type") or "").strip().lower()
-        qs = models.RPCProcedure.objects.filter(enabled=True).prefetch_related("tags")
+        qs = models.RPCProcedure.objects.filter(enabled=True).prefetch_related(
+            "tags", "commands"
+        )
         if target_type:
             # Include procedures with no target restriction (empty list) or those
             # that explicitly allow the requested target type.
             qs = qs.filter(
                 Q(target_models=[]) | Q(target_models__contains=[target_type])
             )
+
+        # #167: when the selected backend advertises a capability manifest, a
+        # procedure the backend cannot serve compatibly is not "available".
+        # Graceful when the backend advertises nothing (manifest is None).
+        from .. import capabilities
+        from ..models import RpcPluginSettings
+
+        manifest = capabilities.fetch_backend_capabilities(
+            RpcPluginSettings.get_solo().resolved_backend_target()
+        )
+        if manifest is not None:
+            compatible = [
+                procedure
+                for procedure in qs
+                if capabilities.verify_procedure_capability(procedure, manifest)
+                is not capabilities.CapabilityStatus.MISMATCH
+            ]
+            qs = compatible
+
         page = self.paginate_queryset(qs)
         serializer = self.get_serializer(page if page is not None else qs, many=True)
         if page is not None:

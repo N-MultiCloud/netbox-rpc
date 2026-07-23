@@ -64,8 +64,11 @@ class CreateEnforcementTests(TestCase):
         assert resp.status_code == 400, resp.content
         assert not RPCExecution.objects.exists()
 
+    @mock.patch(
+        "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
+    )
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
-    def test_requester_backend_id_is_ignored(self, enqueue):
+    def test_requester_backend_id_is_ignored(self, enqueue, _fetch):
         enqueue.return_value = mock.Mock(pk=4242)
         backend = make_backend()
         enable_rpc_integration(backend=backend)

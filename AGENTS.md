@@ -248,6 +248,21 @@ work in #165–#168.
   unambiguous), so enforcing the gate never rejects an already-active install;
   fresh installs keep the `enabled=False` default. Tests that create/dispatch
   executions must call `_common.enable_rpc_integration()`.
+- **Backend capability handshake (#167)**: `capabilities.py` consumes a manifest
+  the paired `netbox-rpc-backend` advertises at `GET {backend_url}/capabilities`
+  (per handler: `handler_id`/`version`/`effect`/`contract_hash`, plus a top-level
+  `envelope_version`). The fetch is bounded (≤512 KiB), authenticated (backend
+  target headers), cached (30 s TTL), Pydantic-v2-validated, and **never trusted
+  as command input**; `derive_command_contract_hash()` is the shared hash both
+  sides compute over a procedure's identity + ordered command contract. Before
+  enqueue, `create_execution` fails closed (400) on a capability **mismatch**
+  (missing handler / version / effect / contract-hash / unsupported envelope),
+  and `procedures/available` filters mismatched procedures out. **Graceful
+  degradation:** when the backend advertises nothing (no route / unreachable /
+  malformed / oversized), the fetch is `None`, verification is `UNKNOWN`, and
+  callers proceed — so enforcement is inert until the paired backend advertises
+  a manifest (prod-safe; the current backend advertises none). Capability tests
+  that create executions must mock `capabilities.fetch_backend_capabilities`.
 
 ## Intents
 

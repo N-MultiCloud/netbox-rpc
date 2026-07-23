@@ -42,6 +42,33 @@ def _require_enabled_and_authoritative_backend(user: object) -> object | None:
     return settings_row.backend_id
 
 
+def _verify_backend_capability(procedure: object) -> None:
+    """Fail closed before enqueue on a backend capability mismatch (issue #167).
+
+    Fetches the selected backend's capability manifest and verifies the
+    procedure's handler/version/effect/contract-hash/envelope against it. A
+    ``MISMATCH`` (advertised but incompatible) is rejected (400); ``UNKNOWN``
+    (the backend advertises nothing) proceeds — capability enforcement is inert
+    until the paired backend advertises.
+    """
+    from .. import capabilities
+    from ..models import RpcPluginSettings
+
+    target = RpcPluginSettings.get_solo().resolved_backend_target()
+    manifest = capabilities.fetch_backend_capabilities(target)
+    status = capabilities.verify_procedure_capability(procedure, manifest)
+    if status is capabilities.CapabilityStatus.MISMATCH:
+        raise drf_serializers.ValidationError(
+            {
+                "procedure_id": (
+                    "The selected backend does not advertise a compatible "
+                    "capability for this procedure (handler/version/effect/"
+                    "contract mismatch)."
+                )
+            }
+        )
+
+
 def create_execution(*, serializer: Any, user: object) -> object:
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
@@ -66,6 +93,9 @@ def create_execution(*, serializer: Any, user: object) -> object:
             jsonschema.validate(params, procedure.params_schema)
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
+
+    # #167: fail closed before enqueue on a backend capability mismatch.
+    _verify_backend_capability(procedure)
 
     with transaction.atomic():
         # #166: a normal requester cannot select an arbitrary backend — the

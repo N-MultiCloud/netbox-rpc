@@ -36,8 +36,11 @@ class ExecutionApiTests(TestCase):
     def _detail_url(self, ex):
         return reverse("plugins-api:netbox_rpc-api:rpcexecution-detail", args=[ex.pk])
 
+    @mock.patch(
+        "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
+    )
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue", return_value=_FakeJob())
-    def test_create_emits_queued_and_job_enqueued(self, _enqueue):
+    def test_create_emits_queued_and_job_enqueued(self, _enqueue, _fetch):
         device = make_device()
         url = reverse("plugins-api:netbox_rpc-api:rpcexecution-list")
         resp = self.client.post(
