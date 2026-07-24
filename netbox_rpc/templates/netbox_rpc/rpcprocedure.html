@@ -138,7 +138,7 @@
             earlier commands' output <code>vars</code>,
             <code>runtime</code> SSH keys, and the for-each <code>item</code>.
             A command's <em>Produces</em> variable is referenceable as
-            <code>{{ '{{ vars.<name> }}' }}</code> by any later command.
+            <code>{% verbatim %}{{ vars.<name> }}{% endverbatim %}</code> by any later command.
           </p>
         {% else %}
           <span class="text-muted">{{ ''|placeholder }}</span>

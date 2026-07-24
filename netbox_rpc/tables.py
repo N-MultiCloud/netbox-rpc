@@ -181,6 +181,12 @@ class RPCExecutionTable(NetBoxTable):
         verbose_name="Source",
     )
     backend = tables.Column(verbose_name="Backend ID")
+    # RPCExecution is a command-only, event-sourced aggregate: it has no
+    # edit/delete UI views (PUT/PATCH/DELETE are disabled). NetBox's default
+    # ActionsColumn renders edit/delete buttons that reverse
+    # ``rpcexecution_edit``/``_delete``, which do not exist -> NoReverseMatch
+    # 500s the runs tab and the executions list. Render no row actions.
+    actions = columns.ActionsColumn(actions=())
 
     class Meta(NetBoxTable.Meta):
         model = RPCExecution

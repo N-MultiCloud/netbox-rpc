@@ -272,6 +272,22 @@ class RPCIntentSerializer(NetBoxModelSerializer):
             ]
         )
 
+    def validate(self, data: dict) -> dict:
+        # ``procedure_ids`` is a write-only, non-model serializer field.
+        # NetBox's ``ValidatedModelSerializer.validate()`` instantiates the
+        # model with the validated data to run ``clean()``
+        # (``RPCIntent(**attrs)``); it only pops real M2M *model* fields, so
+        # ``procedure_ids`` would leak into the constructor and raise
+        # ``TypeError: RPCIntent() got unexpected keyword arguments:
+        # 'procedure_ids'``. Pop it around ``super().validate()`` and restore
+        # it for ``create()``/``update()`` -- the same pattern NetBox uses for
+        # ``add_tags``/``remove_tags`` (see ``netbox.api.serializers.features``).
+        procedure_ids = data.pop("procedure_ids", None)
+        data = super().validate(data)
+        if procedure_ids is not None:
+            data["procedure_ids"] = procedure_ids
+        return data
+
     def create(self, validated_data: dict) -> RPCIntent:
         procedures = validated_data.pop("procedure_ids", None)
         intent = super().create(validated_data)
@@ -286,6 +302,15 @@ class RPCIntentSerializer(NetBoxModelSerializer):
             # changelog postchange (serialize_object) reflects the new
             # membership/order — otherwise a reorder is not captured in the diff.
             self._set_procedures(instance, procedures)
+            # _set_procedures reconciles the through rows via querysets, which
+            # does not update this instance's prefetched intent_procedures
+            # cache (the viewset prefetch_related's it). Drop that cache so
+            # serialize_object() -- fired by the model save inside
+            # super().update() for the changelog postchange -- reads the
+            # freshly reconciled rows in their new order, not the stale
+            # prefetch (otherwise a reorder is not captured in the diff).
+            if hasattr(instance, "_prefetched_objects_cache"):
+                instance._prefetched_objects_cache.pop("intent_procedures", None)
         return super().update(instance, validated_data)
 
 
