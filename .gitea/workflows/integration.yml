@@ -161,7 +161,7 @@ jobs:
           set -eo pipefail
           export PATH="${GITHUB_WORKSPACE}/.local/bin:$PATH"
           uv pip install --python .ci-venv -r netbox/requirements.txt
-          uv pip install --python .ci-venv -e ./plugin
+          uv pip install --python .ci-venv -e "./plugin[test]"
 
       - name: Run compatibility checks (fresh database)
         shell: bash
@@ -171,10 +171,13 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
-          # The gate proves cross-version installability: system checks plus a
-          # complete migration run (including all seed migrations) on a fresh
-          # database. The DB-backed behavioral suite runs in the job above;
-          # running it on a fresh database trips pre-existing state-dependent
-          # tests on every NetBox version (tracked follow-up).
+          # The gate proves cross-version installability AND fresh-database
+          # behavioral correctness: system checks, a complete migration run
+          # (including all seed migrations), then the full DB-backed behavioral
+          # suite on a freshly built database. The previously-deferred fresh-DB
+          # failures (#186) were product/test bugs, now fixed (PRs #190, #191);
+          # the suite's pydantic/cryptography deps come from `.ci-venv`'s
+          # `plugin[test]` install above.
           python netbox/netbox/manage.py check
           python netbox/netbox/manage.py migrate --no-input
+          python netbox/netbox/manage.py test netbox_rpc --no-input

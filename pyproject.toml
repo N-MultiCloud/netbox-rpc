@@ -32,6 +32,12 @@ classifiers = [
 
 [project.optional-dependencies]
 nms = ["netbox-nms>=0.1.8,<0.2.0"]
+# Integration/DB-backed test deps: the netbox_rpc/tests/ suite exercises the
+# dispatch-lease (cryptography ed25519) + capability-handshake (pydantic v2)
+# code paths. These are ambient on a full NetBox install but absent in a
+# minimal netbox-rpc-only environment (e.g. the integration.yml compatibility
+# matrix), so declare them here and install with `-e .[test]` in CI.
+test = ["pydantic>=2.0", "cryptography>=42.0"]
 
 [tool.setuptools]
 include-package-data = true
