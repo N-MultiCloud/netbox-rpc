@@ -10,7 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from .. import models
+from .. import filtersets, models
 from ..application.command_handlers import (
     approve_execution,
     cancel_execution,
@@ -53,11 +53,13 @@ class RpcPluginSettingsViewSet(NetBoxModelViewSet):
 class RPCBackendViewSet(NetBoxModelViewSet):
     queryset = models.RPCBackend.objects.prefetch_related("tags")
     serializer_class = RPCBackendSerializer
+    filterset_class = filtersets.RPCBackendFilterSet
 
 
 class RPCProcedureViewSet(NetBoxModelViewSet):
     queryset = models.RPCProcedure.objects.prefetch_related("commands", "tags")
     serializer_class = RPCProcedureSerializer
+    filterset_class = filtersets.RPCProcedureFilterSet
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"], url_path="available")
@@ -140,6 +142,7 @@ class RPCProcedureCommandViewSet(NetBoxModelViewSet):
         "procedure"
     ).prefetch_related("tags")
     serializer_class = RPCProcedureCommandSerializer
+    filterset_class = filtersets.RPCProcedureCommandFilterSet
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -154,6 +157,7 @@ class RPCIntentViewSet(NetBoxModelViewSet):
         "tags", "intent_procedures__procedure"
     )
     serializer_class = RPCIntentSerializer
+    filterset_class = filtersets.RPCIntentFilterSet
 
     @extend_schema(
         request=RPCIntentRunSerializer,
@@ -186,6 +190,7 @@ class RPCIntentViewSet(NetBoxModelViewSet):
 class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
     queryset = models.RPCLinuxServiceAllowlist.objects.prefetch_related("tags")
     serializer_class = RPCLinuxServiceAllowlistSerializer
+    filterset_class = filtersets.RPCLinuxServiceAllowlistFilterSet
 
 
 class RPCExecutionViewSet(NetBoxModelViewSet):
@@ -202,6 +207,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "requested_by",
     ).prefetch_related("procedure__commands", "tags")
     serializer_class = RPCExecutionSerializer
+    filterset_class = filtersets.RPCExecutionFilterSet
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         serializer = self.get_serializer(data=request.data)
@@ -261,3 +267,4 @@ class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet):
         "execution"
     ).prefetch_related("tags")
     serializer_class = RPCExecutionEventSerializer
+    filterset_class = filtersets.RPCExecutionEventFilterSet
