@@ -458,6 +458,19 @@ be used autonomously on destructive procedures.
   InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
   a new typed procedure if a future operation cannot be modeled as service
   lifecycle control.
+- NetBox stack service management is provided the same way, through the allowlist
+  rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
+  (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
+  (RQ background worker), both targeting `dcim.device` and
+  `virtualization.virtualmachine`. Use the existing generic Ubuntu 24 systemd
+  procedures (`os.linux.ubuntu.24.restart_service` / `status_service` /
+  `journal_tail`, etc.) against a NetBox-host `dcim.device`/VM that carries a
+  DeviceService SSH credential — never SSH the NetBox host directly.
+  **Restarting `netbox-rq` also sweeps orphaned/zombie `core.Job` rows** left by a
+  worker that died mid-job (its `job_timeout` never fires), so it is the audited
+  recovery for a NetBox RQ job stuck in `running`. `restart_service` is
+  `effect="write"`, no approval, but disruptive — present the action before
+  dispatching per the write-procedure rule below.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.
