@@ -32,6 +32,18 @@ _RELATIVE_PATH_PATTERN = (
 )
 _SNAPSHOT_ID_PATTERN = r"^[0-9]{8}T[0-9]{12}Z(?![\s\S])"
 _SHA256 = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+_SECRET_CONTENT_PATTERNS = (
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    (
+        r"(?im)(?:^|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+        r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+        r"private[-_]?key|credential)"
+        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+"
+    ),
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
+    "\u0000",
+)
 
 
 def _params(required=(), properties=None):
@@ -55,6 +67,8 @@ _CONTENT = {
     "type": "string",
     "minLength": 1,
     "maxLength": _MAX_CONTENT,
+    "pattern": r"\S",
+    "allOf": [{"not": {"pattern": pattern}} for pattern in _SECRET_CONTENT_PATTERNS],
     "description": "Non-secret content; transported to the execution backend via stdin.",
 }
 _FAMILY_PARAMS = _params(("family",), {"family": _FAMILY})
@@ -370,6 +384,7 @@ _PROCEDURES = (
                 "path": {"type": "string"},
                 "sha256": _SHA256,
                 "written": {"type": "boolean"},
+                "snapshot_id": {"type": "string"},
             },
         ),
     },

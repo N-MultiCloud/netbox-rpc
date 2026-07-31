@@ -202,10 +202,19 @@ _INFLUXDB_FORBIDDEN_PATH_PART_RE = re.compile(
     re.IGNORECASE,
 )
 _INFLUXDB_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?im)^\s*[A-Za-z0-9_.-]*(?:token|password|secret)[A-Za-z0-9_.-]*\s*=\s*"
+    r"(?im)(?:^|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+    r"private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
     r"[\"']?(?!/)[^\s\"']+"
 )
 _INFLUXDB_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_INFLUXDB_AUTHORIZATION_RE = re.compile(
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+"
+)
+_INFLUXDB_URL_CREDENTIAL_RE = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
+)
 _INFLUXDB_RESOURCE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}$")
 _INFLUXDB_USERNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
 _INFLUXDB_SECRET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$")
@@ -1241,9 +1250,15 @@ def _normalize_influxdb_content(raw_content: object, field_name: str) -> str:
             f"{field_name} may contain at most {_INFLUXDB_MAX_CONTENT_LEN} characters.",
             code="RPC_PARAM_INVALID",
         )
-    if _INFLUXDB_PRIVATE_KEY_RE.search(
-        content
-    ) or _INFLUXDB_SECRET_ASSIGNMENT_RE.search(content):
+    if any(
+        pattern.search(content)
+        for pattern in (
+            _INFLUXDB_PRIVATE_KEY_RE,
+            _INFLUXDB_SECRET_ASSIGNMENT_RE,
+            _INFLUXDB_AUTHORIZATION_RE,
+            _INFLUXDB_URL_CREDENTIAL_RE,
+        )
+    ):
         raise RPCExecutionError(
             f"{field_name} contains secret-shaped material; use netbox-nms secret references instead.",
             code="RPC_PARAM_SECRET_FORBIDDEN",

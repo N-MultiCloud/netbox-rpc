@@ -451,7 +451,7 @@ The `family` enum selects either OSS 2 (`influxdb.service`,
 | `service_status` / `health` / `journal` | read | Observe systemd, loopback readiness, and bounded redacted logs |
 | `config_deploy` | write | Validate TOML, snapshot, atomically activate, restart, health-check, and restore on failure |
 | `config_rollback` | destructive | Restore a backend-issued snapshot with restart and health evidence |
-| `file_write` | write | Atomically write a confined non-secret file via stdin |
+| `file_write` | write | Snapshot any existing file, then atomically write confined non-secret content via stdin |
 | `file_delete` | destructive | Snapshot then delete one confined file |
 | `service_control` | write | Run a closed start/stop/restart/enable/disable action |
 | `bootstrap` | write | Initialize a fresh OSS 2/Core 3 server and store generated credentials as `nms-secret:` references |

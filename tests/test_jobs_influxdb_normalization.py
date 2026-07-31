@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from jsonschema import ValidationError, validate
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -88,9 +89,18 @@ def test_seed_creates_typed_approval_gated_influxdb_catalog(
 
     deploy_schema = procedures.rows["service.influxdb.1.config_deploy"]["params_schema"]
     assert deploy_schema["properties"]["config_content"]["maxLength"] == 1024 * 1024
-    assert "token" in str(
-        procedures.rows["service.influxdb.1.file_write"]["params_schema"]
-    )
+    for secret_content in (
+        '{"token":"do-not-persist"}',
+        "password: do-not-persist",
+        "passphrase: do-not-persist",
+        "credential = do-not-persist",
+        "endpoint = \"https://user:pass@example.net\"",
+    ):
+        with pytest.raises(ValidationError):
+            validate(
+                {"family": "oss2", "config_content": secret_content},
+                deploy_schema,
+            )
 
     for migration in reversed(migrations):
         migration._remove(apps, None)
@@ -281,6 +291,26 @@ def test_onboarding_normalization_rejects_invalid_family_contracts(
         (
             "service.influxdb.1.config_deploy",
             {"family": "core3", "config_content": "-----BEGIN PRIVATE KEY-----"},
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
+        (
+            "service.influxdb.1.config_deploy",
+            {"family": "core3", "config_content": '{"token":"do-not-persist"}'},
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
+        (
+            "service.influxdb.1.file_write",
+            {
+                "family": "core3",
+                "scope": "managed",
+                "relative_path": "settings.yaml",
+                "content": "password: do-not-persist",
+            },
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
+        (
+            "service.influxdb.1.config_deploy",
+            {"family": "core3", "config_content": "passphrase: do-not-persist"},
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
         (
