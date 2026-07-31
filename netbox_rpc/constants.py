@@ -191,6 +191,12 @@ INFLUXDB_1_FILE_DELETE = "service.influxdb.1.file_delete"
 INFLUXDB_1_FILE_DELETE_HANDLER = "service.influxdb_1.file_delete"
 INFLUXDB_1_SERVICE_CONTROL = "service.influxdb.1.service_control"
 INFLUXDB_1_SERVICE_CONTROL_HANDLER = "service.influxdb_1.service_control"
+INFLUXDB_1_BOOTSTRAP = "service.influxdb.1.bootstrap"
+INFLUXDB_1_BOOTSTRAP_HANDLER = "service.influxdb_1.bootstrap"
+INFLUXDB_1_DATABASE_CREATE = "service.influxdb.1.database_create"
+INFLUXDB_1_DATABASE_CREATE_HANDLER = "service.influxdb_1.database_create"
+INFLUXDB_1_TOKEN_CREATE = "service.influxdb.1.token_create"
+INFLUXDB_1_TOKEN_CREATE_HANDLER = "service.influxdb_1.token_create"
 INFLUXDB_1_PROCEDURE_NAMES = frozenset(
     {
         INFLUXDB_1_INSPECT,
@@ -205,6 +211,9 @@ INFLUXDB_1_PROCEDURE_NAMES = frozenset(
         INFLUXDB_1_FILE_WRITE,
         INFLUXDB_1_FILE_DELETE,
         INFLUXDB_1_SERVICE_CONTROL,
+        INFLUXDB_1_BOOTSTRAP,
+        INFLUXDB_1_DATABASE_CREATE,
+        INFLUXDB_1_TOKEN_CREATE,
     }
 )
 

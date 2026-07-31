@@ -26,8 +26,10 @@ from ..constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
+    INFLUXDB_1_BOOTSTRAP,
     INFLUXDB_1_CONFIG_DEPLOY,
     INFLUXDB_1_CONFIG_ROLLBACK,
+    INFLUXDB_1_DATABASE_CREATE,
     INFLUXDB_1_FILE_DELETE,
     INFLUXDB_1_FILE_READ,
     INFLUXDB_1_FILE_WRITE,
@@ -35,6 +37,7 @@ from ..constants import (
     INFLUXDB_1_JOURNAL,
     INFLUXDB_1_PROCEDURE_NAMES,
     INFLUXDB_1_SERVICE_CONTROL,
+    INFLUXDB_1_TOKEN_CREATE,
     LINUX_COLLECT_FACTS,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
@@ -203,6 +206,13 @@ _INFLUXDB_SECRET_ASSIGNMENT_RE = re.compile(
     r"[\"']?(?!/)[^\s\"']+"
 )
 _INFLUXDB_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_INFLUXDB_RESOURCE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}$")
+_INFLUXDB_USERNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+_INFLUXDB_SECRET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$")
+_INFLUXDB_SECRET_REF_RE = re.compile(
+    r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
 # "* action", plus the preexec/postexec family. "root preexec" runs as root, so
@@ -1061,8 +1071,136 @@ def _normalize_influxdb_1_execution(
         normalized["action"] = action
         normalized["command_fingerprint"]["action"] = action
 
+    if procedure_name == INFLUXDB_1_BOOTSTRAP:
+        prefix = _normalize_influxdb_named_value(
+            params.get("secret_name_prefix"),
+            "secret_name_prefix",
+            _INFLUXDB_SECRET_NAME_RE,
+        )
+        normalized["secret_name_prefix"] = prefix
+        normalized["command_fingerprint"]["secret_name_prefix"] = prefix
+        _copy_influxdb_tenant_id(params, normalized)
+        if normalized["family"] == "oss2":
+            for key, pattern in (
+                ("username", _INFLUXDB_USERNAME_RE),
+                ("organization", _INFLUXDB_RESOURCE_NAME_RE),
+                ("database", _INFLUXDB_RESOURCE_NAME_RE),
+            ):
+                value = _normalize_influxdb_named_value(params.get(key), key, pattern)
+                normalized[key] = value
+                normalized["command_fingerprint"][key] = value
+            _copy_influxdb_retention(params, normalized)
+        elif any(params.get(key) not in (None, "") for key in ("username", "organization", "database", "retention_seconds")):
+            raise RPCExecutionError(
+                "Core 3 bootstrap accepts only family, secret_name_prefix, and optional tenant_id.",
+                code="RPC_PARAM_INVALID",
+            )
+
+    if procedure_name == INFLUXDB_1_DATABASE_CREATE:
+        _copy_influxdb_admin_ref(params, normalized)
+        database = _normalize_influxdb_named_value(
+            params.get("database"), "database", _INFLUXDB_RESOURCE_NAME_RE
+        )
+        normalized["database"] = database
+        normalized["command_fingerprint"]["database"] = database
+        _copy_influxdb_retention(params, normalized)
+        if normalized["family"] == "oss2":
+            organization = _normalize_influxdb_named_value(
+                params.get("organization"), "organization", _INFLUXDB_RESOURCE_NAME_RE
+            )
+            normalized["organization"] = organization
+            normalized["command_fingerprint"]["organization"] = organization
+        elif params.get("organization") not in (None, ""):
+            raise RPCExecutionError(
+                "organization is supported only for family='oss2'.",
+                code="RPC_PARAM_INVALID",
+            )
+
+    if procedure_name == INFLUXDB_1_TOKEN_CREATE:
+        _copy_influxdb_admin_ref(params, normalized)
+        token_name = _normalize_influxdb_named_value(
+            params.get("token_name"), "token_name", _INFLUXDB_SECRET_NAME_RE
+        )
+        access = str(params.get("access") or "").strip().lower()
+        if normalized["family"] == "oss2" and access not in {"query", "writer"}:
+            raise RPCExecutionError(
+                "OSS 2 token access must be 'query' or 'writer'.",
+                code="RPC_PARAM_INVALID",
+            )
+        if normalized["family"] == "core3" and access != "admin":
+            raise RPCExecutionError(
+                "Core 3 currently supports only named admin tokens.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized.update({"token_name": token_name, "access": access})
+        normalized["command_fingerprint"].update(
+            {"token_name": token_name, "access": access}
+        )
+        _copy_influxdb_tenant_id(params, normalized)
+        if normalized["family"] == "oss2":
+            for key in ("organization", "database"):
+                value = _normalize_influxdb_named_value(
+                    params.get(key), key, _INFLUXDB_RESOURCE_NAME_RE
+                )
+                normalized[key] = value
+                normalized["command_fingerprint"][key] = value
+            if params.get("expiry_seconds") is not None:
+                raise RPCExecutionError(
+                    "expiry_seconds is supported only for Core 3 named admin tokens.",
+                    code="RPC_PARAM_INVALID",
+                )
+        else:
+            if any(params.get(key) not in (None, "") for key in ("organization", "database")):
+                raise RPCExecutionError(
+                    "Core 3 named admin tokens are server-wide and do not accept organization/database.",
+                    code="RPC_PARAM_INVALID",
+                )
+            expiry = _optional_int_range(params, "expiry_seconds", 3600, 315360000)
+            if expiry is not None:
+                normalized["expiry_seconds"] = expiry
+                normalized["command_fingerprint"]["expiry_seconds"] = expiry
+
     _copy_optional_ssh_overrides(params, normalized)
     return normalized
+
+
+def _normalize_influxdb_named_value(
+    raw_value: object,
+    field_name: str,
+    pattern: re.Pattern[str],
+) -> str:
+    value = str(raw_value or "").strip()
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _copy_influxdb_admin_ref(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+    secret_ref = str(params.get("admin_secret_ref") or "").strip()
+    if not _INFLUXDB_SECRET_REF_RE.fullmatch(secret_ref):
+        raise RPCExecutionError(
+            "admin_secret_ref must be an nms-secret UUID reference.",
+            code="RPC_PARAM_INVALID",
+        )
+    normalized["admin_secret_ref"] = secret_ref
+    normalized["command_fingerprint"]["admin_secret_ref"] = secret_ref
+
+
+def _copy_influxdb_tenant_id(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+    tenant_id = _optional_int_range(params, "tenant_id", 1, None)
+    if tenant_id is not None:
+        normalized["tenant_id"] = tenant_id
+        normalized["command_fingerprint"]["tenant_id"] = tenant_id
+
+
+def _copy_influxdb_retention(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+    retention = _optional_int_range(params, "retention_seconds", 3600, 315360000)
+    if retention is not None:
+        normalized["retention_seconds"] = retention
+        normalized["command_fingerprint"]["retention_seconds"] = retention
 
 
 def _normalize_influxdb_relative_path(raw_path: object) -> str:

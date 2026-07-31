@@ -183,6 +183,18 @@ EXEMPT_HANDLER_RATIONALE = {
     "service.influxdb_1.service_control": (
         "Maps enum-constrained family/action parameters to a fixed unit and reads final state."
     ),
+    "service.influxdb_1.bootstrap": (
+        "Generates credentials in backend memory, stores them through the netbox-nms secret "
+        "bridge, and performs the family-specific loopback bootstrap without exposing plaintext."
+    ),
+    "service.influxdb_1.database_create": (
+        "Resolves an nms-secret reference backend-side and creates an OSS bucket or Core database "
+        "through the family-specific loopback API."
+    ),
+    "service.influxdb_1.token_create": (
+        "Resolves an administrative nms-secret reference, creates a family-supported token, and "
+        "stores the one-time plaintext through the netbox-nms secret bridge before returning metadata."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."

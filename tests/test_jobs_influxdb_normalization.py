@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-MIGRATION_MODULE = "netbox_rpc.migrations.0055_seed_influxdb_management_procedures"
+MIGRATION_MODULES = (
+    "netbox_rpc.migrations.0055_seed_influxdb_management_procedures",
+    "netbox_rpc.migrations.0056_seed_influxdb_onboarding_procedures",
+)
 PROCEDURE_NAMES = (
     "service.influxdb.1.inspect",
     "service.influxdb.1.config_read",
@@ -30,6 +33,9 @@ PROCEDURE_NAMES = (
     "service.influxdb.1.file_write",
     "service.influxdb.1.file_delete",
     "service.influxdb.1.service_control",
+    "service.influxdb.1.bootstrap",
+    "service.influxdb.1.database_create",
+    "service.influxdb.1.token_create",
 )
 MUTATION_NAMES = frozenset(PROCEDURE_NAMES[7:])
 
@@ -38,8 +44,10 @@ def test_seed_creates_typed_approval_gated_influxdb_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_migration_import_stubs(monkeypatch)
-    sys.modules.pop(MIGRATION_MODULE, None)
-    migration = importlib.import_module(MIGRATION_MODULE)
+    migrations = []
+    for module_name in MIGRATION_MODULES:
+        sys.modules.pop(module_name, None)
+        migrations.append(importlib.import_module(module_name))
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
 
@@ -51,7 +59,8 @@ def test_seed_creates_typed_approval_gated_influxdb_catalog(
         raise AssertionError((app_label, model_name))
 
     apps = SimpleNamespace(get_model=get_model)
-    migration._seed(apps, None)
+    for migration in migrations:
+        migration._seed(apps, None)
 
     assert set(procedures.rows) == set(PROCEDURE_NAMES)
     assert len(commands.rows) == len(PROCEDURE_NAMES)
@@ -83,7 +92,8 @@ def test_seed_creates_typed_approval_gated_influxdb_catalog(
         procedures.rows["service.influxdb.1.file_write"]["params_schema"]
     )
 
-    migration._remove(apps, None)
+    for migration in reversed(migrations):
+        migration._remove(apps, None)
     assert procedures.rows == {}
 
 
@@ -149,6 +159,100 @@ def test_inspect_and_journal_have_safe_defaults(jobs_module) -> None:
     assert "family" not in inspect
     assert journal["lines"] == 100
     assert journal["command_fingerprint"]["lines"] == 100
+
+
+def test_onboarding_normalizes_only_references_and_metadata(jobs_module) -> None:
+    secret_ref = "nms-secret:123e4567-e89b-42d3-a456-426614174000"
+    bootstrap = jobs_module.normalize_execution_params(
+        _execution(
+            "service.influxdb.1.bootstrap",
+            {
+                "family": "oss2",
+                "secret_name_prefix": "influx-prod",
+                "tenant_id": 42,
+                "username": "nms-admin",
+                "organization": "nmulticloud",
+                "database": "proxmox-metrics",
+                "retention_seconds": 2592000,
+            },
+        )
+    )
+    database = jobs_module.normalize_execution_params(
+        _execution(
+            "service.influxdb.1.database_create",
+            {
+                "family": "core3",
+                "admin_secret_ref": secret_ref,
+                "database": "telemetry",
+            },
+        )
+    )
+    token = jobs_module.normalize_execution_params(
+        _execution(
+            "service.influxdb.1.token_create",
+            {
+                "family": "oss2",
+                "admin_secret_ref": secret_ref,
+                "token_name": "pve-writer",
+                "access": "writer",
+                "organization": "nmulticloud",
+                "database": "proxmox-metrics",
+            },
+        )
+    )
+
+    assert bootstrap["retention_seconds"] == 2592000
+    assert database["admin_secret_ref"] == secret_ref
+    assert token["access"] == "writer"
+    assert "secret" not in bootstrap
+    assert "secret" not in token
+
+
+@pytest.mark.parametrize(
+    "procedure_name,params",
+    [
+        (
+            "service.influxdb.1.bootstrap",
+            {"family": "core3", "secret_name_prefix": "core", "database": "wrong"},
+        ),
+        (
+            "service.influxdb.1.database_create",
+            {
+                "family": "oss2",
+                "admin_secret_ref": "plaintext",
+                "database": "metrics",
+                "organization": "nmulticloud",
+            },
+        ),
+        (
+            "service.influxdb.1.token_create",
+            {
+                "family": "core3",
+                "admin_secret_ref": "nms-secret:123e4567-e89b-42d3-a456-426614174000",
+                "token_name": "reader",
+                "access": "query",
+            },
+        ),
+        (
+            "service.influxdb.1.token_create",
+            {
+                "family": "oss2",
+                "admin_secret_ref": "nms-secret:123e4567-e89b-42d3-a456-426614174000",
+                "token_name": "writer",
+                "access": "writer",
+            },
+        ),
+    ],
+)
+def test_onboarding_normalization_rejects_invalid_family_contracts(
+    jobs_module,
+    procedure_name: str,
+    params: dict[str, object],
+) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(_execution(procedure_name, params))
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
 @pytest.mark.parametrize(

@@ -438,7 +438,7 @@ Operator instructions live in
 
 ### `service.influxdb.1.*` — InfluxDB OSS 2 / Core 3 guest management
 
-Migration `0055` seeds twelve typed procedures for managed VMs and devices.
+Migrations `0055` and `0056` seed fifteen typed procedures for managed VMs and devices.
 The `family` enum selects either OSS 2 (`influxdb.service`,
 `/etc/influxdb/config.toml`, `/health`) or Core 3
 (`influxdb3-core.service`, `/etc/influxdb3/influxdb3-core.conf`, `/ready`).
@@ -454,6 +454,9 @@ The `family` enum selects either OSS 2 (`influxdb.service`,
 | `file_write` | write | Atomically write a confined non-secret file via stdin |
 | `file_delete` | destructive | Snapshot then delete one confined file |
 | `service_control` | write | Run a closed start/stop/restart/enable/disable action |
+| `bootstrap` | write | Initialize a fresh OSS 2/Core 3 server and store generated credentials as `nms-secret:` references |
+| `database_create` | write | Create an OSS bucket or Core database with an administrative secret reference |
+| `token_create` | write | Create OSS query/writer or Core named-admin credentials and vault the one-time token |
 
 All mutations set `approval_required=True`. File paths are relative to fixed
 backend-owned roots, reject traversal/symlinks and credential-like filenames,
@@ -461,7 +464,10 @@ and allow plugin scope only for Core 3. Config/file bodies never enter argv;
 normalization stores body content for authorized dispatch but records only its
 sha256 and byte length in the command fingerprint. Literal passwords, tokens,
 secrets, authorization headers, credential URLs, and private keys are rejected;
-use `netbox-nms` secret references for credentials.
+use `netbox-nms` secret references for credentials. Onboarding accepts no
+caller-supplied plaintext. The execution backend generates or resolves secrets
+only in memory, uses fixed loopback product APIs, and returns only references
+and non-secret resource identifiers.
 
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 
