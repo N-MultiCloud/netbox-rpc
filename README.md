@@ -436,6 +436,33 @@ container at execution time.
 Operator instructions live in
 [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md).
 
+### `service.influxdb.1.*` — InfluxDB OSS 2 / Core 3 guest management
+
+Migration `0055` seeds twelve typed procedures for managed VMs and devices.
+The `family` enum selects either OSS 2 (`influxdb.service`,
+`/etc/influxdb/config.toml`, `/health`) or Core 3
+(`influxdb3-core.service`, `/etc/influxdb3/influxdb3-core.conf`, `/ready`).
+
+| Procedure | Effect | Purpose |
+|---|---|---|
+| `inspect` | read | Detect both installed package families and versions |
+| `config_read` | read | Read bounded active config with secret redaction |
+| `files_list` / `file_read` | read | Inventory/read confined managed and Core plugin files plus snapshots |
+| `service_status` / `health` / `journal` | read | Observe systemd, loopback readiness, and bounded redacted logs |
+| `config_deploy` | write | Validate TOML, snapshot, atomically activate, restart, health-check, and restore on failure |
+| `config_rollback` | destructive | Restore a backend-issued snapshot with restart and health evidence |
+| `file_write` | write | Atomically write a confined non-secret file via stdin |
+| `file_delete` | destructive | Snapshot then delete one confined file |
+| `service_control` | write | Run a closed start/stop/restart/enable/disable action |
+
+All mutations set `approval_required=True`. File paths are relative to fixed
+backend-owned roots, reject traversal/symlinks and credential-like filenames,
+and allow plugin scope only for Core 3. Config/file bodies never enter argv;
+normalization stores body content for authorized dispatch but records only its
+sha256 and byte length in the command fingerprint. Literal passwords, tokens,
+secrets, authorization headers, credential URLs, and private keys are rejected;
+use `netbox-nms` secret references for credentials.
+
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 
 Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,

@@ -145,6 +145,44 @@ EXEMPT_HANDLER_RATIONALE = {
         "Removes one safe share definition from Samba config through backend-owned "
         "parse/edit/validate/snapshot/reload orchestration."
     ),
+    "service.influxdb_1.inspect": (
+        "Detects two product families with independent binaries, units, and config paths."
+    ),
+    "service.influxdb_1.config_read": (
+        "Reads, hashes, bounds, and redacts a family-selected config file."
+    ),
+    "service.influxdb_1.files_list": (
+        "Confined recursive file and snapshot discovery requires backend-owned loops."
+    ),
+    "service.influxdb_1.file_read": (
+        "Resolves an allowlisted family/scope root, refuses symlinks, and redacts content."
+    ),
+    "service.influxdb_1.service_status": (
+        "Maps the selected product family to its fixed unit and parses systemd state."
+    ),
+    "service.influxdb_1.health": (
+        "Maps the family to a loopback health endpoint and normalizes product-specific JSON."
+    ),
+    "service.influxdb_1.journal": (
+        "Reads bounded journal output for a family-selected unit and redacts secret-shaped text."
+    ),
+    "service.influxdb_1.config_deploy": (
+        "Parses TOML, stages content via stdin, snapshots, atomically activates, restarts, "
+        "health-checks, and restores on any post-snapshot failure."
+    ),
+    "service.influxdb_1.config_rollback": (
+        "Restores a selected backend snapshot with validation, restart, health check, and "
+        "pre-rollback recovery semantics."
+    ),
+    "service.influxdb_1.file_write": (
+        "Writes stdin content beneath a confined family/scope root with symlink and secret guards."
+    ),
+    "service.influxdb_1.file_delete": (
+        "Snapshots and removes one confined file with symlink and secret guards."
+    ),
+    "service.influxdb_1.service_control": (
+        "Maps enum-constrained family/action parameters to a fixed unit and reads final state."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."
