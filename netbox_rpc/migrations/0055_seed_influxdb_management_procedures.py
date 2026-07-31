@@ -42,7 +42,7 @@ _SECRET_CONTENT_PATTERNS = (
     ),
     r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
-    "\u0000",
+    r"\x00",
 )
 
 

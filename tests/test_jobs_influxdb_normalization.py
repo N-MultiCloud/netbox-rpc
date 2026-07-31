@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -89,12 +90,14 @@ def test_seed_creates_typed_approval_gated_influxdb_catalog(
 
     deploy_schema = procedures.rows["service.influxdb.1.config_deploy"]["params_schema"]
     assert deploy_schema["properties"]["config_content"]["maxLength"] == 1024 * 1024
+    assert "\\u0000" not in json.dumps(deploy_schema)
     for secret_content in (
         '{"token":"do-not-persist"}',
         "password: do-not-persist",
         "passphrase: do-not-persist",
         "credential = do-not-persist",
         "endpoint = \"https://user:pass@example.net\"",
+        "contains\x00nul",
     ):
         with pytest.raises(ValidationError):
             validate(
