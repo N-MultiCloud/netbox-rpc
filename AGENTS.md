@@ -451,13 +451,18 @@ be used autonomously on destructive procedures.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
-- InfluxDB service management is provided by the generic Ubuntu 24 systemd
-  procedures through the seeded `RPCLinuxServiceAllowlist` row
-  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
-  `dcim.device` and `virtualization.virtualmachine`. Do not add
-  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
-  a new typed procedure if a future operation cannot be modeled as service
-  lifecycle control.
+- InfluxDB guest management uses the typed `service.influxdb.1.*` catalog seeded
+  by migration `0055`, targeting `dcim.device` and
+  `virtualization.virtualmachine`. It distinguishes `oss2` from `core3` and
+  covers installation inspection, redacted/bounded config and file reads,
+  confined file inventory, service state, health, journal reads, atomic config
+  deployment/rollback, confined managed/plugin file writes/deletes, and
+  enum-constrained service control. Every mutation requires approval;
+  rollback/delete are destructive. Content travels outside argv and only its
+  sha256/byte count enters the command fingerprint. Literal secret-shaped
+  content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
+  rejected before persistence. The older generic allowlist row remains useful
+  for compatibility, but new InfluxDB workflows must use this typed family.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.
