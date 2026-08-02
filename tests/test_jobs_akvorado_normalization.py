@@ -45,8 +45,6 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
                     "services:\n"
                     "  akvorado:\n"
                     "    image: akvorado:latest\n"
-                    "    env_file:\n"
-                    "      - .env\n"
                 ),
                 "env_content": ENV_CONTENT_REF,
             },
@@ -166,6 +164,43 @@ def test_akvorado_normalization_requires_existing_assigned_object(
             },
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    '    "environment":\n'
+                    "      FOO: hunter2\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    " akvorado:\n"
+                    "   deploy: {environment: {FOO: hunter2}}\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    env_file: [.env]\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_SECRET_FORBIDDEN",
+        ),
     ],
 )
 def test_akvorado_normalization_rejects_unsafe_content(
@@ -184,7 +219,7 @@ def test_compose_environment_allows_only_exact_external_references(jobs_module) 
     compose_content = (
         "services:\n"
         "  akvorado:\n"
-        "    environment: # externally supplied\n"
+        '    "environment": # externally supplied\n'
         "      - PUBLIC_URL=${PUBLIC_URL}\n"
         "      - LOG_LEVEL\n"
     )
@@ -197,6 +232,21 @@ def test_compose_environment_allows_only_exact_external_references(jobs_module) 
     )
 
     assert normalized["compose_content"] == compose_content
+
+
+def test_compose_environment_rejects_invalid_yaml_cleanly(jobs_module) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(
+            _execution(
+                "service.akvorado.1.deploy_stack",
+                {
+                    "compose_content": "services:\n  akvorado: [\n",
+                    "env_content": ENV_CONTENT_REF,
+                },
+            )
+        )
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
 def _execution(procedure_name: str, params: dict[str, object]):

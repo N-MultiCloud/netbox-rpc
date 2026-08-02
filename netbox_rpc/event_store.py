@@ -45,6 +45,7 @@ MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
+StringLimitPath = tuple[str, ...]
 
 
 class RPCEventStoreError(RuntimeError):
@@ -66,7 +67,13 @@ def _is_sensitive_key(key: str) -> bool:
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
 
 
-def redact_event_value(value: object, *, parent_key: str = "") -> object:
+def redact_event_value(
+    value: object,
+    *,
+    parent_key: str = "",
+    string_limits: dict[StringLimitPath, int] | None = None,
+    path: StringLimitPath = (),
+) -> object:
     if parent_key and _is_sensitive_key(parent_key):
         return "[REDACTED]"
     if isinstance(value, dict):
@@ -76,11 +83,22 @@ def redact_event_value(value: object, *, parent_key: str = "") -> object:
             if index >= MAX_EVENT_DICT_ITEMS:
                 redacted["_truncated"] = True
                 break
-            redacted[str(key)] = redact_event_value(item, parent_key=str(key))
+            key_text = str(key)
+            redacted[key_text] = redact_event_value(
+                item,
+                parent_key=key_text,
+                string_limits=string_limits,
+                path=(*path, key_text),
+            )
         return redacted
     if isinstance(value, list):
         items = [
-            redact_event_value(item, parent_key=parent_key)
+            redact_event_value(
+                item,
+                parent_key=parent_key,
+                string_limits=string_limits,
+                path=(*path, "*"),
+            )
             for item in value[:MAX_EVENT_LIST_ITEMS]
         ]
         if len(value) > MAX_EVENT_LIST_ITEMS:
@@ -89,16 +107,21 @@ def redact_event_value(value: object, *, parent_key: str = "") -> object:
             )
         return items
     if isinstance(value, str):
-        if len(value) > MAX_EVENT_STRING_LENGTH:
-            return f"{value[:MAX_EVENT_STRING_LENGTH]}...[truncated]"
+        max_length = (string_limits or {}).get(path, MAX_EVENT_STRING_LENGTH)
+        if len(value) > max_length:
+            return f"{value[:max_length]}...[truncated]"
         return value
     if isinstance(value, (bool, int, float)) or value is None:
         return value
     return str(value)
 
 
-def redact_event_data(data: dict[str, Any] | None) -> dict[str, Any]:
-    redacted = redact_event_value(data or {})
+def redact_event_data(
+    data: dict[str, Any] | None,
+    *,
+    string_limits: dict[StringLimitPath, int] | None = None,
+) -> dict[str, Any]:
+    redacted = redact_event_value(data or {}, string_limits=string_limits)
     return redacted if isinstance(redacted, dict) else {}
 
 
@@ -117,10 +140,12 @@ def append_execution_event(
     event: str,
     message: str,
     data: dict[str, Any] | None = None,
+    *,
+    string_limits: dict[StringLimitPath, int] | None = None,
 ) -> RPCExecutionEvent:
     """Append one durable execution event with per-execution sequence ordering."""
     sequence = _next_event_sequence(execution)
-    event_data = redact_event_data(data)
+    event_data = redact_event_data(data, string_limits=string_limits)
     payload_hash = _stable_hash(
         {
             "level": level,
@@ -153,12 +178,19 @@ def _append_and_project(
     execution: RPCExecution,
     event: domain_events.DomainEvent,
 ) -> RPCExecutionEvent:
+    string_limits = None
+    if isinstance(event, domain_events.ExecutionSucceeded):
+        string_limits = {
+            ("result", *path): limit
+            for path, limit in _result_schema_string_limits(execution).items()
+        }
     record = append_execution_event(
         execution,
         event.level,
         event.event_name,
         event.message,
         event.data,
+        string_limits=string_limits,
     )
     projected = apply(ProjectionState.from_execution(execution), event)
     _write_projection(execution, projected)
@@ -280,7 +312,10 @@ def record_execution_succeeded(
         _append_and_project(
             execution,
             domain_events.ExecutionSucceeded(
-                result=redact_event_data(result),
+                result=redact_event_data(
+                    result,
+                    string_limits=_result_schema_string_limits(execution),
+                ),
                 finished_at=finished_at,
             ),
         )
@@ -395,7 +430,8 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
     result = redact_event_data(
-        raw_result if isinstance(raw_result, dict) else {}
+        raw_result if isinstance(raw_result, dict) else {},
+        string_limits=_result_schema_string_limits(execution),
     )
     error_code = str(response.get("error_code") or "")
     error_message = str(response.get("error_message") or "")
@@ -434,6 +470,46 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                     finished_at=finished_at,
                 ),
             )
+
+
+def _result_schema_string_limits(
+    execution: RPCExecution,
+) -> dict[StringLimitPath, int]:
+    schema = getattr(getattr(execution, "procedure", None), "result_schema", None)
+    if not isinstance(schema, dict):
+        return {}
+    limits: dict[StringLimitPath, int] = {}
+    _collect_schema_string_limits(schema, path=(), limits=limits)
+    return limits
+
+
+def _collect_schema_string_limits(
+    schema: dict[str, Any],
+    *,
+    path: StringLimitPath,
+    limits: dict[StringLimitPath, int],
+) -> None:
+    max_length = schema.get("maxLength")
+    if isinstance(max_length, int) and max_length > MAX_EVENT_STRING_LENGTH:
+        limits[path] = max_length
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for key, child_schema in properties.items():
+            if isinstance(child_schema, dict):
+                _collect_schema_string_limits(
+                    child_schema,
+                    path=(*path, str(key)),
+                    limits=limits,
+                )
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _collect_schema_string_limits(
+            items,
+            path=(*path, "*"),
+            limits=limits,
+        )
 
 
 def _backend_result_schema_mismatch(

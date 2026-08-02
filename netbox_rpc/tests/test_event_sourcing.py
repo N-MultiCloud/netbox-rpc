@@ -14,7 +14,7 @@ from netbox_rpc.domain.aggregate import (
 from netbox_rpc.domain.projection import ProjectionState
 from netbox_rpc.models import RPCExecution, RPCExecutionEvent
 
-from ._common import event_names, make_execution
+from ._common import event_names, make_execution, make_procedure
 
 
 class EventStoreProjectionTests(TestCase):
@@ -134,6 +134,45 @@ class RebuildOracleTests(TestCase):
         event_store.reproject(ex)
         after = ProjectionState.from_execution(RPCExecution.objects.get(pk=ex.pk))
         assert before == after
+
+    def test_schema_bounded_large_config_read_result_replays_without_truncation(self):
+        procedure_name = "service.akvorado.1.config_read"
+        procedure = make_procedure(
+            procedure_name,
+            result_schema={
+                "type": "object",
+                "required": ["ok", "procedure", "target", "content"],
+                "additionalProperties": False,
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "procedure": {"type": "string"},
+                    "target": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 1024 * 1024},
+                },
+            },
+        )
+        content = "x" * 8192
+        ex = make_execution(procedure=procedure)
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.record_backend_response(
+            {
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "procedure": procedure_name,
+                    "target": "akvorado-01",
+                    "content": content,
+                },
+            }
+        )
+
+        ex.refresh_from_db()
+        success = ex.events.get(event="ExecutionSucceeded")
+        assert ex.result["content"] == content
+        assert success.data["result"]["content"] == content
+        self._assert_rebuild_matches(ex)
 
 
 class AppendOnlyLedgerTests(TestCase):

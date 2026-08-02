@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import jsonschema
-from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
@@ -11,7 +10,11 @@ from rest_framework.exceptions import PermissionDenied
 from ..backends import resolve_backend
 from ..constants import AKVORADO_1_PROCEDURE_NAMES
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
-from ..domain.normalization import RPCExecutionError, normalize_execution_params
+from ..domain.normalization import (
+    RPCExecutionError,
+    normalize_execution_params,
+    validate_akvorado_content_params,
+)
 from ..event_store import mark_execution_failed
 
 
@@ -96,7 +99,11 @@ def create_execution(*, serializer: Any, user: object) -> object:
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
-    _require_akvorado_assigned_object(serializer.validated_data, procedure)
+    _require_akvorado_assigned_object(serializer.validated_data, procedure, user)
+    try:
+        validate_akvorado_content_params(procedure.name, params)
+    except RPCExecutionError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
 
     # #167: fail closed before enqueue on a backend capability mismatch.
     _verify_backend_capability(procedure)
@@ -133,13 +140,14 @@ def create_execution(*, serializer: Any, user: object) -> object:
 def _require_akvorado_assigned_object(
     validated_data: dict[str, Any],
     procedure: object,
+    user: object,
 ) -> None:
-    """Fail creation when an Akvorado target row does not actually exist.
+    """Fail creation when an Akvorado target is absent or not viewable.
 
     RPCExecution stores a GenericForeignKey, so a syntactically valid content
     type + object ID can otherwise point at no object. Akvorado SSH targeting is
-    derived exclusively from that object and must never fall back to a caller
-    string or a dangling ``<content-type>:<id>`` display value.
+    derived exclusively from that object and must never bypass NetBox object
+    restrictions or fall back to a dangling display value.
     """
 
     if getattr(procedure, "name", "") not in AKVORADO_1_PROCEDURE_NAMES:
@@ -151,8 +159,13 @@ def _require_akvorado_assigned_object(
             {"assigned_object_id": "An assigned NetBox object is required."}
         )
     try:
-        assigned_object = content_type.get_object_for_this_type(pk=object_id)
-    except (ObjectDoesNotExist, AttributeError, TypeError, ValueError):
+        model_class = content_type.model_class()
+        assigned_object = (
+            model_class.objects.restrict(user, "view")
+            .filter(pk=object_id)
+            .first()
+        )
+    except (AttributeError, TypeError, ValueError):
         assigned_object = None
     if assigned_object is None:
         raise drf_serializers.ValidationError(

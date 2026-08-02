@@ -221,10 +221,17 @@ def seed_akvorado_procedures(apps, schema_editor):
 
 
 def unseed_akvorado_procedures(apps, schema_editor):
+    RPCExecution = apps.get_model("netbox_rpc", "RPCExecution")
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    RPCProcedure.objects.filter(
+    procedures = RPCProcedure.objects.filter(
         name__in=[item["name"] for item in AKVORADO_PROCEDURES]
-    ).delete()
+    )
+    for procedure in procedures:
+        if RPCExecution.objects.filter(procedure_id=procedure.pk).exists():
+            procedure.enabled = False
+            procedure.save(update_fields=["enabled"])
+        else:
+            procedure.delete()
 
 
 class Migration(migrations.Migration):

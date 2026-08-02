@@ -8,6 +8,8 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
     AKVORADO_1_DEPLOY_STACK,
@@ -243,10 +245,6 @@ _AKVORADO_AUTHORIZATION_RE = re.compile(
 )
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
-)
-_AKVORADO_COMPOSE_ENVIRONMENT_RE = re.compile(
-    r"^(?P<indent>[ \t]*)environment\s*:\s*(?P<inline>.*)$",
-    re.IGNORECASE,
 )
 _AKVORADO_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _AKVORADO_ENV_REFERENCE_RE = re.compile(
@@ -1281,6 +1279,29 @@ def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
     return normalized
 
 
+def validate_akvorado_content_params(
+    procedure_name: str,
+    params: dict[str, Any],
+) -> None:
+    """Validate Akvorado file bodies before persistence or dispatch.
+
+    Creation calls this before saving the immutable execution params. Worker
+    normalization repeats the same checks below as defense in depth.
+    """
+
+    if procedure_name == AKVORADO_1_CONFIG_DEPLOY:
+        _normalize_akvorado_content(
+            params.get("config_content"),
+            "config_content",
+        )
+    elif procedure_name == AKVORADO_1_DEPLOY_STACK:
+        _normalize_akvorado_content(
+            params.get("compose_content"),
+            "compose_content",
+            compose=True,
+        )
+
+
 def _normalize_akvorado_content(
     raw_content: object,
     field_name: str,
@@ -1333,46 +1354,101 @@ def _validate_akvorado_compose_environment(content: str) -> None:
     """Reject inline/defaulted Compose environment values.
 
     A Compose file may inherit a bare variable or reference the same variable
-    with ``${NAME}``. Literal values, assignment-list syntax, anchors, and
-    default/error interpolation forms are rejected; their values must instead
-    come from the separately authorized ``env_content`` secret reference.
+    with ``${NAME}``. Literal values, assignment-list syntax, and default/error
+    interpolation forms are rejected; their values must instead come from the
+    separately authorized ``env_content`` secret reference. Semantic YAML
+    parsing covers quoted keys, flow style, anchors, and unusual indentation.
     """
 
-    lines = content.splitlines()
-    for index, line in enumerate(lines):
-        header = _AKVORADO_COMPOSE_ENVIRONMENT_RE.match(line)
-        if header is None:
-            continue
-        inline = _strip_yaml_comment(header.group("inline")).strip()
-        if inline and inline not in {"{}", "[]"}:
-            _raise_akvorado_compose_environment_error()
-        header_indent = _yaml_indent_width(header.group("indent"))
-        for nested_line in lines[index + 1 :]:
-            if not nested_line.strip() or nested_line.lstrip().startswith("#"):
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise RPCExecutionError(
+            "compose_content must contain valid YAML.",
+            code="RPC_PARAM_INVALID",
+        ) from exc
+
+    _reject_akvorado_compose_env_file(document, seen=set())
+    if not isinstance(document, dict):
+        return
+    _validate_akvorado_service_environments(
+        document.get("services"),
+        seen=set(),
+    )
+
+
+def _reject_akvorado_compose_env_file(value: object, *, seen: set[int]) -> None:
+    if not isinstance(value, (dict, list)):
+        return
+    identity = id(value)
+    if identity in seen:
+        return
+    seen.add(identity)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "env_file":
+                raise RPCExecutionError(
+                    "compose_content must not contain env_file; use env_content instead.",
+                    code="RPC_PARAM_SECRET_FORBIDDEN",
+                )
+            if key == "environment":
                 continue
-            nested_indent_text = nested_line[: len(nested_line) - len(nested_line.lstrip())]
-            if _yaml_indent_width(nested_indent_text) <= header_indent:
-                break
-            entry = _strip_yaml_comment(nested_line.strip()).strip()
-            if not entry:
+            _reject_akvorado_compose_env_file(item, seen=seen)
+        return
+    for item in value:
+        _reject_akvorado_compose_env_file(item, seen=seen)
+
+
+def _validate_akvorado_service_environments(
+    value: object,
+    *,
+    seen: set[int],
+) -> None:
+    if not isinstance(value, (dict, list)):
+        return
+    identity = id(value)
+    if identity in seen:
+        return
+    seen.add(identity)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "environment":
+                _validate_akvorado_environment_value(item)
                 continue
-            if entry.startswith("-"):
-                item = entry[1:].strip()
-                if _AKVORADO_ENV_NAME_RE.fullmatch(item):
+            _validate_akvorado_service_environments(item, seen=seen)
+        return
+    for item in value:
+        _validate_akvorado_service_environments(item, seen=seen)
+
+
+def _validate_akvorado_environment_value(value: object) -> None:
+    if isinstance(value, dict):
+        for raw_name, raw_value in value.items():
+            if not isinstance(raw_name, str) or not _AKVORADO_ENV_NAME_RE.fullmatch(
+                raw_name
+            ):
+                _raise_akvorado_compose_environment_error()
+            if raw_value is None:
+                continue
+            if not isinstance(raw_value, str) or not _akvorado_exact_env_reference(
+                raw_name,
+                raw_value,
+            ):
+                _raise_akvorado_compose_environment_error()
+        return
+    if isinstance(value, list):
+        for raw_item in value:
+            if not isinstance(raw_item, str):
+                _raise_akvorado_compose_environment_error()
+            if _AKVORADO_ENV_NAME_RE.fullmatch(raw_item):
+                continue
+            if "=" in raw_item:
+                name, item_value = raw_item.split("=", 1)
+                if _akvorado_exact_env_reference(name, item_value):
                     continue
-                if "=" in item:
-                    name, value = item.split("=", 1)
-                    if _akvorado_exact_env_reference(name, value):
-                        continue
-                _raise_akvorado_compose_environment_error()
-            if ":" not in entry:
-                _raise_akvorado_compose_environment_error()
-            name, value = entry.split(":", 1)
-            value = value.strip().strip("\"'")
-            if not value or value in {"null", "~"}:
-                continue
-            if not _akvorado_exact_env_reference(name, value):
-                _raise_akvorado_compose_environment_error()
+            _raise_akvorado_compose_environment_error()
+        return
+    _raise_akvorado_compose_environment_error()
 
 
 def _akvorado_exact_env_reference(name: str, value: str) -> bool:
@@ -1383,16 +1459,6 @@ def _akvorado_exact_env_reference(name: str, value: str) -> bool:
         and match
         and match.group("name") == name
     )
-
-
-def _strip_yaml_comment(value: str) -> str:
-    if value.lstrip().startswith("#"):
-        return ""
-    return value.split(" #", 1)[0]
-
-
-def _yaml_indent_width(value: str) -> int:
-    return len(value.expandtabs(8))
 
 
 def _raise_akvorado_compose_environment_error() -> None:

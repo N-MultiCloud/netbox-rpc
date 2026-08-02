@@ -35,8 +35,10 @@ def migration(monkeypatch: pytest.MonkeyPatch):
 def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration) -> None:
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
+    executions = _FakeExecutionManager()
     _FakeRPCProcedure.objects = procedures
     _FakeRPCProcedureCommand.objects = commands
+    _FakeRPCExecution.objects = executions
     apps = SimpleNamespace(get_model=_model_lookup)
 
     migration.seed_akvorado_procedures(apps, None)
@@ -102,6 +104,26 @@ def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration
 
     migration.unseed_akvorado_procedures(apps, None)
     assert procedures.rows == {}
+
+
+def test_unseed_disables_referenced_procedure_and_deletes_unreferenced(
+    migration,
+) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    executions = _FakeExecutionManager()
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+    _FakeRPCExecution.objects = executions
+    apps = SimpleNamespace(get_model=_model_lookup)
+    migration.seed_akvorado_procedures(apps, None)
+    referenced_name = "service.akvorado.1.config_read"
+    executions.procedure_ids.add(procedures.pks[referenced_name])
+
+    migration.unseed_akvorado_procedures(apps, None)
+
+    assert set(procedures.rows) == {referenced_name}
+    assert procedures.rows[referenced_name]["enabled"] is False
 
 
 def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
@@ -289,6 +311,7 @@ def _model_lookup(app_label: str, model_name: str):
     models = {
         ("netbox_rpc", "RPCProcedure"): _FakeRPCProcedure,
         ("netbox_rpc", "RPCProcedureCommand"): _FakeRPCProcedureCommand,
+        ("netbox_rpc", "RPCExecution"): _FakeRPCExecution,
     }
     return models[(app_label, model_name)]
 
@@ -302,14 +325,40 @@ class _FakeQuerySet:
         for name in self.names:
             self.manager.rows.pop(name, None)
 
+    def __iter__(self):
+        for name in self.names:
+            if name in self.manager.rows:
+                yield _FakeProcedureRow(
+                    manager=self.manager,
+                    name=name,
+                    pk=self.manager.pks[name],
+                )
+
+
+class _FakeProcedureRow:
+    def __init__(self, *, manager: _FakeProcedureManager, name: str, pk: int) -> None:
+        self.manager = manager
+        self.name = name
+        self.pk = pk
+        self.enabled = bool(manager.rows[name]["enabled"])
+
+    def save(self, *, update_fields: list[str]) -> None:
+        assert update_fields == ["enabled"]
+        self.manager.rows[self.name]["enabled"] = self.enabled
+
+    def delete(self) -> None:
+        self.manager.rows.pop(self.name, None)
+
 
 class _FakeProcedureManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
+        self.pks: dict[str, int] = {}
 
     def update_or_create(self, *, name: str, defaults: dict[str, object]):
         self.rows[name] = dict(defaults)
-        return SimpleNamespace(name=name, **defaults), True
+        self.pks.setdefault(name, len(self.pks) + 1)
+        return SimpleNamespace(name=name, pk=self.pks[name], **defaults), True
 
     def filter(self, *, name__in: list[str]) -> _FakeQuerySet:
         return _FakeQuerySet(self, name__in)
@@ -330,12 +379,32 @@ class _FakeCommandManager:
         return SimpleNamespace(procedure=procedure, sequence=sequence, **defaults), True
 
 
+class _FakeExecutionQuerySet:
+    def __init__(self, exists: bool) -> None:
+        self._exists = exists
+
+    def exists(self) -> bool:
+        return self._exists
+
+
+class _FakeExecutionManager:
+    def __init__(self) -> None:
+        self.procedure_ids: set[int] = set()
+
+    def filter(self, *, procedure_id: int) -> _FakeExecutionQuerySet:
+        return _FakeExecutionQuerySet(procedure_id in self.procedure_ids)
+
+
 class _FakeRPCProcedure:
     objects: _FakeProcedureManager
 
 
 class _FakeRPCProcedureCommand:
     objects: _FakeCommandManager
+
+
+class _FakeRPCExecution:
+    objects: _FakeExecutionManager
 
 
 def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
