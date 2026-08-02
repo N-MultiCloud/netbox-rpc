@@ -469,6 +469,33 @@ caller-supplied plaintext. The execution backend generates or resolves secrets
 only in memory, uses fixed loopback product APIs, and returns only references
 and non-secret resource identifiers.
 
+### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
+
+Migration `0057` seeds five typed procedures targeting `dcim.device` and
+`virtualization.virtualmachine`.
+
+| Procedure | Effect | Timeout | Purpose |
+|---|---|---|---|
+| `config_read` | read | 30s | Read the current `akvorado.yaml` content |
+| `status_stack` | read | 60s | Read the current Compose stack status |
+| `config_deploy` | write | 120s | Validate and deploy `akvorado.yaml` from structured `input_data` |
+| `deploy_stack` | write | 300s | Deploy the Compose stack from structured `input_data` plus an `env_content` secret reference |
+| `restart_stack` | write | 120s | Restart the Compose stack and report status |
+
+All three write procedures set `approval_required=True`. `config_content` and
+`compose_content` are structured `input_data` string payloads — never
+argv-interpolated. `deploy_stack` additionally requires `env_content` as a
+`nms-secret:<uuid>` reference; the backend resolves the referenced env-file
+bytes and supplies them through `input_data`, so plaintext env secrets never
+enter RPC params, argv, or the command fingerprint. All five handler IDs are
+listed in `command_contract.EXEMPT_HANDLER_RATIONALE` and seeded with one
+`backend-orchestrated` representative command row each, since Akvorado
+config/Compose/env deployment is backend-orchestrated content handling, not
+fixed argv. This catalog is the only sanctioned way to read or change
+Akvorado config, Compose stack, or file state; `netbox-observability`'s
+`AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
+metadata only.
+
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 
 Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,
