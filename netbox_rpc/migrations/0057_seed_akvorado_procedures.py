@@ -11,20 +11,27 @@ from django.db import migrations
 _TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
 _MAX_FILE_CONTENT = 1024 * 1024
 _MAX_OUTPUT = 64 * 1024
-_TARGET = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": 253,
-    "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}(?![\s\S])",
-    "description": "Host or NetBox device identifier resolved by the backend.",
-}
+_SECRET_CONTENT_PATTERNS = (
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    (
+        r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+        r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+        r"private[-_]?key|credential)"
+        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+"
+    ),
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]",
+)
 _INPUT_DATA_CONTENT = {
     "type": "string",
     "minLength": 1,
     "maxLength": _MAX_FILE_CONTENT,
+    "pattern": r"\S",
+    "allOf": [{"not": {"pattern": pattern}} for pattern in _SECRET_CONTENT_PATTERNS],
     "description": (
-        "File content transported to the SSH executor through structured input_data; "
-        "never interpolated into shell argv."
+        "Non-secret file content transported to the SSH executor through structured "
+        "input_data; never interpolated into shell argv."
     ),
 }
 _ENV_CONTENT_REFERENCE = {
@@ -44,9 +51,9 @@ _ENV_CONTENT_REFERENCE = {
 def _params(required=(), properties=None):
     return {
         "type": "object",
-        "required": ["target", *required],
+        "required": list(required),
         "additionalProperties": False,
-        "properties": {"target": _TARGET, **(properties or {})},
+        "properties": {**(properties or {})},
     }
 
 

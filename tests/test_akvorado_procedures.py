@@ -109,18 +109,16 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
 ) -> None:
     by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
     valid_params = {
-        "service.akvorado.1.config_read": {"target": TARGET},
+        "service.akvorado.1.config_read": {},
         "service.akvorado.1.config_deploy": {
-            "target": TARGET,
             "config_content": "inlet:\n  kafka:\n    topic: flows\n",
         },
         "service.akvorado.1.deploy_stack": {
-            "target": TARGET,
             "compose_content": "services:\n  akvorado:\n    image: akvorado:latest\n",
             "env_content": ENV_CONTENT_REF,
         },
-        "service.akvorado.1.status_stack": {"target": TARGET},
-        "service.akvorado.1.restart_stack": {"target": TARGET},
+        "service.akvorado.1.status_stack": {},
+        "service.akvorado.1.restart_stack": {},
     }
     valid_results = {
         "service.akvorado.1.config_read": {
@@ -169,19 +167,18 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
 @pytest.mark.parametrize(
     ("procedure_name", "params"),
     [
-        ("service.akvorado.1.config_read", {}),
+        ("service.akvorado.1.config_read", {"target": TARGET}),
         (
             "service.akvorado.1.config_deploy",
-            {"target": TARGET, "config_content": ""},
+            {"config_content": ""},
         ),
         (
             "service.akvorado.1.config_deploy",
-            {"target": TARGET, "config_content": "valid: true\n", "command": "id"},
+            {"config_content": "valid: true\n", "command": "id"},
         ),
         (
             "service.akvorado.1.deploy_stack",
             {
-                "target": TARGET,
                 "compose_content": "services: {}\n",
                 "env_content": "PASSWORD=plaintext",
             },
@@ -189,7 +186,7 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
         ("service.akvorado.1.status_stack", {"target": "host;id"}),
         (
             "service.akvorado.1.restart_stack",
-            {"target": TARGET, "shell": "docker compose restart"},
+            {"shell": "docker compose restart"},
         ),
     ],
 )
@@ -241,6 +238,51 @@ def test_content_contract_uses_input_data_and_safe_representative_argv(migration
     assert "input_data" in stack["properties"]["compose_content"]["description"]
     assert "input_data" in stack["properties"]["env_content"]["description"]
     assert stack["properties"]["env_content"]["pattern"].startswith("^nms-secret:")
+    for row in by_name.values():
+        assert "target" not in row["params_schema"]["properties"]
+        assert "target" not in row["params_schema"]["required"]
+
+
+@pytest.mark.parametrize(
+    ("procedure_name", "field_name", "content"),
+    [
+        ("service.akvorado.1.config_deploy", "config_content", "valid:\x00false\n"),
+        ("service.akvorado.1.config_deploy", "config_content", "password: plaintext\n"),
+        (
+            "service.akvorado.1.config_deploy",
+            "config_content",
+            "endpoint: https://user:pass@example.net\n",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            "compose_content",
+            "services:\n  akvorado:\x00\n",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            "compose_content",
+            "services:\n  akvorado:\n    api_token: plaintext\n",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            "compose_content",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        ),
+    ],
+)
+def test_content_schemas_reject_nul_and_plaintext_secrets(
+    migration,
+    procedure_name: str,
+    field_name: str,
+    content: str,
+) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+    params = {field_name: content}
+    if procedure_name.endswith("deploy_stack"):
+        params["env_content"] = ENV_CONTENT_REF
+
+    with pytest.raises(ValidationError):
+        validate(params, by_name[procedure_name]["params_schema"])
 
 
 def _model_lookup(app_label: str, model_name: str):

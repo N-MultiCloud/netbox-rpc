@@ -60,6 +60,34 @@ class ExecutionApiTests(TestCase):
         assert "JobEnqueued" in names
         assert ex.job_id == _FakeJob.pk
 
+    def test_akvorado_create_rejects_dangling_assigned_object(self):
+        procedure = make_procedure("service.akvorado.1.config_read")
+        procedure.enabled = True
+        procedure.approval_required = False
+        procedure.target_models = ["dcim.device", "virtualization.virtualmachine"]
+        procedure.params_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        }
+        procedure.save()
+        url = reverse("plugins-api:netbox_rpc-api:rpcexecution-list")
+
+        resp = self.client.post(
+            url,
+            {
+                "procedure_id": procedure.pk,
+                "assigned_object_type": "dcim.device",
+                "assigned_object_id": 999_999_999,
+                "params": {},
+            },
+            format="json",
+        )
+
+        assert resp.status_code == 400, resp.content
+        assert "does not exist" in str(resp.data["assigned_object_id"])
+        assert not RPCExecution.objects.filter(procedure=procedure).exists()
+
     def test_put_and_patch_are_method_not_allowed(self):
         ex = make_execution(user=self.user)
         RPCExecutionAggregate(ex).queue()

@@ -5,6 +5,7 @@ import json
 from contextlib import nullcontext
 from typing import Any
 
+import jsonschema
 from django.db import IntegrityError
 from django.utils import timezone
 
@@ -42,6 +43,8 @@ SAFE_REFERENCE_KEYS = {
 MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
+RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
+MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 
 
 class RPCEventStoreError(RuntimeError):
@@ -390,11 +393,13 @@ def record_execution_expired(
 
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
     ok = bool(response.get("ok"))
+    raw_result = response.get("result")
     result = redact_event_data(
-        response.get("result") if isinstance(response.get("result"), dict) else {}
+        raw_result if isinstance(raw_result, dict) else {}
     )
     error_code = str(response.get("error_code") or "")
     error_message = str(response.get("error_message") or "")
+    schema_mismatch = _backend_result_schema_mismatch(execution, raw_result) if ok else ""
     finished_at = timezone.now()
     with transaction.atomic():
         for item in response.get("events") or []:
@@ -409,7 +414,7 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                     else {},
                 ),
             )
-        if ok:
+        if ok and not schema_mismatch:
             _append_and_project(
                 execution,
                 domain_events.ExecutionSucceeded(
@@ -418,6 +423,9 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                 ),
             )
         else:
+            if schema_mismatch:
+                error_code = RESULT_SCHEMA_MISMATCH_CODE
+                error_message = schema_mismatch
             _append_and_project(
                 execution,
                 domain_events.ExecutionFailed(
@@ -426,6 +434,27 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                     finished_at=finished_at,
                 ),
             )
+
+
+def _backend_result_schema_mismatch(
+    execution: RPCExecution,
+    raw_result: object,
+) -> str:
+    schema = getattr(getattr(execution, "procedure", None), "result_schema", None)
+    if not schema:
+        return ""
+    try:
+        jsonschema.validate(raw_result, schema)
+    except (jsonschema.ValidationError, jsonschema.SchemaError) as exc:
+        path = ".".join(str(part)[:64] for part in exc.absolute_path)
+        location = f"result.{path}" if path else "result"
+        validator = str(getattr(exc, "validator", None) or "schema")[:64]
+        message = (
+            f"Backend result schema mismatch at {location}: "
+            f"{validator} validation failed."
+        )
+        return message[:MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH]
+    return ""
 
 
 def rebuild_projection(execution: RPCExecution) -> ProjectionState:

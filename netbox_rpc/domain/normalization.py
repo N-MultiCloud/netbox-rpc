@@ -9,6 +9,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..constants import (
+    AKVORADO_1_CONFIG_DEPLOY,
+    AKVORADO_1_DEPLOY_STACK,
+    AKVORADO_1_PROCEDURE_NAMES,
     DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
@@ -221,6 +224,33 @@ _INFLUXDB_SECRET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$")
 _INFLUXDB_SECRET_REF_RE = re.compile(
     r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
+_AKVORADO_SECRET_REF_RE = re.compile(
+    r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+    r"private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
+    r"[\"']?(?!/)[^\s\"']+"
+)
+_AKVORADO_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_AKVORADO_AUTHORIZATION_RE = re.compile(
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+"
+)
+_AKVORADO_URL_CREDENTIAL_RE = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
+)
+_AKVORADO_COMPOSE_ENVIRONMENT_RE = re.compile(
+    r"^(?P<indent>[ \t]*)environment\s*:\s*(?P<inline>.*)$",
+    re.IGNORECASE,
+)
+_AKVORADO_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+_AKVORADO_ENV_REFERENCE_RE = re.compile(
+    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}$"
 )
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
@@ -565,6 +595,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in INFLUXDB_1_PROCEDURE_NAMES:
         return _normalize_influxdb_1_execution(execution, target)
+
+    if procedure_name in AKVORADO_1_PROCEDURE_NAMES:
+        return _normalize_akvorado_1_execution(execution)
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
@@ -1171,6 +1204,202 @@ def _normalize_influxdb_1_execution(
 
     _copy_optional_ssh_overrides(params, normalized)
     return normalized
+
+
+def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
+    """Normalize the typed Akvorado config and Compose procedure family.
+
+    Akvorado is always bound to the execution's assigned NetBox object. The
+    caller cannot select or override an SSH host in params; nms-backend resolves
+    the assigned object's display name through its DeviceService SSH binding.
+    File bodies remain structured input_data and only their digest metadata is
+    included in the command fingerprint.
+    """
+
+    assigned_object = getattr(execution, "assigned_object", None)
+    if assigned_object is None:
+        raise RPCExecutionError(
+            "Akvorado procedures require an existing assigned NetBox object.",
+            code="RPC_TARGET_REQUIRED",
+        )
+    target = str(getattr(assigned_object, "name", None) or assigned_object).strip()
+    if not target or any(ord(char) < 32 or ord(char) == 127 for char in target):
+        raise RPCExecutionError(
+            "The assigned NetBox object does not provide a safe target name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+        },
+    }
+
+    if procedure_name == AKVORADO_1_CONFIG_DEPLOY:
+        content = _normalize_akvorado_content(
+            params.get("config_content"),
+            "config_content",
+        )
+        normalized["config_content"] = content
+        normalized["command_fingerprint"].update(
+            {
+                "config_content_sha256": _hash_text(content),
+                "config_content_bytes": len(content.encode("utf-8")),
+            }
+        )
+
+    if procedure_name == AKVORADO_1_DEPLOY_STACK:
+        content = _normalize_akvorado_content(
+            params.get("compose_content"),
+            "compose_content",
+            compose=True,
+        )
+        env_content = str(params.get("env_content") or "").strip()
+        if not _AKVORADO_SECRET_REF_RE.fullmatch(env_content):
+            raise RPCExecutionError(
+                "env_content must be an nms-secret UUID reference.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized.update(
+            {
+                "compose_content": content,
+                "env_content": env_content,
+            }
+        )
+        normalized["command_fingerprint"].update(
+            {
+                "compose_content_sha256": _hash_text(content),
+                "compose_content_bytes": len(content.encode("utf-8")),
+                "env_content_ref": env_content,
+            }
+        )
+
+    return normalized
+
+
+def _normalize_akvorado_content(
+    raw_content: object,
+    field_name: str,
+    *,
+    compose: bool = False,
+) -> str:
+    if not isinstance(raw_content, str) or not raw_content.strip():
+        raise RPCExecutionError(
+            f"{field_name} must be a non-empty string.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(raw_content) > _AKVORADO_MAX_CONTENT_LEN:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most {_AKVORADO_MAX_CONTENT_LEN} characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(_akvorado_unsafe_codepoint(char) for char in raw_content):
+        raise RPCExecutionError(
+            f"{field_name} contains control characters unsafe for JSONB storage.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(
+        pattern.search(raw_content)
+        for pattern in (
+            _AKVORADO_PRIVATE_KEY_RE,
+            _AKVORADO_SECRET_ASSIGNMENT_RE,
+            _AKVORADO_AUTHORIZATION_RE,
+            _AKVORADO_URL_CREDENTIAL_RE,
+        )
+    ):
+        raise RPCExecutionError(
+            f"{field_name} contains secret-shaped material; use env_content or another nms-secret reference instead.",
+            code="RPC_PARAM_SECRET_FORBIDDEN",
+        )
+    if compose:
+        _validate_akvorado_compose_environment(raw_content)
+    return raw_content
+
+
+def _akvorado_unsafe_codepoint(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        (codepoint < 32 and char not in {"\t", "\n", "\r"})
+        or 127 <= codepoint <= 159
+        or 0xD800 <= codepoint <= 0xDFFF
+    )
+
+
+def _validate_akvorado_compose_environment(content: str) -> None:
+    """Reject inline/defaulted Compose environment values.
+
+    A Compose file may inherit a bare variable or reference the same variable
+    with ``${NAME}``. Literal values, assignment-list syntax, anchors, and
+    default/error interpolation forms are rejected; their values must instead
+    come from the separately authorized ``env_content`` secret reference.
+    """
+
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        header = _AKVORADO_COMPOSE_ENVIRONMENT_RE.match(line)
+        if header is None:
+            continue
+        inline = _strip_yaml_comment(header.group("inline")).strip()
+        if inline and inline not in {"{}", "[]"}:
+            _raise_akvorado_compose_environment_error()
+        header_indent = _yaml_indent_width(header.group("indent"))
+        for nested_line in lines[index + 1 :]:
+            if not nested_line.strip() or nested_line.lstrip().startswith("#"):
+                continue
+            nested_indent_text = nested_line[: len(nested_line) - len(nested_line.lstrip())]
+            if _yaml_indent_width(nested_indent_text) <= header_indent:
+                break
+            entry = _strip_yaml_comment(nested_line.strip()).strip()
+            if not entry:
+                continue
+            if entry.startswith("-"):
+                item = entry[1:].strip()
+                if _AKVORADO_ENV_NAME_RE.fullmatch(item):
+                    continue
+                if "=" in item:
+                    name, value = item.split("=", 1)
+                    if _akvorado_exact_env_reference(name, value):
+                        continue
+                _raise_akvorado_compose_environment_error()
+            if ":" not in entry:
+                _raise_akvorado_compose_environment_error()
+            name, value = entry.split(":", 1)
+            value = value.strip().strip("\"'")
+            if not value or value in {"null", "~"}:
+                continue
+            if not _akvorado_exact_env_reference(name, value):
+                _raise_akvorado_compose_environment_error()
+
+
+def _akvorado_exact_env_reference(name: str, value: str) -> bool:
+    name = name.strip()
+    match = _AKVORADO_ENV_REFERENCE_RE.fullmatch(value.strip().strip("\"'"))
+    return bool(
+        _AKVORADO_ENV_NAME_RE.fullmatch(name)
+        and match
+        and match.group("name") == name
+    )
+
+
+def _strip_yaml_comment(value: str) -> str:
+    if value.lstrip().startswith("#"):
+        return ""
+    return value.split(" #", 1)[0]
+
+
+def _yaml_indent_width(value: str) -> int:
+    return len(value.expandtabs(8))
+
+
+def _raise_akvorado_compose_environment_error() -> None:
+    raise RPCExecutionError(
+        "compose_content must not contain literal or defaulted environment values; use env_content instead.",
+        code="RPC_PARAM_SECRET_FORBIDDEN",
+    )
 
 
 def _normalize_influxdb_named_value(

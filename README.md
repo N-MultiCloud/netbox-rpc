@@ -282,6 +282,10 @@ per-execution sequence cannot be allocated, the command state transition raises
 instead of silently dropping audit history. The execution-event API is read-only,
 model saves reject normal update/delete, and the migration installs PostgreSQL
 triggers so the event ledger remains append-only below the ORM.
+Before a truthy backend response can append `ExecutionSucceeded`, the raw inner
+`result` is validated against the procedure's `result_schema`. A mismatch emits
+`ExecutionFailed` with `RPC_RESULT_SCHEMA_MISMATCH` and a bounded, value-free
+diagnostic instead of projecting malformed output as success.
 
 `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
 (with its `RPCIntentProcedure` through model) are deliberate
@@ -484,7 +488,11 @@ Migration `0057` seeds five typed procedures targeting `dcim.device` and
 
 All three write procedures set `approval_required=True`. `config_content` and
 `compose_content` are structured `input_data` string payloads — never
-argv-interpolated. `deploy_stack` additionally requires `env_content` as a
+argv-interpolated — and only their sha256 digest and byte count enter the command
+fingerprint. NUL/unsafe control characters, plaintext secret assignments,
+credential URLs, private keys, and literal/defaulted Compose `environment:`
+values are rejected before persistence/dispatch. `deploy_stack` additionally
+requires `env_content` as a
 `nms-secret:<uuid>` reference; the backend resolves the referenced env-file
 bytes and supplies them through `input_data`, so plaintext env secrets never
 enter RPC params, argv, or the command fingerprint. All five handler IDs are
@@ -495,6 +503,11 @@ fixed argv. This catalog is the only sanctioned way to read or change
 Akvorado config, Compose stack, or file state; `netbox-observability`'s
 `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
 metadata only.
+
+The API accepts no caller-controlled Akvorado host/`target` parameter. Every
+execution must reference an existing assigned `dcim.device` or
+`virtualization.virtualmachine`; normalization derives the backend target name
+only from that NetBox object so request params cannot pivot SSH dispatch.
 
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 

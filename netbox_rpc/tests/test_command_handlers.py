@@ -13,7 +13,13 @@ from netbox_rpc.backends import BackendTarget
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 from netbox_rpc.models import RPCExecution
 
-from ._common import enable_rpc_integration, event_names, make_execution, make_user
+from ._common import (
+    enable_rpc_integration,
+    event_names,
+    make_execution,
+    make_procedure,
+    make_user,
+)
 
 _TARGET = BackendTarget(url="http://backend.example", headers={}, verify_ssl=True)
 
@@ -62,6 +68,73 @@ class RunExecutionTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_FAILED
         assert ex.error_code == "RPC_BACKEND_NOT_CONFIGURED"
+
+    def test_malformed_akvorado_config_deploy_result_fails_closed(self):
+        self._assert_malformed_akvorado_result_fails_closed(
+            "service.akvorado.1.config_deploy",
+            required_fields=("deploy_status", "validation_output"),
+            result={
+                "ok": True,
+                "procedure": "service.akvorado.1.config_deploy",
+                "target": "akvorado-01",
+                "validation_output": "valid",
+            },
+        )
+
+    def test_malformed_akvorado_status_result_fails_closed(self):
+        self._assert_malformed_akvorado_result_fails_closed(
+            "service.akvorado.1.status_stack",
+            required_fields=("status", "output"),
+            result={
+                "ok": True,
+                "procedure": "service.akvorado.1.status_stack",
+                "target": "akvorado-01",
+                "output": "running",
+            },
+        )
+
+    def _assert_malformed_akvorado_result_fails_closed(
+        self,
+        procedure_name,
+        *,
+        required_fields,
+        result,
+    ):
+        procedure = make_procedure(procedure_name)
+        procedure.result_schema = {
+            "type": "object",
+            "required": ["ok", "procedure", "target", *required_fields],
+            "additionalProperties": False,
+            "properties": {
+                "ok": {"type": "boolean"},
+                "procedure": {"type": "string"},
+                "target": {"type": "string"},
+                **{field: {"type": "string"} for field in required_fields},
+            },
+        }
+        procedure.save()
+        ex = make_execution(procedure=procedure)
+        RPCExecutionAggregate(ex).queue()
+
+        with (
+            mock.patch.object(command_handlers, "resolve_backend", return_value=_TARGET),
+            mock.patch.object(
+                command_handlers,
+                "normalize_execution_params",
+                return_value={"command_fingerprint": {"handler_id": procedure_name}},
+            ),
+            mock.patch(
+                "netbox_rpc.jobs._call_backend",
+                return_value={"ok": True, "result": result},
+            ),
+        ):
+            command_handlers.run_execution(ex)
+
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_FAILED
+        assert ex.error_code == "RPC_RESULT_SCHEMA_MISMATCH"
+        assert "Backend result schema mismatch" in ex.error_message
+        assert "ExecutionSucceeded" not in event_names(ex)
 
 
 class CancelAndRaceTests(TestCase):

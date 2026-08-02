@@ -189,6 +189,10 @@ under the `_intent`-prefixed keys so this attribution stays correct.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
+- A truthy backend response must validate its raw inner `result` against the
+  procedure's `result_schema` before `ExecutionSucceeded` is appended. Schema
+  mismatch fails closed as `RPC_RESULT_SCHEMA_MISMATCH` with a bounded,
+  value-free diagnostic.
 - `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
   (with its `RPCIntentProcedure` through model) are intentional
   reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
@@ -471,9 +475,14 @@ be used autonomously on destructive procedures.
   approval required, 300s), and `restart_stack` (write, approval required,
   120s) are mutations. `config_deploy`/`deploy_stack` accept
   `config_content`/`compose_content` as structured `input_data` string
-  payloads (never argv-interpolated), and `deploy_stack` additionally requires
-  `env_content` as a `nms-secret:<uuid>` reference — the backend resolves the
-  referenced env-file bytes and supplies them through `input_data`; plaintext
+  payloads (never argv-interpolated); only their sha256/byte count enters the
+  command fingerprint. NUL/unsafe controls, inline secret material, credential
+  URLs/private keys, and literal/defaulted Compose environment values are
+  rejected before persistence/dispatch. The caller cannot provide a target
+  host: every run requires an existing assigned NetBox device/VM and derives
+  the backend target exclusively from that object. `deploy_stack` additionally
+  requires `env_content` as a `nms-secret:<uuid>` reference; the backend resolves
+  the referenced env-file bytes and supplies them through `input_data`; plaintext
   env secrets never enter RPC params or argv. All five handler IDs are listed
   in `command_contract.EXEMPT_HANDLER_RATIONALE` (seeded with one
   `backend-orchestrated` representative command row each) because Akvorado
