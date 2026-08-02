@@ -195,6 +195,23 @@ EXEMPT_HANDLER_RATIONALE = {
         "Resolves an administrative nms-secret reference, creates a family-supported token, and "
         "stores the one-time plaintext through the netbox-nms secret bridge before returning metadata."
     ),
+    "service.akvorado.1.config_read": (
+        "Reads the backend-owned Akvorado config path and returns bounded file content."
+    ),
+    "service.akvorado.1.config_deploy": (
+        "Receives akvorado.yaml through structured input_data, validates it, and activates it "
+        "without placing caller-provided content in argv."
+    ),
+    "service.akvorado.1.deploy_stack": (
+        "Receives Compose bytes and a backend-resolved env-content reference through structured "
+        "input_data, then validates and deploys the stack without interpolating either into argv."
+    ),
+    "service.akvorado.1.status_stack": (
+        "Reads and normalizes the backend-owned Akvorado Compose project status."
+    ),
+    "service.akvorado.1.restart_stack": (
+        "Restarts the backend-owned Akvorado Compose project and normalizes its final status."
+    ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "
         "Pterodactyl Wings volume."
