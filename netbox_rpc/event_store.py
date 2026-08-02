@@ -44,6 +44,9 @@ SAFE_REFERENCE_KEYS = {
 MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
+# Keep in sync with the Akvorado and InfluxDB normalization-layer content limits.
+_LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "compose_content", "content")
+_LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 StringLimitPath = tuple[str, ...]
@@ -196,6 +199,11 @@ def _append_and_project(
         string_limits = {
             ("result", *path): limit
             for path, limit in _result_schema_string_limits(execution).items()
+        }
+    elif isinstance(event, domain_events.ParametersNormalized):
+        string_limits = {
+            ("normalized_params", field_name): _LARGE_NORMALIZED_CONTENT_LIMIT
+            for field_name in _LARGE_NORMALIZED_CONTENT_FIELDS
         }
     record = append_execution_event(
         execution,

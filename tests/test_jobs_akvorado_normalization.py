@@ -228,6 +228,66 @@ def test_akvorado_normalization_requires_existing_assigned_object(
                     "services:\n"
                     "  akvorado:\n"
                     "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    '      - "${HOST_PATH:-/}:/host"\n'
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    "      - type: ${MOUNT_TYPE:-bind}\n"
+                    "        source: /\n"
+                    "        target: /host\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    "      - type: bind\n"
+                    "        source: ${ETC_PATH}\n"
+                    "        target: /host\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    '      - "not a valid volume!:/data"\n'
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
                     "    network_mode: host\n"
                 ),
                 "env_content": ENV_CONTENT_REF,
@@ -358,6 +418,7 @@ def test_compose_structure_accepts_realistic_akvorado_stack(jobs_module) -> None
         '      - "8080:8080"\n'
         "    volumes:\n"
         "      - /etc/akvorado/akvorado.yaml:/etc/akvorado/akvorado.yaml:ro\n"
+        "      - akvorado-data:/var/lib/akvorado\n"
         "    environment:\n"
         "      KAFKA_BROKERS: ${KAFKA_BROKERS}\n"
         "      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}\n"
@@ -375,6 +436,7 @@ def test_compose_structure_accepts_realistic_akvorado_stack(jobs_module) -> None
         "    command: [redis-server, --save, '60', '1']\n"
         "    restart: unless-stopped\n"
         "volumes:\n"
+        "  akvorado-data: {}\n"
         "  clickhouse-data: {}\n"
     )
 

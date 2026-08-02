@@ -135,6 +135,43 @@ class RebuildOracleTests(TestCase):
         after = ProjectionState.from_execution(RPCExecution.objects.get(pk=ex.pk))
         assert before == after
 
+    def test_large_normalized_compose_content_replays_without_truncation(self):
+        content = "services:\n  akvorado:\n    image: akvorado:latest\n" + (
+            "x" * (event_store.MAX_EVENT_STRING_LENGTH + 1024)
+        )
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.normalize(
+            {"compose_content": content, "command_fingerprint": {}},
+            "hash123",
+        )
+
+        normalized = ex.events.get(event="ParametersNormalized")
+        stored_content = normalized.data["normalized_params"]["compose_content"]
+        assert stored_content == content
+        assert len(stored_content) == len(content)
+        assert not stored_content.endswith("...[truncated]")
+
+        rebuilt = event_store.rebuild_projection(ex)
+        assert rebuilt.normalized_params["compose_content"] == content
+        self._assert_rebuild_matches(ex)
+
+    def test_large_normalized_content_limit_still_truncates_oversized_values(self):
+        limit = event_store._LARGE_NORMALIZED_CONTENT_LIMIT
+        oversized = "x" * (limit + 1)
+
+        redacted = event_store.redact_event_value(
+            {"normalized_params": {"compose_content": oversized}},
+            string_limits={
+                ("normalized_params", "compose_content"): limit,
+            },
+        )
+
+        stored_content = redacted["normalized_params"]["compose_content"]
+        assert stored_content == f"{oversized[:limit]}...[truncated]"
+
     def test_schema_bounded_large_config_read_result_replays_without_truncation(self):
         procedure_name = "service.akvorado.1.config_read"
         procedure = make_procedure(

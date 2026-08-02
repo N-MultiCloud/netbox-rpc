@@ -291,6 +291,7 @@ _AKVORADO_ALLOWED_BIND_MOUNT_ROOTS = (
     "/opt/akvorado",
     "/var/lib/akvorado",
 )
+_AKVORADO_NAMED_VOLUME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
 # "* action", plus the preexec/postexec family. "root preexec" runs as root, so
@@ -1481,25 +1482,84 @@ def _validate_akvorado_compose_volumes(
 
     for volume in volumes:
         if isinstance(volume, str):
-            source, separator, _remainder = volume.partition(":")
-            if separator and (
-                source in {".", ".."} or source.startswith(("/", "./", "../"))
-            ):
+            if "$" in volume:
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' volume interpolation is not allowed.",
+                    code="RPC_PARAM_INVALID",
+                )
+            parts = volume.split(":")
+            if len(parts) == 1:
+                if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(volume):
+                    raise RPCExecutionError(
+                        f"compose_content service '{service_name}' volume '{volume}' is not a valid named-volume reference.",
+                        code="RPC_PARAM_INVALID",
+                    )
+                continue
+            source = parts[0]
+            if source in {".", ".."} or source.startswith(("/", "./", "../")):
                 _validate_akvorado_bind_mount_path(service_name, source)
+            elif not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
+                    code="RPC_PARAM_INVALID",
+                )
             continue
         if not isinstance(volume, dict):
             raise RPCExecutionError(
                 f"compose_content service '{service_name}' has an invalid volume declaration.",
                 code="RPC_PARAM_INVALID",
             )
-        if volume.get("type") == "bind":
-            source = volume.get("source")
+
+        for field_name in ("type", "source", "target"):
+            field_value = volume.get(field_name)
+            if isinstance(field_value, str) and "$" in field_value:
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' volume interpolation is not allowed.",
+                    code="RPC_PARAM_INVALID",
+                )
+
+        volume_type = volume.get("type")
+        if "type" in volume and (
+            not isinstance(volume_type, str)
+            or volume_type not in {"bind", "volume", "tmpfs", "npipe"}
+        ):
+            raise RPCExecutionError(
+                f"compose_content service '{service_name}' has an unrecognized volume type.",
+                code="RPC_PARAM_INVALID",
+            )
+
+        source = volume.get("source")
+        if volume_type == "bind":
             if not isinstance(source, str):
                 raise RPCExecutionError(
                     f"compose_content service '{service_name}' has an invalid bind-mount source.",
                     code="RPC_PARAM_INVALID",
                 )
             _validate_akvorado_bind_mount_path(service_name, source)
+        elif volume_type == "volume" and source is not None:
+            if not isinstance(source, str):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' has an invalid volume declaration.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
+                    code="RPC_PARAM_INVALID",
+                )
+        elif "type" not in volume and source is not None:
+            if not isinstance(source, str):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' has an invalid volume declaration.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if source in {".", ".."} or source.startswith(("/", "./", "../")):
+                _validate_akvorado_bind_mount_path(service_name, source)
+            elif not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
+                    code="RPC_PARAM_INVALID",
+                )
 
 
 def _validate_akvorado_bind_mount_path(service_name: str, source: str) -> None:
