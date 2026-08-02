@@ -9,10 +9,19 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 @pytest.fixture()
 def event_store_module(monkeypatch: pytest.MonkeyPatch):
+    netbox = types.ModuleType("netbox")
+    netbox_plugins = types.ModuleType("netbox.plugins")
+
+    class PluginConfig:
+        def ready(self) -> None:
+            return None
+
+    netbox_plugins.PluginConfig = PluginConfig
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
     django_db.IntegrityError = type("IntegrityError", (Exception,), {})
@@ -26,6 +35,8 @@ def event_store_module(monkeypatch: pytest.MonkeyPatch):
     models.RPCExecution = type("RPCExecution", (), {})
     models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
+    monkeypatch.setitem(sys.modules, "netbox", netbox)
+    monkeypatch.setitem(sys.modules, "netbox.plugins", netbox_plugins)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     monkeypatch.setitem(sys.modules, "django.utils", django_utils)
@@ -147,8 +158,9 @@ def test_schema_bounded_large_config_read_content_is_not_truncated(
     )
 
     assert len(events) == 1
-    assert events[0].result["content"] == content
-    assert "...[truncated]" not in events[0].result["content"]
+    stored_content = events[0].result["content"]
+    assert yaml.safe_load(stored_content) == yaml.safe_load(content)
+    assert "...[truncated]" not in stored_content
 
 
 def test_schema_bounded_large_config_read_redacts_secret_content(
@@ -194,10 +206,74 @@ def test_schema_bounded_large_config_read_redacts_secret_content(
         },
     )
 
-    expected = f"{prefix}[REDACTED]\n{suffix}"
     assert len(events) == 1
-    assert events[0].result["content"] == expected
-    assert "hunter2" not in str(events[0].result)
+    stored_content = events[0].result["content"]
+    expected = yaml.safe_load(content)
+    expected["password"] = "[REDACTED]"
+    assert yaml.safe_load(stored_content) == expected
+    assert "hunter2" not in stored_content
+
+
+def test_large_compose_content_redacts_block_scalar_secret(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = (
+        "services:\n"
+        "  akvorado:\n"
+        "    environment:\n"
+        "      password: |\n"
+        "        hunter2\n"
+        "        more-secret-line\n"
+    )
+
+    redacted = event_store.redact_event_data(
+        {"normalized_params": {"compose_content": content}},
+        string_limits={
+            ("normalized_params", "compose_content"): 1024 * 1024,
+        },
+    )
+
+    stored_content = redacted["normalized_params"]["compose_content"]
+    assert "hunter2" not in stored_content
+    assert "more-secret-line" not in stored_content
+    assert yaml.safe_load(stored_content)["services"]["akvorado"]["environment"][
+        "password"
+    ] == "[REDACTED]"
+
+
+def test_large_compose_content_redacts_single_line_secret(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "environment:\n  secret: hunter2\n"
+
+    redacted = event_store.redact_event_data(
+        {"normalized_params": {"compose_content": content}},
+        string_limits={
+            ("normalized_params", "compose_content"): 1024 * 1024,
+        },
+    )
+
+    stored_content = redacted["normalized_params"]["compose_content"]
+    assert "hunter2" not in stored_content
+    assert yaml.safe_load(stored_content)["environment"]["secret"] == "[REDACTED]"
+
+
+def test_large_non_yaml_content_keeps_existing_regex_fallback_behavior(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "root preexec = /bin/sh -c 'echo hunter2'\n"
+
+    redacted = event_store.redact_event_data(
+        {"normalized_params": {"content": content}},
+        string_limits={
+            ("normalized_params", "content"): 1024 * 1024,
+        },
+    )
+
+    assert redacted["normalized_params"]["content"] == content
 
 
 def _result_schema(required_field: str) -> dict[str, object]:

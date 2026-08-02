@@ -3,6 +3,7 @@ the append-only ledger, against a real NetBox test database."""
 
 from __future__ import annotations
 
+import yaml
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.test import TestCase
@@ -172,6 +173,58 @@ class RebuildOracleTests(TestCase):
         stored_content = redacted["normalized_params"]["compose_content"]
         assert stored_content == f"{oversized[:limit]}...[truncated]"
 
+    def test_large_normalized_compose_content_redacts_block_scalar_secrets(self):
+        content = (
+            "services:\n"
+            "  akvorado:\n"
+            "    environment:\n"
+            "      password: |\n"
+            "        hunter2\n"
+            "        more-secret-line\n"
+        )
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.normalize(
+            {"compose_content": content, "command_fingerprint": {}},
+            "hash123",
+        )
+
+        normalized = ex.events.get(event="ParametersNormalized")
+        rebuilt = event_store.rebuild_projection(ex)
+        for secret in ("hunter2", "more-secret-line"):
+            assert secret not in str(normalized.data)
+            assert secret not in str(rebuilt.normalized_params)
+
+    def test_large_normalized_compose_content_redacts_plain_secrets(self):
+        content = "environment:\n  secret: hunter2\n"
+        redacted = event_store.redact_event_data(
+            {"normalized_params": {"compose_content": content}},
+            string_limits={
+                (
+                    "normalized_params",
+                    "compose_content",
+                ): event_store._LARGE_NORMALIZED_CONTENT_LIMIT,
+            },
+        )
+
+        assert "hunter2" not in redacted["normalized_params"]["compose_content"]
+
+    def test_large_normalized_non_yaml_content_keeps_regex_only_behavior(self):
+        content = "root preexec = /bin/sh -c 'echo hunter2'\n"
+        redacted = event_store.redact_event_data(
+            {"normalized_params": {"content": content}},
+            string_limits={
+                (
+                    "normalized_params",
+                    "content",
+                ): event_store._LARGE_NORMALIZED_CONTENT_LIMIT,
+            },
+        )
+
+        assert redacted["normalized_params"]["content"] == content
+
     def test_schema_bounded_large_config_read_result_replays_without_truncation(self):
         procedure_name = "service.akvorado.1.config_read"
         procedure = make_procedure(
@@ -212,8 +265,12 @@ class RebuildOracleTests(TestCase):
 
         ex.refresh_from_db()
         success = ex.events.get(event="ExecutionSucceeded")
-        assert ex.result["content"] == content
-        assert success.data["result"]["content"] == content
+        assert yaml.safe_load(ex.result["content"]) == yaml.safe_load(content)
+        assert yaml.safe_load(success.data["result"]["content"]) == yaml.safe_load(
+            content
+        )
+        assert "...[truncated]" not in ex.result["content"]
+        assert "...[truncated]" not in success.data["result"]["content"]
         self._assert_rebuild_matches(ex)
 
     def test_schema_bounded_large_config_read_redacts_secret_content(self):
@@ -240,7 +297,6 @@ class RebuildOracleTests(TestCase):
         )
         suffix = "outlet:\n  kafka:\n    topic: flows\n"
         content = f"{prefix}password: hunter2\n{suffix}"
-        expected = f"{prefix}[REDACTED]\n{suffix}"
         ex = make_execution(procedure=procedure)
         aggregate = RPCExecutionAggregate(ex)
         aggregate.queue()
@@ -259,8 +315,10 @@ class RebuildOracleTests(TestCase):
 
         ex.refresh_from_db()
         success = ex.events.get(event="ExecutionSucceeded")
-        assert ex.result["content"] == expected
-        assert success.data["result"]["content"] == expected
+        expected = yaml.safe_load(content)
+        expected["password"] = "[REDACTED]"
+        assert yaml.safe_load(ex.result["content"]) == expected
+        assert yaml.safe_load(success.data["result"]["content"]) == expected
         assert "hunter2" not in str(ex.result)
         assert "hunter2" not in str(success.data)
         self._assert_rebuild_matches(ex)

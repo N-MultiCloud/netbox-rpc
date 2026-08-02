@@ -1439,6 +1439,35 @@ def _validate_akvorado_compose_structure(document: dict[object, object]) -> None
                 code="RPC_PARAM_INVALID",
             )
 
+    volumes = document.get("volumes")
+    if volumes is not None:
+        if not isinstance(volumes, dict):
+            raise RPCExecutionError(
+                "compose_content top-level volumes must be a mapping.",
+                code="RPC_PARAM_INVALID",
+            )
+        volume_items = sorted(volumes.items(), key=lambda pair: str(pair[0]))
+        for raw_volume_name, definition in volume_items:
+            volume_name = str(raw_volume_name)
+            if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(volume_name):
+                raise RPCExecutionError(
+                    f"compose_content top-level volume '{volume_name}' is not a valid named-volume name.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if definition is not None and not isinstance(definition, dict):
+                raise RPCExecutionError(
+                    f"compose_content top-level volume '{volume_name}' must be a mapping.",
+                    code="RPC_PARAM_INVALID",
+                )
+            if isinstance(definition, dict):
+                for raw_key in sorted(definition, key=str):
+                    key = str(raw_key)
+                    if key != "labels":
+                        raise RPCExecutionError(
+                            f"compose_content top-level volume '{volume_name}' must not declare key '{key}'.",
+                            code="RPC_PARAM_INVALID",
+                        )
+
     services = document.get("services")
     if services is None:
         return

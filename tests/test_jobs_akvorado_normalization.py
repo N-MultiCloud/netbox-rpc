@@ -227,6 +227,42 @@ def test_akvorado_normalization_requires_existing_assigned_object(
                 "compose_content": (
                     "services:\n"
                     "  akvorado:\n"
+                    "    volumes:\n"
+                    "      - root:/host\n"
+                    "volumes:\n"
+                    "  root:\n"
+                    "    driver: local\n"
+                    "    driver_opts:\n"
+                    "      type: none\n"
+                    "      o: bind\n"
+                    '      device: "/"\n'
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": "volumes:\n  evil:\n    external: true\n",
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": "volumes:\n  'bad name!': null\n",
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
                     "    image: akvorado:latest\n"
                     "    volumes:\n"
                     '      - "${HOST_PATH:-/}:/host"\n'

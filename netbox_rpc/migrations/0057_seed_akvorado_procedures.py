@@ -204,8 +204,11 @@ def _command(slug, description):
 def seed_akvorado_procedures(apps, schema_editor):
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
     RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
+    # Ship disabled until matching nms-backend service.akvorado.1.* execution
+    # handlers are deployed and verified; a follow-up migration or operator UI/API
+    # toggle of RPCProcedure.enabled can then enable them.
     for item in AKVORADO_PROCEDURES:
-        defaults = {**item, "version": 1, "enabled": True}
+        defaults = {**item, "version": 1, "enabled": False}
         name = defaults.pop("name")
         procedure, _ = RPCProcedure.objects.update_or_create(
             name=name, defaults=defaults

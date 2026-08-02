@@ -51,7 +51,7 @@ def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration
     for name, procedure in procedures.rows.items():
         assert procedure["handler_id"] == name
         assert procedure["version"] == 1
-        assert procedure["enabled"] is True
+        assert procedure["enabled"] is False
         assert procedure["target_models"] == [
             "dcim.device",
             "virtualization.virtualmachine",

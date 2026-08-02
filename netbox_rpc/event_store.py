@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from typing import Any
 
 import jsonschema
+import yaml
 from django.db import IntegrityError
 from django.utils import timezone
 
@@ -80,6 +81,19 @@ def _is_sensitive_key(key: str) -> bool:
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
 
 
+def _redact_parsed_yaml(value: object, *, parent_key: str = "") -> object:
+    if parent_key and _is_sensitive_key(parent_key):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_parsed_yaml(item, parent_key=str(key))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list):
+        return [_redact_parsed_yaml(item, parent_key=parent_key) for item in value]
+    return value
+
+
 def redact_event_value(
     value: object,
     *,
@@ -123,7 +137,21 @@ def redact_event_value(
         limits = string_limits or {}
         max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
         if path in limits:
-            value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
+            parsed_yaml_redacted = False
+            try:
+                parsed = yaml.safe_load(value)
+                if isinstance(parsed, (dict, list)):
+                    value = yaml.safe_dump(
+                        _redact_parsed_yaml(parsed),
+                        default_flow_style=False,
+                        sort_keys=True,
+                    )
+                    parsed_yaml_redacted = True
+            except Exception:
+                # Redaction must remain fail-safe for adversarial YAML input.
+                pass
+            if not parsed_yaml_redacted:
+                value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
         if len(value) > max_length:
             return f"{value[:max_length]}...[truncated]"
         return value
