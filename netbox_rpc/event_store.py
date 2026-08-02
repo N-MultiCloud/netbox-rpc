@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import nullcontext
 from typing import Any
 
@@ -46,6 +47,15 @@ MAX_EVENT_DICT_ITEMS = 100
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 StringLimitPath = tuple[str, ...]
+_SECRET_CONTENT_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
+    r"access[-_]?key|private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+)"
+    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+)"
+    r"|(?i:\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@)"
+)
 
 
 class RPCEventStoreError(RuntimeError):
@@ -107,7 +117,10 @@ def redact_event_value(
             )
         return items
     if isinstance(value, str):
-        max_length = (string_limits or {}).get(path, MAX_EVENT_STRING_LENGTH)
+        limits = string_limits or {}
+        max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
+        if path in limits:
+            value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
         if len(value) > max_length:
             return f"{value[:max_length]}...[truncated]"
         return value

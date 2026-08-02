@@ -151,7 +151,12 @@ class RebuildOracleTests(TestCase):
                 },
             },
         )
-        content = "x" * 8192
+        content = (
+            "inlet:\n"
+            "  interface: eth0\n"
+            "  retention: 90\n"
+            f"  notes: {'x' * 8192}\n"
+        )
         ex = make_execution(procedure=procedure)
         aggregate = RPCExecutionAggregate(ex)
         aggregate.queue()
@@ -172,6 +177,55 @@ class RebuildOracleTests(TestCase):
         success = ex.events.get(event="ExecutionSucceeded")
         assert ex.result["content"] == content
         assert success.data["result"]["content"] == content
+        self._assert_rebuild_matches(ex)
+
+    def test_schema_bounded_large_config_read_redacts_secret_content(self):
+        procedure_name = "service.akvorado.1.config_read"
+        procedure = make_procedure(
+            procedure_name,
+            result_schema={
+                "type": "object",
+                "required": ["ok", "procedure", "target", "content"],
+                "additionalProperties": False,
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "procedure": {"type": "string"},
+                    "target": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 1024 * 1024},
+                },
+            },
+        )
+        prefix = (
+            "inlet:\n"
+            "  interface: eth0\n"
+            "  retention: 90\n"
+            f"  notes: {'x' * 8192}\n"
+        )
+        suffix = "outlet:\n  kafka:\n    topic: flows\n"
+        content = f"{prefix}password: hunter2\n{suffix}"
+        expected = f"{prefix}[REDACTED]\n{suffix}"
+        ex = make_execution(procedure=procedure)
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.record_backend_response(
+            {
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "procedure": procedure_name,
+                    "target": "akvorado-01",
+                    "content": content,
+                },
+            }
+        )
+
+        ex.refresh_from_db()
+        success = ex.events.get(event="ExecutionSucceeded")
+        assert ex.result["content"] == expected
+        assert success.data["result"]["content"] == expected
+        assert "hunter2" not in str(ex.result)
+        assert "hunter2" not in str(success.data)
         self._assert_rebuild_matches(ex)
 
 

@@ -110,7 +110,12 @@ def test_schema_bounded_large_config_read_content_is_not_truncated(
 ) -> None:
     event_store, events = event_store_module
     procedure_name = "service.akvorado.1.config_read"
-    content = "x" * (event_store.MAX_EVENT_STRING_LENGTH + 1024)
+    content = (
+        "inlet:\n"
+        "  interface: eth0\n"
+        "  retention: 90\n"
+        f"  notes: {'x' * (event_store.MAX_EVENT_STRING_LENGTH + 1024)}\n"
+    )
     execution = SimpleNamespace(
         procedure=SimpleNamespace(
             name=procedure_name,
@@ -144,6 +149,55 @@ def test_schema_bounded_large_config_read_content_is_not_truncated(
     assert len(events) == 1
     assert events[0].result["content"] == content
     assert "...[truncated]" not in events[0].result["content"]
+
+
+def test_schema_bounded_large_config_read_redacts_secret_content(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    procedure_name = "service.akvorado.1.config_read"
+    prefix = (
+        "inlet:\n"
+        "  interface: eth0\n"
+        "  retention: 90\n"
+        f"  notes: {'x' * (event_store.MAX_EVENT_STRING_LENGTH + 1024)}\n"
+    )
+    suffix = "outlet:\n  kafka:\n    topic: flows\n"
+    content = f"{prefix}password: hunter2\n{suffix}"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=procedure_name,
+            result_schema={
+                "type": "object",
+                "required": ["ok", "procedure", "target", "content"],
+                "additionalProperties": False,
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "procedure": {"type": "string"},
+                    "target": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 1024 * 1024},
+                },
+            },
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": True,
+            "result": {
+                "ok": True,
+                "procedure": procedure_name,
+                "target": "akvorado-01",
+                "content": content,
+            },
+        },
+    )
+
+    expected = f"{prefix}[REDACTED]\n{suffix}"
+    assert len(events) == 1
+    assert events[0].result["content"] == expected
+    assert "hunter2" not in str(events[0].result)
 
 
 def _result_schema(required_field: str) -> dict[str, object]:

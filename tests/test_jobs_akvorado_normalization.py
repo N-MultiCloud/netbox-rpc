@@ -63,9 +63,16 @@ def test_all_akvorado_procedures_normalize_for_worker_dispatch(
     )
 
     assert normalized["target"] == "akvorado-01"
+    assert normalized["target_object"] == {
+        "content_type": "dcim.device",
+        "object_id": 41,
+    }
     assert "rpc_ssh_host" not in normalized
     assert normalized["command_fingerprint"]["handler_id"] == procedure_name
     assert normalized["command_fingerprint"]["procedure"] == procedure_name
+    assert normalized["command_fingerprint"]["target_object"] == normalized[
+        "target_object"
+    ]
 
     for field_name in ("config_content", "compose_content"):
         if field_name not in params:
@@ -201,6 +208,113 @@ def test_akvorado_normalization_requires_existing_assigned_object(
             },
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    privileged: true\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    network_mode: host\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    cap_add: [SYS_ADMIN]\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    '    devices: ["/dev/kvm:/dev/kvm"]\n'
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    build: .\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    "      - /:/host:ro\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "    volumes:\n"
+                    "      - type: bind\n"
+                    "        source: /var/run/docker.sock\n"
+                    "        target: /var/run/docker.sock\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    image: akvorado:latest\n"
+                    "secrets:\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
     ],
 )
 def test_akvorado_normalization_rejects_unsafe_content(
@@ -234,6 +348,46 @@ def test_compose_environment_allows_only_exact_external_references(jobs_module) 
     assert normalized["compose_content"] == compose_content
 
 
+def test_compose_structure_accepts_realistic_akvorado_stack(jobs_module) -> None:
+    compose_content = (
+        "name: akvorado\n"
+        "services:\n"
+        "  akvorado:\n"
+        "    image: ghcr.io/akvorado/akvorado:latest\n"
+        "    ports:\n"
+        '      - "8080:8080"\n'
+        "    volumes:\n"
+        "      - /etc/akvorado/akvorado.yaml:/etc/akvorado/akvorado.yaml:ro\n"
+        "    environment:\n"
+        "      KAFKA_BROKERS: ${KAFKA_BROKERS}\n"
+        "      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}\n"
+        "    depends_on:\n"
+        "      - clickhouse\n"
+        "      - redis\n"
+        "    restart: unless-stopped\n"
+        "  clickhouse:\n"
+        "    image: clickhouse/clickhouse-server:latest\n"
+        "    volumes:\n"
+        "      - clickhouse-data:/var/lib/clickhouse\n"
+        "    restart: unless-stopped\n"
+        "  redis:\n"
+        "    image: redis:latest\n"
+        "    command: [redis-server, --save, '60', '1']\n"
+        "    restart: unless-stopped\n"
+        "volumes:\n"
+        "  clickhouse-data: {}\n"
+    )
+
+    normalized = jobs_module.normalize_execution_params(
+        _execution(
+            "service.akvorado.1.deploy_stack",
+            {"compose_content": compose_content, "env_content": ENV_CONTENT_REF},
+        )
+    )
+
+    assert normalized["compose_content"] == compose_content
+
+
 def test_compose_environment_rejects_invalid_yaml_cleanly(jobs_module) -> None:
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
         jobs_module.normalize_execution_params(
@@ -249,11 +403,48 @@ def test_compose_environment_rejects_invalid_yaml_cleanly(jobs_module) -> None:
     assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
+def test_akvorado_target_identity_disambiguates_duplicate_display_names(
+    jobs_module,
+) -> None:
+    device_execution = _execution("service.akvorado.1.config_read", {})
+    device_execution.assigned_object = SimpleNamespace(name="akvorado-shared")
+    device_execution.assigned_object_id = 41
+    device_execution.assigned_object_type = SimpleNamespace(
+        app_label="dcim",
+        model="device",
+    )
+    vm_execution = _execution("service.akvorado.1.config_read", {})
+    vm_execution.assigned_object = SimpleNamespace(name="akvorado-shared")
+    vm_execution.assigned_object_id = 84
+    vm_execution.assigned_object_type = SimpleNamespace(
+        app_label="virtualization",
+        model="virtualmachine",
+    )
+
+    device_normalized = jobs_module.normalize_execution_params(device_execution)
+    vm_normalized = jobs_module.normalize_execution_params(vm_execution)
+
+    assert device_normalized["target"] == vm_normalized["target"]
+    assert device_normalized["target_object"] == {
+        "content_type": "dcim.device",
+        "object_id": 41,
+    }
+    assert vm_normalized["target_object"] == {
+        "content_type": "virtualization.virtualmachine",
+        "object_id": 84,
+    }
+    assert device_normalized["target_object"] != vm_normalized["target_object"]
+    assert jobs_module._hash_json(
+        device_normalized["command_fingerprint"]
+    ) != jobs_module._hash_json(vm_normalized["command_fingerprint"])
+
+
 def _execution(procedure_name: str, params: dict[str, object]):
     return SimpleNamespace(
         procedure=SimpleNamespace(name=procedure_name, handler_id=procedure_name),
         params=params,
         assigned_object=SimpleNamespace(name="akvorado-01"),
+        assigned_object_type=SimpleNamespace(app_label="dcim", model="device"),
         assigned_object_id=41,
         target_display="caller-controlled-fallback",
         target_model_label="dcim.device",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
@@ -249,6 +250,46 @@ _AKVORADO_URL_CREDENTIAL_RE = re.compile(
 _AKVORADO_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _AKVORADO_ENV_REFERENCE_RE = re.compile(
     r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}$"
+)
+_AKVORADO_COMPOSE_TOP_LEVEL_KEYS = frozenset(
+    {"services", "networks", "volumes", "version", "name"}
+)
+_AKVORADO_COMPOSE_SERVICE_KEYS = frozenset(
+    {
+        "image",
+        "container_name",
+        "restart",
+        "command",
+        "working_dir",
+        "user",
+        "read_only",
+        "hostname",
+        "dns",
+        "ports",
+        "expose",
+        "volumes",
+        "environment",
+        "depends_on",
+        "networks",
+        "labels",
+        "healthcheck",
+        "logging",
+        "deploy",
+        "ulimits",
+        "stop_grace_period",
+        "stop_signal",
+        "init",
+        "security_opt",
+        "cap_drop",
+        "mem_limit",
+        "cpus",
+        "shm_size",
+    }
+)
+_AKVORADO_ALLOWED_BIND_MOUNT_ROOTS = (
+    "/etc/akvorado",
+    "/opt/akvorado",
+    "/var/lib/akvorado",
 )
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
@@ -1208,10 +1249,11 @@ def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
     """Normalize the typed Akvorado config and Compose procedure family.
 
     Akvorado is always bound to the execution's assigned NetBox object. The
-    caller cannot select or override an SSH host in params; nms-backend resolves
-    the assigned object's display name through its DeviceService SSH binding.
-    File bodies remain structured input_data and only their digest metadata is
-    included in the command fingerprint.
+    caller cannot select or override an SSH host in params. ``target`` is a
+    human-readable display string for logs and audit only; credential and host
+    resolution MUST use ``target_object`` (content_type plus object_id), never
+    the display name. File bodies remain structured input_data and only their
+    digest metadata is included in the command fingerprint.
     """
 
     assigned_object = getattr(execution, "assigned_object", None)
@@ -1229,11 +1271,20 @@ def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
 
     params = execution.params or {}
     procedure_name = execution.procedure.name
+    target_object = {
+        "content_type": (
+            f"{execution.assigned_object_type.app_label}."
+            f"{execution.assigned_object_type.model}"
+        ),
+        "object_id": execution.assigned_object_id,
+    }
     normalized: dict[str, Any] = {
         "target": target,
+        "target_object": target_object,
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "procedure": procedure_name,
+            "target_object": target_object,
         },
     }
 
@@ -1371,10 +1422,98 @@ def _validate_akvorado_compose_environment(content: str) -> None:
     _reject_akvorado_compose_env_file(document, seen=set())
     if not isinstance(document, dict):
         return
+    _validate_akvorado_compose_structure(document)
     _validate_akvorado_service_environments(
         document.get("services"),
         seen=set(),
     )
+
+
+def _validate_akvorado_compose_structure(document: dict[object, object]) -> None:
+    for raw_key in document:
+        key = str(raw_key)
+        if key not in _AKVORADO_COMPOSE_TOP_LEVEL_KEYS:
+            raise RPCExecutionError(
+                f"compose_content must not declare top-level key '{key}'.",
+                code="RPC_PARAM_INVALID",
+            )
+
+    services = document.get("services")
+    if services is None:
+        return
+    if not isinstance(services, dict):
+        raise RPCExecutionError(
+            "compose_content services must be a mapping.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    for raw_service_name, service_definition in services.items():
+        service_name = str(raw_service_name)
+        if not isinstance(service_definition, dict):
+            raise RPCExecutionError(
+                f"compose_content service '{service_name}' must be a mapping.",
+                code="RPC_PARAM_INVALID",
+            )
+        for raw_key in service_definition:
+            key = str(raw_key)
+            if key not in _AKVORADO_COMPOSE_SERVICE_KEYS:
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' must not declare key '{key}'.",
+                    code="RPC_PARAM_INVALID",
+                )
+        _validate_akvorado_compose_volumes(
+            service_name,
+            service_definition.get("volumes"),
+        )
+
+
+def _validate_akvorado_compose_volumes(
+    service_name: str,
+    volumes: object,
+) -> None:
+    if volumes is None:
+        return
+    if not isinstance(volumes, list):
+        raise RPCExecutionError(
+            f"compose_content service '{service_name}' volumes must be a list.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    for volume in volumes:
+        if isinstance(volume, str):
+            source, separator, _remainder = volume.partition(":")
+            if separator and (
+                source in {".", ".."} or source.startswith(("/", "./", "../"))
+            ):
+                _validate_akvorado_bind_mount_path(service_name, source)
+            continue
+        if not isinstance(volume, dict):
+            raise RPCExecutionError(
+                f"compose_content service '{service_name}' has an invalid volume declaration.",
+                code="RPC_PARAM_INVALID",
+            )
+        if volume.get("type") == "bind":
+            source = volume.get("source")
+            if not isinstance(source, str):
+                raise RPCExecutionError(
+                    f"compose_content service '{service_name}' has an invalid bind-mount source.",
+                    code="RPC_PARAM_INVALID",
+                )
+            _validate_akvorado_bind_mount_path(service_name, source)
+
+
+def _validate_akvorado_bind_mount_path(service_name: str, source: str) -> None:
+    normalized_source = posixpath.normpath(source)
+    contains_traversal = ".." in PurePosixPath(source).parts
+    allowed = any(
+        normalized_source == root or normalized_source.startswith(f"{root}/")
+        for root in _AKVORADO_ALLOWED_BIND_MOUNT_ROOTS
+    )
+    if contains_traversal or not allowed:
+        raise RPCExecutionError(
+            f"compose_content service '{service_name}' volume '{source}' is not an allowed bind-mount path.",
+            code="RPC_PARAM_INVALID",
+        )
 
 
 def _reject_akvorado_compose_env_file(value: object, *, seen: set[int]) -> None:
