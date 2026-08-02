@@ -91,6 +91,8 @@ def _redact_parsed_yaml(value: object, *, parent_key: str = "") -> object:
         }
     if isinstance(value, list):
         return [_redact_parsed_yaml(item, parent_key=parent_key) for item in value]
+    if isinstance(value, str):
+        return _SECRET_CONTENT_RE.sub("[REDACTED]", value)
     return value
 
 

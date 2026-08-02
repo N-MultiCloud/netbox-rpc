@@ -260,6 +260,26 @@ def test_large_compose_content_redacts_single_line_secret(
     assert yaml.safe_load(stored_content)["environment"]["secret"] == "[REDACTED]"
 
 
+def test_large_compose_content_redacts_secret_shaped_scalars(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    contents = (
+        "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
+        "args:\n  - PASSWORD=hunter2\n",
+    )
+
+    for content in contents:
+        redacted = event_store.redact_event_data(
+            {"normalized_params": {"compose_content": content}},
+            string_limits={
+                ("normalized_params", "compose_content"): 1024 * 1024,
+            },
+        )
+
+        assert "hunter2" not in str(redacted)
+
+
 def test_large_non_yaml_content_keeps_existing_regex_fallback_behavior(
     event_store_module,
 ) -> None:

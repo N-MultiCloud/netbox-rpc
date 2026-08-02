@@ -263,6 +263,31 @@ def test_akvorado_normalization_requires_existing_assigned_object(
                 "compose_content": (
                     "services:\n"
                     "  akvorado:\n"
+                    "    command: [akvorado, orchestrator, --clickhouse-password, hunter2]\n"
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
+                    "    healthcheck:\n"
+                    '      test: ["CMD", "curl", "-u", "admin:hunter2", "http://localhost/health"]\n'
+                ),
+                "env_content": ENV_CONTENT_REF,
+            },
+            "RPC_PARAM_INVALID",
+        ),
+        (
+            "service.akvorado.1.deploy_stack",
+            {
+                "compose_content": (
+                    "services:\n"
+                    "  akvorado:\n"
                     "    image: akvorado:latest\n"
                     "    volumes:\n"
                     '      - "${HOST_PATH:-/}:/host"\n'
@@ -469,7 +494,6 @@ def test_compose_structure_accepts_realistic_akvorado_stack(jobs_module) -> None
         "    restart: unless-stopped\n"
         "  redis:\n"
         "    image: redis:latest\n"
-        "    command: [redis-server, --save, '60', '1']\n"
         "    restart: unless-stopped\n"
         "volumes:\n"
         "  akvorado-data: {}\n"

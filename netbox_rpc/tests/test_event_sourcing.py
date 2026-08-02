@@ -211,6 +211,28 @@ class RebuildOracleTests(TestCase):
 
         assert "hunter2" not in redacted["normalized_params"]["compose_content"]
 
+    def test_large_normalized_compose_content_redacts_secret_shaped_scalars(self):
+        contents = (
+            "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
+            "args:\n  - PASSWORD=hunter2\n",
+        )
+
+        for content in contents:
+            with self.subTest(content=content):
+                ex = make_execution()
+                aggregate = RPCExecutionAggregate(ex)
+                aggregate.queue()
+                aggregate.start()
+                aggregate.normalize(
+                    {"compose_content": content, "command_fingerprint": {}},
+                    "hash123",
+                )
+
+                normalized = ex.events.get(event="ParametersNormalized")
+                rebuilt = event_store.rebuild_projection(ex)
+                assert "hunter2" not in str(normalized.data)
+                assert "hunter2" not in str(rebuilt.normalized_params)
+
     def test_large_normalized_non_yaml_content_keeps_regex_only_behavior(self):
         content = "root preexec = /bin/sh -c 'echo hunter2'\n"
         redacted = event_store.redact_event_data(
