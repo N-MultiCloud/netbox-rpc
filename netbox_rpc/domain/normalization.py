@@ -8,6 +8,8 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
     AKVORADO_1_PROCEDURE_NAMES,
@@ -225,9 +227,14 @@ _INFLUXDB_SECRET_REF_RE = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
-# Best-effort defense in depth, not a complete secret detector. Durable storage
-# relies on unconditional event-store redaction; the future backend renderer
-# must accept credential references rather than literal secrets.
+_AKVORADO_SENSITIVE_KEY_RE = re.compile(
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
+    r"access[-_]?key|private[-_]?key|credential)",
+    re.IGNORECASE,
+)
+# Best-effort raw-text defense in depth. The decoded-key YAML walk below is the
+# pre-persistence guard for RPCExecution.params; event-store redaction separately
+# protects normalized/event data. Backends must accept credential references.
 _AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
@@ -235,19 +242,19 @@ _AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
     r"[\"']?[ \t]*[^\s\"']+"
 )
-# Best-effort defense in depth, not a complete secret detector. Durable storage
-# relies on unconditional event-store redaction; the future backend renderer
-# must accept credential references rather than literal secrets.
+# Kept separate because block-scalar bodies need to be consumed as a unit by the
+# event-store counterpart; the decoded-key walk remains the persistence guard.
 _AKVORADO_BLOCK_SCALAR_SECRET_RE = re.compile(
     r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
     r"private[-_]?key|credential)"
     r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
-    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?"
+    r"$(?:\n(?:\1[ \t].*|[ \t]*$))*"
 )
 _AKVORADO_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _AKVORADO_AUTHORIZATION_RE = re.compile(
-    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+$"
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+?(?=\r?$)"
 )
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
@@ -1315,7 +1322,41 @@ def _normalize_akvorado_content(
             f"{field_name} contains secret-shaped material; use an nms-secret reference instead.",
             code="RPC_PARAM_SECRET_FORBIDDEN",
         )
+    try:
+        parsed_content = yaml.safe_load(raw_content)
+    except yaml.YAMLError:
+        # The backend's existing config parser owns syntax diagnostics. This
+        # pre-persistence guard only adds decoded-key inspection when parsing
+        # succeeds; the raw-text checks above still apply to malformed input.
+        return raw_content
+    if _akvorado_has_sensitive_decoded_key(parsed_content):
+        raise RPCExecutionError(
+            f"{field_name} contains secret-shaped material; use an nms-secret reference instead.",
+            code="RPC_PARAM_SECRET_FORBIDDEN",
+        )
     return raw_content
+
+
+def _akvorado_has_sensitive_decoded_key(
+    value: object,
+    seen: set[int] | None = None,
+) -> bool:
+    """Walk a safe-loaded YAML tree and inspect decoded mapping keys."""
+
+    if not isinstance(value, (dict, list)):
+        return False
+    seen = seen if seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return False
+    seen.add(value_id)
+    if isinstance(value, dict):
+        return any(
+            _AKVORADO_SENSITIVE_KEY_RE.search(str(key))
+            or _akvorado_has_sensitive_decoded_key(item, seen)
+            for key, item in value.items()
+        )
+    return any(_akvorado_has_sensitive_decoded_key(item, seen) for item in value)
 
 
 def _akvorado_unsafe_codepoint(char: str) -> bool:

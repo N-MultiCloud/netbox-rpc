@@ -193,6 +193,32 @@ def _transition_locked(execution: object, transition) -> object:
         return locked
 
 
+def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
+    """Atomically claim queued work only while its procedure remains enabled."""
+
+    from ..models import RPCExecution, RPCProcedure
+
+    execution = agg.execution
+    if agg.status != RPCExecution.STATUS_QUEUED:
+        raise RPCExecutionAggregateError(
+            "Only a queued execution can be claimed by a worker."
+        )
+    procedure_enabled = (
+        RPCProcedure.objects.select_for_update()
+        .filter(pk=execution.procedure_id)
+        .values_list("enabled", flat=True)
+        .get()
+    )
+    if not procedure_enabled:
+        agg.fail(
+            "The RPC procedure for this execution has been disabled; "
+            "execution not dispatched.",
+            "RPC_PROCEDURE_DISABLED",
+        )
+        return
+    agg.start()
+
+
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
     # #166: the opt-in is authoritative at the worker claim too — a claim on a
     # disabled integration must fail closed rather than dispatch.
@@ -208,22 +234,13 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
             pass
         return
 
-    procedure = getattr(execution, "procedure", None)
-    if procedure is not None and not getattr(procedure, "enabled", True):
-        try:
-            RPCExecutionAggregate(execution).fail(
-                "The RPC procedure for this execution has been disabled; "
-                "execution not dispatched.",
-                "RPC_PROCEDURE_DISABLED",
-            )
-        except RPCExecutionAggregateError:
-            pass
-        return
-
     try:
-        execution = _transition_locked(execution, lambda agg: agg.start())
+        execution = _transition_locked(execution, _claim_if_procedure_enabled)
     except RPCExecutionAggregateError:
         # Lost the race to a cancel (or already terminal): nothing to run.
+        return
+    if execution.status != execution.STATUS_RUNNING:
+        # The locked claim failed closed because the procedure was disabled.
         return
     aggregate = RPCExecutionAggregate(execution)
 

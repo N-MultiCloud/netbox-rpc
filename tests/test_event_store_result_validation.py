@@ -252,6 +252,19 @@ def test_block_scalar_indent_indicators_redact_the_full_secret_body(
     assert "hunter2" not in redacted["detail"]
 
 
+def test_block_scalar_with_header_comment_redacts_the_full_secret_body(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "password: |2 # rotated 2026-08-01\n  hunter2\n"
+
+    redacted = event_store.redact_event_data({"detail": content})
+
+    assert redacted["detail"] == "[REDACTED]"
+    assert "rotated" not in redacted["detail"]
+    assert "hunter2" not in redacted["detail"]
+
+
 @pytest.mark.parametrize(
     "content",
     ("Authorization: Bearer hunter2", "authorization=hunter2"),
@@ -268,6 +281,18 @@ def test_authorization_redaction_consumes_the_rest_of_the_line(
     assert "hunter2" not in redacted["detail"]
 
 
+def test_authorization_redaction_consumes_crlf_line(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "Authorization: Bearer hunter2\r\n"
+
+    redacted = event_store.redact_event_data({"detail": content})
+
+    assert redacted["detail"] == "[REDACTED]\r\n"
+    assert "hunter2" not in redacted["detail"]
+
+
 def test_non_secret_block_scalar_and_author_word_are_untouched(
     event_store_module,
 ) -> None:
@@ -277,6 +302,26 @@ def test_non_secret_block_scalar_and_author_word_are_untouched(
     redacted = event_store.redact_event_data({"detail": content})
 
     assert redacted["detail"] == content
+
+
+def test_dispatch_lease_key_lineage_references_are_not_redacted(
+    event_store_module,
+) -> None:
+    from netbox_rpc.domain.events import DispatchLeaseIssued
+
+    event_store, _ = event_store_module
+    redacted = event_store.redact_event_data(
+        {"key_id": "rpc-sign", "key_version": 7, "api_key": "hunter2"}
+    )
+
+    assert redacted == {
+        "api_key": "[REDACTED]",
+        "key_id": "rpc-sign",
+        "key_version": 7,
+    }
+    reconstructed = DispatchLeaseIssued.from_data(redacted)
+    assert reconstructed.key_id == "rpc-sign"
+    assert reconstructed.key_version == 7
 
 
 def test_large_config_content_redacts_single_line_secret(

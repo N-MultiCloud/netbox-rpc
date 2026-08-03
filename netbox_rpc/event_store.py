@@ -38,6 +38,8 @@ SENSITIVE_KEY_FRAGMENTS = (
 SAFE_REFERENCE_KEYS = {
     "credential_pk",
     "guest_credential_pk",
+    "key_id",
+    "key_version",
     "restconf_credential_pk",
     "rpc_ssh_credential_pk",
 }
@@ -56,8 +58,9 @@ _SECRET_CONTENT_RE = re.compile(
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
     r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
-    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
-    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+$)"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?"
+    r"$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
+    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+?(?=\r?$))"
     r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"

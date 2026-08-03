@@ -92,6 +92,40 @@ class RunExecutionTests(TestCase):
         resolve.assert_not_called()
         dispatch.assert_not_called()
 
+    def test_procedure_disabled_at_locked_claim_fails_without_dispatch(self):
+        procedure = make_procedure("service.akvorado.1.config_read")
+        RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=True)
+        procedure.refresh_from_db()
+        ex = make_execution(procedure=procedure)
+        RPCExecutionAggregate(ex).queue()
+        assert ex.procedure.enabled is True
+        original_transition_locked = command_handlers._transition_locked
+
+        def disable_before_locked_claim(execution, transition):
+            RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=False)
+            # The object passed by the worker still carries the stale enabled
+            # relation that the former unlocked check trusted.
+            assert execution.procedure.enabled is True
+            return original_transition_locked(execution, transition)
+
+        with (
+            mock.patch.object(
+                command_handlers,
+                "_transition_locked",
+                side_effect=disable_before_locked_claim,
+            ),
+            mock.patch.object(command_handlers, "resolve_backend") as resolve,
+            mock.patch("netbox_rpc.jobs._call_backend") as dispatch,
+        ):
+            command_handlers.run_execution(ex)
+
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_FAILED
+        assert ex.error_code == "RPC_PROCEDURE_DISABLED"
+        assert "ExecutionStarted" not in event_names(ex)
+        resolve.assert_not_called()
+        dispatch.assert_not_called()
+
     def test_malformed_akvorado_config_deploy_result_fails_closed(self):
         self._assert_malformed_akvorado_result_fails_closed(
             "service.akvorado.1.config_deploy",
@@ -192,6 +226,23 @@ class CancelAndRaceTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_CANCELLED
         assert "ExecutionStarted" not in event_names(ex)
+
+    def test_cancelled_execution_is_not_failed_when_procedure_is_disabled(self):
+        procedure = make_procedure("service.akvorado.1.config_read")
+        RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=True)
+        procedure.refresh_from_db()
+        ex = make_execution(procedure=procedure)
+        RPCExecutionAggregate(ex).queue()
+        assert ex.procedure.enabled is True
+        command_handlers.cancel_execution(ex, make_user())
+        RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=False)
+
+        command_handlers.run_execution(ex)
+
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_CANCELLED
+        assert event_names(ex)[-1] == "ExecutionCancelled"
+        assert "ExecutionFailed" not in event_names(ex)
 
     def test_cancel_requires_permission(self):
         ex = _queued()

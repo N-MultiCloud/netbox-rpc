@@ -8,10 +8,11 @@ from django.db import DatabaseError, transaction
 from django.test import TestCase
 
 from netbox_rpc import event_store
+from netbox_rpc.domain import events as domain_events
 from netbox_rpc.domain.aggregate import (
     RPCExecutionAggregate,
 )
-from netbox_rpc.domain.projection import ProjectionState
+from netbox_rpc.domain.projection import ProjectionState, apply
 from netbox_rpc.models import RPCExecution, RPCExecutionEvent
 
 from ._common import event_names, make_execution, make_procedure
@@ -105,6 +106,38 @@ class EventStoreProjectionTests(TestCase):
                 "message": failure.message,
                 "data": failure.data,
             }
+        )
+
+    def test_dispatch_lease_key_lineage_is_preserved_and_reconstructable(self):
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        event = domain_events.DispatchLeaseIssued(
+            nonce="nonce-123",
+            key_id="rpc-sign",
+            key_version=7,
+            stream_version=2,
+            audience="netbox-rpc-backend",
+            expires_at="2026-08-03T12:02:00+00:00",
+            envelope_version=1,
+        )
+
+        record = event_store.append_execution_event(
+            ex,
+            event.level,
+            event.event_name,
+            event.message,
+            event.data,
+        )
+
+        assert record.data["key_id"] == "rpc-sign"
+        assert record.data["key_version"] == 7
+        redacted_event = type(event).from_data(record.data)
+        assert redacted_event.key_id == "rpc-sign"
+        assert redacted_event.key_version == 7
+        assert apply(ProjectionState.from_execution(ex), redacted_event) == (
+            ProjectionState.from_execution(ex)
         )
 
 

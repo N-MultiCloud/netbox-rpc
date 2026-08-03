@@ -135,6 +135,34 @@ def test_akvorado_normalization_rejects_unsafe_config_content(
     assert exc_info.value.code == error_code
 
 
+def test_akvorado_content_validation_rejects_decoded_sensitive_yaml_key(
+    jobs_module,
+) -> None:
+    normalization = importlib.import_module("netbox_rpc.domain.normalization")
+    content = '"p\\u0061ssword": hunter2\n'
+    assert "password" not in content.lower()
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        normalization.validate_akvorado_content_params(
+            "service.akvorado.1.config_deploy",
+            {"config_content": content},
+        )
+
+    assert exc_info.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
+
+
+def test_akvorado_content_validation_allows_legitimate_decoded_yaml_tree(
+    jobs_module,
+) -> None:
+    normalization = importlib.import_module("netbox_rpc.domain.normalization")
+    content = "inlet:\n  kafka:\n    topic: flows\n"
+
+    normalization.validate_akvorado_content_params(
+        "service.akvorado.1.config_deploy",
+        {"config_content": content},
+    )
+
+
 def test_akvorado_normalization_allows_non_secret_block_and_author_text(
     jobs_module,
 ) -> None:
