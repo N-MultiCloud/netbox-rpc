@@ -68,7 +68,7 @@ class RPCLinuxServiceAllowlistFilterSet(NetBoxModelFilterSet):
 
     class Meta:
         model = RPCLinuxServiceAllowlist
-        fields = ("slug", "systemd_unit", "enabled")
+        fields = ("slug", "systemd_unit", "environment_file", "enabled")
 
 
 class RPCIntentFilterSet(NetBoxModelFilterSet):

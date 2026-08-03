@@ -10,7 +10,11 @@ from rest_framework.exceptions import PermissionDenied
 
 from ..backends import resolve_backend
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
-from ..domain.normalization import RPCExecutionError, normalize_execution_params
+from ..domain.normalization import (
+    RPCExecutionError,
+    code_gate_unavailable_reason,
+    normalize_execution_params,
+)
 from ..event_store import mark_execution_failed
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
@@ -111,6 +115,15 @@ def create_execution(*, serializer: Any, user: object) -> object:
         raise drf_serializers.ValidationError(
             {"procedure_id": "This procedure is disabled."}
         )
+    # Hard-coded fail-closed gates (see code_gate_unavailable_reason) sit
+    # below RPCProcedure.enabled: an operator could flip that mutable flag
+    # without knowing a gate is still closed, so this admission-time check
+    # is the primary enforcement point, checked before an RPCExecution row
+    # can even be created. The identical check inside normalize_execution_params
+    # remains as defense in depth for a worker claiming a pre-existing row.
+    gate_reason = code_gate_unavailable_reason(procedure.name)
+    if gate_reason is not None:
+        raise drf_serializers.ValidationError({"procedure_id": gate_reason})
     if procedure.approval_required:
         if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
             raise PermissionDenied(

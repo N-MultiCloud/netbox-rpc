@@ -471,6 +471,96 @@ be used autonomously on destructive procedures.
   recovery for a NetBox RQ job stuck in `running`. `restart_service` is
   `effect="write"`, no approval, but disruptive — present the action before
   dispatching per the write-procedure rule below.
+- `os.linux_env_file.upsert_var` (migration `0059`/`0060`) upserts a
+  credential-backed `KEY=VALUE` line into an allowlisted service's
+  `environment_file`, then restarts its `systemd_unit`. `effect="write"`,
+  `approval_required=True` — writes a credential to a production host file, so
+  it is never dispatched autonomously. Params are `service_slug`, `var_name`
+  (`^[A-Z][A-Z0-9_]*$`), and `credential_pk` (a `netbox_nms.DeviceCredential`
+  reference); no raw secret value is ever accepted as a param, logged, or
+  persisted to `RPCExecution`/`RPCExecutionEvent` — the backend resolves
+  `credential_pk` and delivers the value over stdin, mirroring
+  `install_ssh_key`'s stdin-delivery pattern. It is an `EXEMPT_HANDLER_RATIONALE`
+  entry seeded with one `backend-orchestrated` command row, matching the Samba
+  `user_create`/`user_set_password` pattern. Migration `0060` does **not** seed
+  `environment_file` on the `netbox`/`netbox-rq` allowlist rows — confirm the
+  real `EnvironmentFile=` path against the production systemd unit and set it
+  via the `RPCLinuxServiceAllowlist` admin UI/API before dispatching this
+  procedure against them; the normalizer fails closed with
+  `RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING` while it is unset.
+  `environment_file` must be an absolute path with no traversal or control
+  characters — enforced both in `RPCLinuxServiceAllowlist.clean()` (model
+  layer) and defensively re-checked in the normalizer (in case a row was
+  written outside `full_clean()`). Migration `0060` seeds the procedure
+  `enabled=False`: the paired nms-backend execution handler does not exist
+  yet, and the caller-supplied `credential_pk` param is not yet
+  object-scoped-authorization checked against the requesting user before
+  the referenced `DeviceCredential`'s plaintext value is resolved — a
+  pre-existing gap shared by every `*credential_pk` param in this plugin
+  (`guest_credential_pk`, `restconf_credential_pk`, `rpc_ssh_credential_pk`),
+  tracked in issue #203. **In addition to the `enabled=False` seed**,
+  `_normalize_linux_env_file_upsert_execution()` carries a hard-coded
+  module-level gate (`_LINUX_ENV_FILE_UPSERT_AVAILABLE = False` in
+  `netbox_rpc.domain.normalization`) that unconditionally raises
+  `RPCExecutionError(code="RPC_PROCEDURE_NOT_AVAILABLE")` before any
+  allowlist or credential lookup — because `RPCProcedure.enabled` is ordinary
+  mutable catalog data an operator could flip without knowing the
+  authorization gap below is still open, this second gate enforces the same
+  refusal in code. Do not flip either gate until the execution handler is
+  deployed, #203 (or an equivalent scoped fix) has landed, **and** a third
+  precondition: `run_execution()` resolves `RPCLinuxServiceAllowlist`
+  (`environment_file`/`systemd_unit`/`target_models`/
+  `ssh_credential_override_id`) at worker-claim time, not at the time an
+  approver made their decision, so an approver can approve against one
+  allowlist policy and have the worker execute against a different one an
+  operator edited in between (`approval_required=True` on this procedure
+  makes the gap concrete, not merely theoretical). Closing it needs the
+  allowlist row snapshotted into the approval decision and re-validated for
+  drift at claim time — the general mechanism for this is `#163`'s item 2
+  ("persist a pending approval snapshot") and item 9 (post-approval,
+  pre-dispatch invalidation on drift); `create_execution()` does not yet
+  route `approval_required` executions through that snapshot workflow at all
+  (it calls `RPCExecutionAggregate.queue()` directly — see
+  `command_handlers.py`), so no procedure has this protection today. This
+  procedure inherits that pre-existing gap; it is currently unreachable in
+  practice because `_LINUX_ENV_FILE_UPSERT_AVAILABLE = False` prevents the
+  allowlist lookup from running at all (see
+  `test_upsert_var_gate_blocks_by_default`, which asserts the allowlist
+  query is never made while the gate is closed), but the gate must stay
+  closed until #163 lands for this class of procedure, not just until #203
+  does. **Migration version-skew note:** `0060` originally shipped
+  `enabled=True` and was edited in place to `enabled=False` in a later
+  commit; because Django tracks an applied migration by name only, any
+  database that already ran the original `0060` keeps the stale
+  `enabled=True` default. Additive migration `0061` re-asserts
+  `enabled=False` on the existing procedure row for exactly that case — do
+  not fix a shipped migration's data defaults in place again; add a new
+  additive migration instead. `0060`'s reverse migration deletes the
+  procedure only via `procedures.delete()`; `RPCProcedureCommand.procedure`
+  is `on_delete=CASCADE` so its command row is deleted automatically as part
+  of the same cascade, and `RPCExecution.procedure` is
+  `on_delete=PROTECT` so a `ProtectedError` is raised during collection,
+  before any row is deleted — the procedure and its commands are never left
+  in a partially-rolled-back state. **Three-layer gate enforcement:** the
+  hard-coded code-level gate is checked through one shared function,
+  `normalization.code_gate_unavailable_reason(procedure_name)`, at three
+  points so they can never diverge — (1) admission time, in
+  `command_handlers.create_execution()`, immediately after the
+  `procedure.enabled` check, so a gated procedure can never even get an
+  `RPCExecution` row created; (2) advertisement time, in
+  `RPCProcedureViewSet.available()` (`/procedures/available/`), so a gated
+  procedure never appears as dispatchable to a client; and (3) worker-claim
+  time, inside `_normalize_linux_env_file_upsert_execution()`, retained as
+  defense in depth for an `RPCExecution` row created by an older process
+  before this gate existed (rolling deployment, mixed worker versions) or
+  claimed by a worker running stale code. Round-4 adversarial review on PR
+  #202 found the gate enforced only at layer (3); layers (1) and (2) close
+  that gap so an operator flipping `RPCProcedure.enabled=True` — the only
+  scenario in which the gap was reachable — cannot get an execution created
+  or advertised while the code gate stays closed. Covered by
+  `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
+  advertisement, procedure forced `enabled=True`) alongside the existing
+  `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.

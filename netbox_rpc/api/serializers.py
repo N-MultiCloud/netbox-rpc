@@ -175,6 +175,7 @@ class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):
             "display",
             "slug",
             "systemd_unit",
+            "environment_file",
             "enabled",
             "target_models",
             "description",

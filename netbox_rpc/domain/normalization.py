@@ -27,6 +27,7 @@ from ..constants import (
     DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
     LINUX_COLLECT_FACTS,
+    LINUX_ENV_FILE_UPSERT_VAR,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
@@ -87,6 +88,74 @@ from ..command_templating import RENDER_JINJA
 from ..models import RPCLinuxServiceAllowlist, RPCExecution
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+# Absolute path, no traversal, no control characters — mirrors
+# models.ENVIRONMENT_FILE_PATH_RE (duplicated, not imported, so the
+# stub-based pure-domain test suite need not model netbox_rpc.models).
+_ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
+
+# Hard-coded fail-closed gate for os.linux_env_file.upsert_var, independent of
+# RPCProcedure.enabled (ordinary mutable catalog data that an operator could
+# flip without knowing the trust boundary below is still open). Flip to True
+# only once ALL THREE preconditions hold:
+#   1. The paired nms-backend execution handler is deployed.
+#   2. credential_pk is object-scoped-authorization checked against the
+#      requesting user before its DeviceCredential is resolved (issue #203).
+#   3. approval_required executions for this procedure are routed through an
+#      approval-time snapshot of the resolved RPCLinuxServiceAllowlist policy
+#      (environment_file/systemd_unit/target_models/
+#      ssh_credential_override_id), re-validated for drift at worker-claim
+#      time (issue #163, items 2 and 9 -- not #165, which only shipped the
+#      approve/reject API/UI). Today create_execution() enforces
+#      approval_required as a permission check only and calls
+#      RPCExecutionAggregate.queue() directly, so an approver's decision is
+#      never bound to the allowlist row the worker resolves later below.
+#      That TOCTOU window is unreachable while this gate is closed --
+#      test_upsert_var_gate_blocks_by_default asserts the allowlist lookup
+#      never runs -- but must stay closed until #163 lands, independent of
+#      #203.
+# Tests open the gate via
+# sys.modules["netbox_rpc.domain.normalization"]._LINUX_ENV_FILE_UPSERT_AVAILABLE.
+#
+# Enforced at three points through code_gate_unavailable_reason() below, so
+# they can never diverge: admission time (command_handlers.create_execution,
+# before an RPCExecution row can even be created), advertisement time
+# (RPCProcedureViewSet.available -- /procedures/available/), and
+# worker-claim time (this module, retained as defense in depth for a row
+# created by an older process before this gate existed, or claimed by a
+# worker running stale code during a rolling deployment). No mixed-worker
+# upgrade/rollback quarantine tooling is added for that scenario: this
+# procedure ships with RPCProcedure.enabled=False (0060/0061) AND this flag
+# False, so no RPCExecution row against it can exist in any real deployment
+# today, making "an already-queued execution survives across a version
+# skew" unreachable in practice. Revisit if that ever changes -- e.g. if a
+# future change enables the procedure before all three preconditions above
+# are met.
+_LINUX_ENV_FILE_UPSERT_AVAILABLE = False
+
+
+def code_gate_unavailable_reason(procedure_name: str) -> str | None:
+    """Return why ``procedure_name`` is hard-gated shut, or None if clear.
+
+    Single source of truth for the fail-closed code-level gates above
+    (independent of RPCProcedure.enabled, which is mutable catalog data an
+    operator could flip without knowing a gate below it is still closed).
+    Call this at admission time (create_execution), advertisement time
+    (/procedures/available/), and worker-claim time (this module) so the
+    three enforcement points can never diverge.
+    """
+
+    if procedure_name == "os.linux_env_file.upsert_var" and not _LINUX_ENV_FILE_UPSERT_AVAILABLE:
+        return (
+            "os.linux_env_file.upsert_var cannot run yet: the nms-backend "
+            "execution handler is not deployed, credential_pk is not "
+            "object-scoped-authorization checked against the requester "
+            "(issue #203), and approval decisions are not yet bound to an "
+            "allowlist-policy snapshot (issue #163)."
+        )
+    return None
+
+
 _PROXMOX_STORAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PROXMOX_BRIDGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _PROXMOX_VM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
@@ -467,6 +536,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
             "target": target,
             "command_fingerprint": {"handler_id": execution.procedure.handler_id},
         }
+
+    if procedure_name == LINUX_ENV_FILE_UPSERT_VAR:
+        return _normalize_linux_env_file_upsert_execution(execution, target)
 
     if procedure_name == HUAWEI_MA5800_R024_START_ONT:
         params = execution.params or {}
@@ -1913,6 +1985,81 @@ def _normalize_linux_service_execution(
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "systemd_unit": unit,
+        },
+    }
+    if allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
+
+
+def _normalize_linux_env_file_upsert_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Resolve a service's fixed env-file path and retain credential refs only."""
+
+    # Defense in depth: create_execution() and /procedures/available/ already
+    # consult code_gate_unavailable_reason() before an execution can be
+    # created or advertised, but a worker may still claim a row created by
+    # an older process (rolling deployment, mixed worker versions) — recheck
+    # here so no code path can reach the allowlist/credential lookup below
+    # while the gate is closed.
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    params = execution.params or {}
+    slug = str(params.get("service_slug") or "").strip()
+    allow = RPCLinuxServiceAllowlist.objects.filter(slug=slug, enabled=True).first()
+    if allow is None:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowlisted.",
+            code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
+        )
+
+    target_models = set(allow.target_models or [])
+    if target_models and execution.target_model_label not in target_models:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowed for {execution.target_model_label}.",
+            code="RPC_LINUX_SERVICE_TARGET_DENIED",
+        )
+
+    environment_file = str(allow.environment_file or "").strip()
+    if not environment_file:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} has no environment file configured.",
+            code="RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING",
+        )
+    if not _ENVIRONMENT_FILE_PATH_RE.fullmatch(environment_file):
+        # Defensive recheck: the allowlist model's clean() already enforces
+        # this shape, but a row written outside full_clean() (fixture, data
+        # migration, bulk update) must not reach the backend unvalidated.
+        raise RPCExecutionError(
+            f"Linux service {slug!r} has a malformed environment file path.",
+            code="RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING",
+        )
+
+    var_name = str(params.get("var_name") or "")
+    if not _LINUX_ENV_VAR_NAME_RE.fullmatch(var_name):
+        raise RPCExecutionError(
+            "var_name must match ^[A-Z][A-Z0-9_]*$.",
+            code="RPC_PARAM_INVALID",
+        )
+    credential_pk = _int_range(params, "credential_pk", 1, None)
+    systemd_unit = allow.systemd_unit
+    result = {
+        "target": target,
+        "service_slug": slug,
+        "systemd_unit": systemd_unit,
+        "environment_file": environment_file,
+        "var_name": var_name,
+        "credential_pk": credential_pk,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "systemd_unit": systemd_unit,
+            "environment_file": environment_file,
+            "var_name": var_name,
+            "credential_pk": credential_pk,
         },
     }
     if allow.ssh_credential_override_id is not None:

@@ -162,13 +162,20 @@ class RPCLinuxServiceAllowlistTable(NetBoxTable):
             "id",
             "slug",
             "systemd_unit",
+            "environment_file",
             "enabled",
             "ssh_credential_override",
             "description",
             "tags",
             "actions",
         )
-        default_columns = ("slug", "systemd_unit", "enabled", "ssh_credential_override")
+        default_columns = (
+            "slug",
+            "systemd_unit",
+            "environment_file",
+            "enabled",
+            "ssh_credential_override",
+        )
 
 
 class RPCExecutionTable(NetBoxTable):

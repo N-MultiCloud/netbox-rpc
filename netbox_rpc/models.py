@@ -48,6 +48,10 @@ SYSTEMD_UNIT_RE = re.compile(
     r"(?:\.service)?$"
 )
 
+# Absolute path, no traversal, no control characters — mirrors the
+# _OOKLA_ABS_PATH_RE convention in domain/normalization.py.
+ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
+
 # Bare hostname/domain for RPCBackend.domain: alphanumerics, dots, and hyphens
 # only — no scheme, port, path, or whitespace. Prevents a URL parser differential
 # when composing backend_url as "{scheme}://{host}:{port}".
@@ -595,6 +599,16 @@ class RPCProcedureCommand(NetBoxModel):
 class RPCLinuxServiceAllowlist(NetBoxModel):
     slug = models.SlugField(max_length=100, unique=True)
     systemd_unit = models.CharField(max_length=200)
+    environment_file = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional operator-managed environment file associated with this "
+            "service. RPC normalizers derive this path from the allowlist; callers "
+            "cannot provide or override it."
+        ),
+    )
     enabled = models.BooleanField(default=True)
     target_models = models.JSONField(
         default=list,
@@ -644,6 +658,17 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
                     "systemd_unit": (
                         "Systemd unit must contain only letters, numbers, underscore, "
                         "dash, dot, or @, with an optional .service suffix."
+                    )
+                }
+            )
+        if self.environment_file and not ENVIRONMENT_FILE_PATH_RE.fullmatch(
+            self.environment_file
+        ):
+            raise ValidationError(
+                {
+                    "environment_file": (
+                        "Environment file must be an absolute path (/... up to "
+                        "255 safe chars, no traversal or control characters)."
                     )
                 }
             )

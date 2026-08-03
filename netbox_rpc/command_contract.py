@@ -79,6 +79,11 @@ EXEMPT_HANDLER_RATIONALE = {
         "Runs a multi-line install/configuration script through sudo bash -s with "
         "repository setup and config-file edits."
     ),
+    "os.linux_env_file.upsert_var": (
+        "Resolves a DeviceCredential reference at execution time and delivers the "
+        "secret value to a fixed environment-file upsert script over stdin; the "
+        "plaintext value must never be represented as argv or persisted."
+    ),
     "os.linux_proxmox.convert_mellanox_nic_to_ethernet": (
         "Destructive Proxmox host workflow with discovery, interface-file rewrite, "
         "driver loading, optional network apply, and optional reboot."

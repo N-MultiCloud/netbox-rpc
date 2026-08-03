@@ -54,6 +54,49 @@ The procedure catalog is intentionally narrow:
   `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`) services.
   Restarting `netbox-rq` is the audited way to sweep a NetBox RQ job stuck in
   `running` after its worker died.
+- `os.linux_env_file.upsert_var` — writes a single `KEY=VALUE` line (backend
+  resolves the value from a `credential_pk` reference and delivers it over
+  stdin; no raw secret is ever accepted as a param) into the allowlisted
+  service's `environment_file`, then restarts its `systemd_unit`.
+  `approval_required=True`. The `netbox`/`netbox-rq` allowlist rows do not
+  ship a seeded `environment_file` — an operator must confirm the real path
+  against the production systemd unit and set it via the
+  `RPCLinuxServiceAllowlist` admin UI/API before dispatching against them.
+  `environment_file` is validated as an absolute path (no traversal/control
+  characters) at the model and normalizer layers. Seeded `enabled=False`,
+  **and** the normalizer additionally carries a hard-coded code-level gate
+  (`RPC_PROCEDURE_NOT_AVAILABLE`) that refuses to run regardless of the
+  `enabled` flag: do not enable/open either gate until the paired
+  nms-backend execution handler is deployed, issue #203 (object-scoped
+  authorization for caller-supplied `*credential_pk` params, a pre-existing
+  codebase-wide gap) or an equivalent scoped fix has landed, **and** issue
+  #163 (the still-open two-person-approval parent) routes `approval_required`
+  executions through an approval-time snapshot of the resolved allowlist
+  policy — today `create_execution()` enforces `approval_required` only as a
+  permission check and calls `queue()` directly, so an approver's decision is
+  never bound to the `environment_file`/`systemd_unit` values the worker
+  resolves later at claim time. That TOCTOU window is currently unreachable
+  (the code-level gate above blocks the allowlist lookup outright) but must
+  stay closed until #163 lands, independent of #203. Seed migration `0060`
+  originally shipped `enabled=True` and was later edited in place to
+  `enabled=False`; because Django tracks an applied migration by name only,
+  a database that already ran the original `0060` keeps the stale
+  `enabled=True` value unless it also runs additive migration `0061`, which
+  re-asserts `enabled=False` on the existing row. `0060`'s reverse migration
+  relies on `RPCProcedureCommand.procedure` being `on_delete=CASCADE` (so
+  deleting the procedure also removes its command row in the same
+  transaction) and catches `ProtectedError` from `RPCExecution.procedure`
+  being `on_delete=PROTECT`, so a rollback with existing executions leaves
+  both the procedure and its commands intact rather than partially deleted.
+  The code-level gate is checked at three points through one shared
+  function (`normalization.code_gate_unavailable_reason()`) so they can
+  never diverge: admission time (`create_execution()`, before an
+  `RPCExecution` row can be created), advertisement time
+  (`/procedures/available/`, so the procedure never appears as
+  dispatchable), and worker-claim time (the normalizer, retained as
+  defense in depth for a row created by an older process before this gate
+  existed). An operator flipping `RPCProcedure.enabled=True` — the only
+  scenario the flag alone cannot protect against — is refused at all three.
 - `os.linux.proxmox.convert_mellanox_nic_to_ethernet`
 - `os.linux.proxmox.pvesh_json`
 - `os.linux.proxmox.qemu_vm_lifecycle`

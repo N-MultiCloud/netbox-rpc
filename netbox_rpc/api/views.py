@@ -19,6 +19,7 @@ from ..application.command_handlers import (
     reject_execution,
 )
 from ..application.queries import execution_events
+from ..domain.normalization import code_gate_unavailable_reason
 from .serializers import (
     RPCBackendSerializer,
     RPCIntentRunSerializer,
@@ -76,6 +77,18 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
             qs = qs.filter(
                 Q(target_models=[]) | Q(target_models__contains=[target_type])
             )
+
+        # A procedure held shut by a hard-coded code-level gate (see
+        # code_gate_unavailable_reason) is not "available" even when
+        # enabled=True — that mutable flag is not sufficient proof of
+        # safety on its own. Same check enforced at admission time in
+        # create_execution() and, as defense in depth, at worker-claim
+        # time in normalize_execution_params().
+        qs = [
+            procedure
+            for procedure in qs
+            if code_gate_unavailable_reason(procedure.name) is None
+        ]
 
         # #167: when the selected backend advertises a capability manifest, a
         # procedure the backend cannot serve compatibly is not "available".
