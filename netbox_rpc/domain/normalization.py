@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import posixpath
 import re
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-import yaml
-
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
-    AKVORADO_1_DEPLOY_STACK,
     AKVORADO_1_PROCEDURE_NAMES,
     DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
@@ -229,16 +225,18 @@ _INFLUXDB_SECRET_REF_RE = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
-_AKVORADO_SECRET_REF_RE = re.compile(
-    r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
-    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
-)
 _AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
     r"private[-_]?key|credential)"
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
-    r"[\"']?(?!/)[^\s\"']+"
+    r"[\"']?[^\s\"']+"
+)
+_AKVORADO_BLOCK_SCALAR_SECRET_RE = re.compile(
+    r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+    r"private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
 )
 _AKVORADO_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _AKVORADO_AUTHORIZATION_RE = re.compile(
@@ -247,49 +245,6 @@ _AKVORADO_AUTHORIZATION_RE = re.compile(
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
 )
-_AKVORADO_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
-_AKVORADO_ENV_REFERENCE_RE = re.compile(
-    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}$"
-)
-_AKVORADO_COMPOSE_TOP_LEVEL_KEYS = frozenset(
-    {"services", "networks", "volumes", "version", "name"}
-)
-_AKVORADO_COMPOSE_SERVICE_KEYS = frozenset(
-    {
-        "image",
-        "container_name",
-        "restart",
-        "working_dir",
-        "user",
-        "read_only",
-        "hostname",
-        "dns",
-        "ports",
-        "expose",
-        "volumes",
-        "environment",
-        "depends_on",
-        "networks",
-        "labels",
-        "logging",
-        "deploy",
-        "ulimits",
-        "stop_grace_period",
-        "stop_signal",
-        "init",
-        "security_opt",
-        "cap_drop",
-        "mem_limit",
-        "cpus",
-        "shm_size",
-    }
-)
-_AKVORADO_ALLOWED_BIND_MOUNT_ROOTS = (
-    "/etc/akvorado",
-    "/opt/akvorado",
-    "/var/lib/akvorado",
-)
-_AKVORADO_NAMED_VOLUME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
 # "* action", plus the preexec/postexec family. "root preexec" runs as root, so
@@ -1245,7 +1200,7 @@ def _normalize_influxdb_1_execution(
 
 
 def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
-    """Normalize the typed Akvorado config and Compose procedure family.
+    """Normalize the typed Akvorado procedure family.
 
     Akvorado is always bound to the execution's assigned NetBox object. The
     caller cannot select or override an SSH host in params. ``target`` is a
@@ -1300,32 +1255,6 @@ def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
             }
         )
 
-    if procedure_name == AKVORADO_1_DEPLOY_STACK:
-        content = _normalize_akvorado_content(
-            params.get("compose_content"),
-            "compose_content",
-            compose=True,
-        )
-        env_content = str(params.get("env_content") or "").strip()
-        if not _AKVORADO_SECRET_REF_RE.fullmatch(env_content):
-            raise RPCExecutionError(
-                "env_content must be an nms-secret UUID reference.",
-                code="RPC_PARAM_INVALID",
-            )
-        normalized.update(
-            {
-                "compose_content": content,
-                "env_content": env_content,
-            }
-        )
-        normalized["command_fingerprint"].update(
-            {
-                "compose_content_sha256": _hash_text(content),
-                "compose_content_bytes": len(content.encode("utf-8")),
-                "env_content_ref": env_content,
-            }
-        )
-
     return normalized
 
 
@@ -1344,19 +1273,11 @@ def validate_akvorado_content_params(
             params.get("config_content"),
             "config_content",
         )
-    elif procedure_name == AKVORADO_1_DEPLOY_STACK:
-        _normalize_akvorado_content(
-            params.get("compose_content"),
-            "compose_content",
-            compose=True,
-        )
 
 
 def _normalize_akvorado_content(
     raw_content: object,
     field_name: str,
-    *,
-    compose: bool = False,
 ) -> str:
     if not isinstance(raw_content, str) or not raw_content.strip():
         raise RPCExecutionError(
@@ -1378,16 +1299,15 @@ def _normalize_akvorado_content(
         for pattern in (
             _AKVORADO_PRIVATE_KEY_RE,
             _AKVORADO_SECRET_ASSIGNMENT_RE,
+            _AKVORADO_BLOCK_SCALAR_SECRET_RE,
             _AKVORADO_AUTHORIZATION_RE,
             _AKVORADO_URL_CREDENTIAL_RE,
         )
     ):
         raise RPCExecutionError(
-            f"{field_name} contains secret-shaped material; use env_content or another nms-secret reference instead.",
+            f"{field_name} contains secret-shaped material; use an nms-secret reference instead.",
             code="RPC_PARAM_SECRET_FORBIDDEN",
         )
-    if compose:
-        _validate_akvorado_compose_environment(raw_content)
     return raw_content
 
 
@@ -1397,300 +1317,6 @@ def _akvorado_unsafe_codepoint(char: str) -> bool:
         (codepoint < 32 and char not in {"\t", "\n", "\r"})
         or 127 <= codepoint <= 159
         or 0xD800 <= codepoint <= 0xDFFF
-    )
-
-
-def _validate_akvorado_compose_environment(content: str) -> None:
-    """Reject inline/defaulted Compose environment values.
-
-    A Compose file may inherit a bare variable or reference the same variable
-    with ``${NAME}``. Literal values, assignment-list syntax, and default/error
-    interpolation forms are rejected; their values must instead come from the
-    separately authorized ``env_content`` secret reference. Semantic YAML
-    parsing covers quoted keys, flow style, anchors, and unusual indentation.
-    """
-
-    try:
-        document = yaml.safe_load(content)
-    except yaml.YAMLError as exc:
-        raise RPCExecutionError(
-            "compose_content must contain valid YAML.",
-            code="RPC_PARAM_INVALID",
-        ) from exc
-
-    _reject_akvorado_compose_env_file(document, seen=set())
-    if not isinstance(document, dict):
-        return
-    _validate_akvorado_compose_structure(document)
-    _validate_akvorado_service_environments(
-        document.get("services"),
-        seen=set(),
-    )
-
-
-def _validate_akvorado_compose_structure(document: dict[object, object]) -> None:
-    for raw_key in document:
-        key = str(raw_key)
-        if key not in _AKVORADO_COMPOSE_TOP_LEVEL_KEYS:
-            raise RPCExecutionError(
-                f"compose_content must not declare top-level key '{key}'.",
-                code="RPC_PARAM_INVALID",
-            )
-
-    volumes = document.get("volumes")
-    if volumes is not None:
-        if not isinstance(volumes, dict):
-            raise RPCExecutionError(
-                "compose_content top-level volumes must be a mapping.",
-                code="RPC_PARAM_INVALID",
-            )
-        volume_items = sorted(volumes.items(), key=lambda pair: str(pair[0]))
-        for raw_volume_name, definition in volume_items:
-            volume_name = str(raw_volume_name)
-            if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(volume_name):
-                raise RPCExecutionError(
-                    f"compose_content top-level volume '{volume_name}' is not a valid named-volume name.",
-                    code="RPC_PARAM_INVALID",
-                )
-            if definition is not None and not isinstance(definition, dict):
-                raise RPCExecutionError(
-                    f"compose_content top-level volume '{volume_name}' must be a mapping.",
-                    code="RPC_PARAM_INVALID",
-                )
-            if isinstance(definition, dict):
-                for raw_key in sorted(definition, key=str):
-                    key = str(raw_key)
-                    if key != "labels":
-                        raise RPCExecutionError(
-                            f"compose_content top-level volume '{volume_name}' must not declare key '{key}'.",
-                            code="RPC_PARAM_INVALID",
-                        )
-
-    services = document.get("services")
-    if services is None:
-        return
-    if not isinstance(services, dict):
-        raise RPCExecutionError(
-            "compose_content services must be a mapping.",
-            code="RPC_PARAM_INVALID",
-        )
-
-    for raw_service_name, service_definition in services.items():
-        service_name = str(raw_service_name)
-        if not isinstance(service_definition, dict):
-            raise RPCExecutionError(
-                f"compose_content service '{service_name}' must be a mapping.",
-                code="RPC_PARAM_INVALID",
-            )
-        for raw_key in service_definition:
-            key = str(raw_key)
-            if key not in _AKVORADO_COMPOSE_SERVICE_KEYS:
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' must not declare key '{key}'.",
-                    code="RPC_PARAM_INVALID",
-                )
-        _validate_akvorado_compose_volumes(
-            service_name,
-            service_definition.get("volumes"),
-        )
-
-
-def _validate_akvorado_compose_volumes(
-    service_name: str,
-    volumes: object,
-) -> None:
-    if volumes is None:
-        return
-    if not isinstance(volumes, list):
-        raise RPCExecutionError(
-            f"compose_content service '{service_name}' volumes must be a list.",
-            code="RPC_PARAM_INVALID",
-        )
-
-    for volume in volumes:
-        if isinstance(volume, str):
-            if "$" in volume:
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' volume interpolation is not allowed.",
-                    code="RPC_PARAM_INVALID",
-                )
-            parts = volume.split(":")
-            if len(parts) == 1:
-                if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(volume):
-                    raise RPCExecutionError(
-                        f"compose_content service '{service_name}' volume '{volume}' is not a valid named-volume reference.",
-                        code="RPC_PARAM_INVALID",
-                    )
-                continue
-            source = parts[0]
-            if source in {".", ".."} or source.startswith(("/", "./", "../")):
-                _validate_akvorado_bind_mount_path(service_name, source)
-            elif not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
-                    code="RPC_PARAM_INVALID",
-                )
-            continue
-        if not isinstance(volume, dict):
-            raise RPCExecutionError(
-                f"compose_content service '{service_name}' has an invalid volume declaration.",
-                code="RPC_PARAM_INVALID",
-            )
-
-        for field_name in ("type", "source", "target"):
-            field_value = volume.get(field_name)
-            if isinstance(field_value, str) and "$" in field_value:
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' volume interpolation is not allowed.",
-                    code="RPC_PARAM_INVALID",
-                )
-
-        volume_type = volume.get("type")
-        if "type" in volume and (
-            not isinstance(volume_type, str)
-            or volume_type not in {"bind", "volume", "tmpfs", "npipe"}
-        ):
-            raise RPCExecutionError(
-                f"compose_content service '{service_name}' has an unrecognized volume type.",
-                code="RPC_PARAM_INVALID",
-            )
-
-        source = volume.get("source")
-        if volume_type == "bind":
-            if not isinstance(source, str):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' has an invalid bind-mount source.",
-                    code="RPC_PARAM_INVALID",
-                )
-            _validate_akvorado_bind_mount_path(service_name, source)
-        elif volume_type == "volume" and source is not None:
-            if not isinstance(source, str):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' has an invalid volume declaration.",
-                    code="RPC_PARAM_INVALID",
-                )
-            if not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
-                    code="RPC_PARAM_INVALID",
-                )
-        elif "type" not in volume and source is not None:
-            if not isinstance(source, str):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' has an invalid volume declaration.",
-                    code="RPC_PARAM_INVALID",
-                )
-            if source in {".", ".."} or source.startswith(("/", "./", "../")):
-                _validate_akvorado_bind_mount_path(service_name, source)
-            elif not _AKVORADO_NAMED_VOLUME_RE.fullmatch(source):
-                raise RPCExecutionError(
-                    f"compose_content service '{service_name}' volume '{source}' is not a valid named-volume reference.",
-                    code="RPC_PARAM_INVALID",
-                )
-
-
-def _validate_akvorado_bind_mount_path(service_name: str, source: str) -> None:
-    normalized_source = posixpath.normpath(source)
-    contains_traversal = ".." in PurePosixPath(source).parts
-    allowed = any(
-        normalized_source == root or normalized_source.startswith(f"{root}/")
-        for root in _AKVORADO_ALLOWED_BIND_MOUNT_ROOTS
-    )
-    if contains_traversal or not allowed:
-        raise RPCExecutionError(
-            f"compose_content service '{service_name}' volume '{source}' is not an allowed bind-mount path.",
-            code="RPC_PARAM_INVALID",
-        )
-
-
-def _reject_akvorado_compose_env_file(value: object, *, seen: set[int]) -> None:
-    if not isinstance(value, (dict, list)):
-        return
-    identity = id(value)
-    if identity in seen:
-        return
-    seen.add(identity)
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == "env_file":
-                raise RPCExecutionError(
-                    "compose_content must not contain env_file; use env_content instead.",
-                    code="RPC_PARAM_SECRET_FORBIDDEN",
-                )
-            if key == "environment":
-                continue
-            _reject_akvorado_compose_env_file(item, seen=seen)
-        return
-    for item in value:
-        _reject_akvorado_compose_env_file(item, seen=seen)
-
-
-def _validate_akvorado_service_environments(
-    value: object,
-    *,
-    seen: set[int],
-) -> None:
-    if not isinstance(value, (dict, list)):
-        return
-    identity = id(value)
-    if identity in seen:
-        return
-    seen.add(identity)
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == "environment":
-                _validate_akvorado_environment_value(item)
-                continue
-            _validate_akvorado_service_environments(item, seen=seen)
-        return
-    for item in value:
-        _validate_akvorado_service_environments(item, seen=seen)
-
-
-def _validate_akvorado_environment_value(value: object) -> None:
-    if isinstance(value, dict):
-        for raw_name, raw_value in value.items():
-            if not isinstance(raw_name, str) or not _AKVORADO_ENV_NAME_RE.fullmatch(
-                raw_name
-            ):
-                _raise_akvorado_compose_environment_error()
-            if raw_value is None:
-                continue
-            if not isinstance(raw_value, str) or not _akvorado_exact_env_reference(
-                raw_name,
-                raw_value,
-            ):
-                _raise_akvorado_compose_environment_error()
-        return
-    if isinstance(value, list):
-        for raw_item in value:
-            if not isinstance(raw_item, str):
-                _raise_akvorado_compose_environment_error()
-            if _AKVORADO_ENV_NAME_RE.fullmatch(raw_item):
-                continue
-            if "=" in raw_item:
-                name, item_value = raw_item.split("=", 1)
-                if _akvorado_exact_env_reference(name, item_value):
-                    continue
-            _raise_akvorado_compose_environment_error()
-        return
-    _raise_akvorado_compose_environment_error()
-
-
-def _akvorado_exact_env_reference(name: str, value: str) -> bool:
-    name = name.strip()
-    match = _AKVORADO_ENV_REFERENCE_RE.fullmatch(value.strip().strip("\"'"))
-    return bool(
-        _AKVORADO_ENV_NAME_RE.fullmatch(name)
-        and match
-        and match.group("name") == name
-    )
-
-
-def _raise_akvorado_compose_environment_error() -> None:
-    raise RPCExecutionError(
-        "compose_content must not contain literal or defaulted environment values; use env_content instead.",
-        code="RPC_PARAM_SECRET_FORBIDDEN",
     )
 
 

@@ -202,10 +202,6 @@ EXEMPT_HANDLER_RATIONALE = {
         "Receives akvorado.yaml through structured input_data, validates it, and activates it "
         "without placing caller-provided content in argv."
     ),
-    "service.akvorado.1.deploy_stack": (
-        "Receives Compose bytes and a backend-resolved env-content reference through structured "
-        "input_data, then validates and deploys the stack without interpolating either into argv."
-    ),
     "service.akvorado.1.status_stack": (
         "Reads and normalizes the backend-owned Akvorado Compose project status."
     ),

@@ -469,26 +469,21 @@ be used autonomously on destructive procedures.
   for compatibility, but new InfluxDB workflows must use this typed family.
 - Akvorado service management uses the typed `service.akvorado.1.*` catalog
   seeded by migration `0057`, targeting `dcim.device` and
-  `virtualization.virtualmachine`. Five procedures: `config_read` (read, no
+  `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
   approval, 30s) and `status_stack` (read, no approval, 60s) are queries;
-  `config_deploy` (write, approval required, 120s), `deploy_stack` (write,
-  approval required, 300s), and `restart_stack` (write, approval required,
-  120s) are mutations. `config_deploy`/`deploy_stack` accept
-  `config_content`/`compose_content` as structured `input_data` string
-  payloads (never argv-interpolated); only their sha256/byte count enters the
-  command fingerprint. NUL/unsafe controls, inline secret material, credential
-  URLs/private keys, and literal/defaulted Compose environment values are
-  rejected before persistence/dispatch. The caller cannot provide a target
+  `config_deploy` (write, approval required, 120s) and `restart_stack` (write,
+  approval required, 120s) are mutations. `config_deploy` accepts
+  `config_content` as a structured `input_data` string payload (never
+  argv-interpolated); only its sha256/byte count enters the command fingerprint.
+  NUL/unsafe controls, inline secret material, credential URLs, and private keys
+  are rejected before persistence/dispatch. The caller cannot provide a target
   host: every run requires an existing assigned NetBox device/VM and derives
-  the backend target exclusively from that object. `deploy_stack` additionally
-  requires `env_content` as a `nms-secret:<uuid>` reference; the backend resolves
-  the referenced env-file bytes and supplies them through `input_data`; plaintext
-  env secrets never enter RPC params or argv. All five handler IDs are listed
+  the backend target exclusively from that object. All four handler IDs are listed
   in `command_contract.EXEMPT_HANDLER_RATIONALE` (seeded with one
   `backend-orchestrated` representative command row each) because Akvorado
-  config/Compose/env deployment is backend-orchestrated content handling, not
-  fixed argv. This catalog is the *only* sanctioned way to read or change
-  Akvorado config, Compose stack, or file state — `netbox-observability`'s
+  config deployment is backend-orchestrated content handling, not fixed argv.
+  This catalog is the *only* sanctioned way to read or change Akvorado config or
+  stack lifecycle state — `netbox-observability`'s
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval

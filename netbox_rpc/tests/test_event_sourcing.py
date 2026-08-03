@@ -3,7 +3,6 @@ the append-only ledger, against a real NetBox test database."""
 
 from __future__ import annotations
 
-import yaml
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.test import TestCase
@@ -136,8 +135,8 @@ class RebuildOracleTests(TestCase):
         after = ProjectionState.from_execution(RPCExecution.objects.get(pk=ex.pk))
         assert before == after
 
-    def test_large_normalized_compose_content_replays_without_truncation(self):
-        content = "services:\n  akvorado:\n    image: akvorado:latest\n" + (
+    def test_large_normalized_config_content_replays_without_truncation(self):
+        content = "inlet:\n  kafka:\n    topic: flows\n" + (
             "x" * (event_store.MAX_EVENT_STRING_LENGTH + 1024)
         )
         ex = make_execution()
@@ -145,18 +144,18 @@ class RebuildOracleTests(TestCase):
         aggregate.queue()
         aggregate.start()
         aggregate.normalize(
-            {"compose_content": content, "command_fingerprint": {}},
+            {"config_content": content, "command_fingerprint": {}},
             "hash123",
         )
 
         normalized = ex.events.get(event="ParametersNormalized")
-        stored_content = normalized.data["normalized_params"]["compose_content"]
+        stored_content = normalized.data["normalized_params"]["config_content"]
         assert stored_content == content
         assert len(stored_content) == len(content)
         assert not stored_content.endswith("...[truncated]")
 
         rebuilt = event_store.rebuild_projection(ex)
-        assert rebuilt.normalized_params["compose_content"] == content
+        assert rebuilt.normalized_params["config_content"] == content
         self._assert_rebuild_matches(ex)
 
     def test_large_normalized_content_limit_still_truncates_oversized_values(self):
@@ -164,16 +163,16 @@ class RebuildOracleTests(TestCase):
         oversized = "x" * (limit + 1)
 
         redacted = event_store.redact_event_value(
-            {"normalized_params": {"compose_content": oversized}},
+            {"normalized_params": {"config_content": oversized}},
             string_limits={
-                ("normalized_params", "compose_content"): limit,
+                ("normalized_params", "config_content"): limit,
             },
         )
 
-        stored_content = redacted["normalized_params"]["compose_content"]
+        stored_content = redacted["normalized_params"]["config_content"]
         assert stored_content == f"{oversized[:limit]}...[truncated]"
 
-    def test_large_normalized_compose_content_redacts_block_scalar_secrets(self):
+    def test_large_normalized_config_content_redacts_block_scalar_secrets(self):
         content = (
             "services:\n"
             "  akvorado:\n"
@@ -187,51 +186,82 @@ class RebuildOracleTests(TestCase):
         aggregate.queue()
         aggregate.start()
         aggregate.normalize(
-            {"compose_content": content, "command_fingerprint": {}},
+            {"config_content": content, "command_fingerprint": {}},
             "hash123",
         )
 
         normalized = ex.events.get(event="ParametersNormalized")
         rebuilt = event_store.rebuild_projection(ex)
+        expected = "services:\n  akvorado:\n    environment:\n[REDACTED]"
+        assert normalized.data["normalized_params"]["config_content"] == expected
+        assert rebuilt.normalized_params["config_content"] == expected
         for secret in ("hunter2", "more-secret-line"):
             assert secret not in str(normalized.data)
             assert secret not in str(rebuilt.normalized_params)
 
-    def test_large_normalized_compose_content_redacts_plain_secrets(self):
+    def test_large_normalized_config_content_redacts_plain_secrets(self):
         content = "environment:\n  secret: hunter2\n"
         redacted = event_store.redact_event_data(
-            {"normalized_params": {"compose_content": content}},
+            {"normalized_params": {"config_content": content}},
             string_limits={
                 (
                     "normalized_params",
-                    "compose_content",
+                    "config_content",
                 ): event_store._LARGE_NORMALIZED_CONTENT_LIMIT,
             },
         )
 
-        assert "hunter2" not in redacted["normalized_params"]["compose_content"]
-
-    def test_large_normalized_compose_content_redacts_secret_shaped_scalars(self):
-        contents = (
-            "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
-            "args:\n  - PASSWORD=hunter2\n",
+        assert redacted["normalized_params"]["config_content"] == (
+            "environment:\n[REDACTED]\n"
         )
 
-        for content in contents:
+    def test_large_normalized_config_content_redacts_secret_shaped_scalars(self):
+        cases = (
+            (
+                "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
+                "endpoints:\n  - [REDACTED]example.invalid/api\n",
+            ),
+            (
+                "args:\n  - PASSWORD=hunter2\n",
+                "args:\n  [REDACTED]\n",
+            ),
+        )
+
+        for content, expected in cases:
             with self.subTest(content=content):
                 ex = make_execution()
                 aggregate = RPCExecutionAggregate(ex)
                 aggregate.queue()
                 aggregate.start()
                 aggregate.normalize(
-                    {"compose_content": content, "command_fingerprint": {}},
+                    {"config_content": content, "command_fingerprint": {}},
                     "hash123",
                 )
 
                 normalized = ex.events.get(event="ParametersNormalized")
                 rebuilt = event_store.rebuild_projection(ex)
-                assert "hunter2" not in str(normalized.data)
-                assert "hunter2" not in str(rebuilt.normalized_params)
+                assert (
+                    normalized.data["normalized_params"]["config_content"]
+                    == expected
+                )
+                assert rebuilt.normalized_params["config_content"] == expected
+
+    def test_large_normalized_config_content_redacts_slash_prefixed_secret(self):
+        content = "settings:\n  password: /hunter2\n"
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.normalize(
+            {"config_content": content, "command_fingerprint": {}},
+            "hash123",
+        )
+
+        normalized = ex.events.get(event="ParametersNormalized")
+        rebuilt = event_store.rebuild_projection(ex)
+        expected = "settings:\n[REDACTED]\n"
+        assert normalized.data["normalized_params"]["config_content"] == expected
+        assert rebuilt.normalized_params["config_content"] == expected
 
     def test_large_normalized_non_yaml_content_keeps_regex_only_behavior(self):
         content = "root preexec = /bin/sh -c 'echo hunter2'\n"
@@ -287,10 +317,8 @@ class RebuildOracleTests(TestCase):
 
         ex.refresh_from_db()
         success = ex.events.get(event="ExecutionSucceeded")
-        assert yaml.safe_load(ex.result["content"]) == yaml.safe_load(content)
-        assert yaml.safe_load(success.data["result"]["content"]) == yaml.safe_load(
-            content
-        )
+        assert ex.result["content"] == content
+        assert success.data["result"]["content"] == content
         assert "...[truncated]" not in ex.result["content"]
         assert "...[truncated]" not in success.data["result"]["content"]
         self._assert_rebuild_matches(ex)
@@ -337,10 +365,9 @@ class RebuildOracleTests(TestCase):
 
         ex.refresh_from_db()
         success = ex.events.get(event="ExecutionSucceeded")
-        expected = yaml.safe_load(content)
-        expected["password"] = "[REDACTED]"
-        assert yaml.safe_load(ex.result["content"]) == expected
-        assert yaml.safe_load(success.data["result"]["content"]) == expected
+        expected = f"{prefix}[REDACTED]\n{suffix}"
+        assert ex.result["content"] == expected
+        assert success.data["result"]["content"] == expected
         assert "hunter2" not in str(ex.result)
         assert "hunter2" not in str(success.data)
         self._assert_rebuild_matches(ex)

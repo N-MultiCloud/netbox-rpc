@@ -15,12 +15,10 @@ MIGRATION_MODULE = "netbox_rpc.migrations.0057_seed_akvorado_procedures"
 PROCEDURE_NAMES = {
     "service.akvorado.1.config_read",
     "service.akvorado.1.config_deploy",
-    "service.akvorado.1.deploy_stack",
     "service.akvorado.1.status_stack",
     "service.akvorado.1.restart_stack",
 }
 TARGET = "akvorado-01.example.net"
-ENV_CONTENT_REF = "nms-secret:123e4567-e89b-42d3-a456-426614174000"
 
 
 @pytest.fixture()
@@ -32,13 +30,11 @@ def migration(monkeypatch: pytest.MonkeyPatch):
     sys.modules.pop(MIGRATION_MODULE, None)
 
 
-def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration) -> None:
+def test_seed_creates_four_standalone_procedures_and_safe_command_rows(migration) -> None:
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
-    executions = _FakeExecutionManager()
     _FakeRPCProcedure.objects = procedures
     _FakeRPCProcedureCommand.objects = commands
-    _FakeRPCExecution.objects = executions
     apps = SimpleNamespace(get_model=_model_lookup)
 
     migration.seed_akvorado_procedures(apps, None)
@@ -47,7 +43,7 @@ def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration
         ("netbox_rpc", "0056_seed_influxdb_onboarding_procedures")
     ]
     assert set(procedures.rows) == PROCEDURE_NAMES
-    assert len(commands.rows) == 5
+    assert len(commands.rows) == 4
     for name, procedure in procedures.rows.items():
         assert procedure["handler_id"] == name
         assert procedure["version"] == 1
@@ -76,11 +72,6 @@ def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration
         procedures.rows["service.akvorado.1.config_deploy"]["approval_required"]
         is True
     )
-    assert procedures.rows["service.akvorado.1.deploy_stack"]["effect"] == "write"
-    assert (
-        procedures.rows["service.akvorado.1.deploy_stack"]["approval_required"]
-        is True
-    )
     assert procedures.rows["service.akvorado.1.status_stack"]["effect"] == "read"
     assert (
         procedures.rows["service.akvorado.1.status_stack"]["approval_required"]
@@ -97,33 +88,36 @@ def test_seed_creates_five_standalone_procedures_and_safe_command_rows(migration
     } == {
         "service.akvorado.1.config_read": 30,
         "service.akvorado.1.config_deploy": 120,
-        "service.akvorado.1.deploy_stack": 300,
         "service.akvorado.1.status_stack": 60,
         "service.akvorado.1.restart_stack": 120,
     }
 
-    migration.unseed_akvorado_procedures(apps, None)
-    assert procedures.rows == {}
 
-
-def test_unseed_disables_referenced_procedure_and_deletes_unreferenced(
+def test_unseed_unconditionally_disables_all_procedures_without_relation_queries(
     migration,
 ) -> None:
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
-    executions = _FakeExecutionManager()
     _FakeRPCProcedure.objects = procedures
     _FakeRPCProcedureCommand.objects = commands
-    _FakeRPCExecution.objects = executions
-    apps = SimpleNamespace(get_model=_model_lookup)
-    migration.seed_akvorado_procedures(apps, None)
-    referenced_name = "service.akvorado.1.config_read"
-    executions.procedure_ids.add(procedures.pks[referenced_name])
+    migration.seed_akvorado_procedures(
+        SimpleNamespace(get_model=_model_lookup),
+        None,
+    )
+    for row in procedures.rows.values():
+        row["enabled"] = True
 
-    migration.unseed_akvorado_procedures(apps, None)
+    def reverse_model_lookup(app_label: str, model_name: str):
+        assert (app_label, model_name) == ("netbox_rpc", "RPCProcedure")
+        return _FakeRPCProcedure
 
-    assert set(procedures.rows) == {referenced_name}
-    assert procedures.rows[referenced_name]["enabled"] is False
+    migration.unseed_akvorado_procedures(
+        SimpleNamespace(get_model=reverse_model_lookup),
+        None,
+    )
+
+    assert set(procedures.rows) == PROCEDURE_NAMES
+    assert all(row["enabled"] is False for row in procedures.rows.values())
 
 
 def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
@@ -134,10 +128,6 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
         "service.akvorado.1.config_read": {},
         "service.akvorado.1.config_deploy": {
             "config_content": "inlet:\n  kafka:\n    topic: flows\n",
-        },
-        "service.akvorado.1.deploy_stack": {
-            "compose_content": "services:\n  akvorado:\n    image: akvorado:latest\n",
-            "env_content": ENV_CONTENT_REF,
         },
         "service.akvorado.1.status_stack": {},
         "service.akvorado.1.restart_stack": {},
@@ -155,13 +145,6 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
             "target": TARGET,
             "deploy_status": "deployed",
             "validation_output": "configuration is valid",
-        },
-        "service.akvorado.1.deploy_stack": {
-            "ok": True,
-            "procedure": "service.akvorado.1.deploy_stack",
-            "target": TARGET,
-            "deploy_status": "deployed",
-            "validation_output": "compose configuration is valid",
         },
         "service.akvorado.1.status_stack": {
             "ok": True,
@@ -190,20 +173,10 @@ def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
     ("procedure_name", "params"),
     [
         ("service.akvorado.1.config_read", {"target": TARGET}),
-        (
-            "service.akvorado.1.config_deploy",
-            {"config_content": ""},
-        ),
+        ("service.akvorado.1.config_deploy", {"config_content": ""}),
         (
             "service.akvorado.1.config_deploy",
             {"config_content": "valid: true\n", "command": "id"},
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": "services: {}\n",
-                "env_content": "PASSWORD=plaintext",
-            },
         ),
         ("service.akvorado.1.status_stack", {"target": "host;id"}),
         (
@@ -255,63 +228,41 @@ def test_content_contract_uses_input_data_and_safe_representative_argv(migration
         assert all(command_contract.token_is_safe(token) for token in command["argv"])
 
     deploy = by_name["service.akvorado.1.config_deploy"]["params_schema"]
-    stack = by_name["service.akvorado.1.deploy_stack"]["params_schema"]
     assert "input_data" in deploy["properties"]["config_content"]["description"]
-    assert "input_data" in stack["properties"]["compose_content"]["description"]
-    assert "input_data" in stack["properties"]["env_content"]["description"]
-    assert stack["properties"]["env_content"]["pattern"].startswith("^nms-secret:")
     for row in by_name.values():
         assert "target" not in row["params_schema"]["properties"]
         assert "target" not in row["params_schema"]["required"]
 
 
 @pytest.mark.parametrize(
-    ("procedure_name", "field_name", "content"),
+    "content",
     [
-        ("service.akvorado.1.config_deploy", "config_content", "valid:\x00false\n"),
-        ("service.akvorado.1.config_deploy", "config_content", "password: plaintext\n"),
-        (
-            "service.akvorado.1.config_deploy",
-            "config_content",
-            "endpoint: https://user:pass@example.net\n",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            "compose_content",
-            "services:\n  akvorado:\x00\n",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            "compose_content",
-            "services:\n  akvorado:\n    api_token: plaintext\n",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            "compose_content",
-            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
-        ),
+        "valid:\x00false\n",
+        "password: plaintext\n",
+        "password: /hunter2\n",
+        "password: |\n  hunter2\n  more-secret-line\n",
+        "authorization: Bearer-token\n",
+        "endpoint: https://user:pass@example.net\n",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
     ],
 )
-def test_content_schemas_reject_nul_and_plaintext_secrets(
+def test_content_schema_rejects_nul_and_plaintext_secrets(
     migration,
-    procedure_name: str,
-    field_name: str,
     content: str,
 ) -> None:
     by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
-    params = {field_name: content}
-    if procedure_name.endswith("deploy_stack"):
-        params["env_content"] = ENV_CONTENT_REF
 
     with pytest.raises(ValidationError):
-        validate(params, by_name[procedure_name]["params_schema"])
+        validate(
+            {"config_content": content},
+            by_name["service.akvorado.1.config_deploy"]["params_schema"],
+        )
 
 
 def _model_lookup(app_label: str, model_name: str):
     models = {
         ("netbox_rpc", "RPCProcedure"): _FakeRPCProcedure,
         ("netbox_rpc", "RPCProcedureCommand"): _FakeRPCProcedureCommand,
-        ("netbox_rpc", "RPCExecution"): _FakeRPCExecution,
     }
     return models[(app_label, model_name)]
 
@@ -321,33 +272,10 @@ class _FakeQuerySet:
         self.manager = manager
         self.names = names
 
-    def delete(self) -> None:
-        for name in self.names:
-            self.manager.rows.pop(name, None)
-
-    def __iter__(self):
+    def update(self, **values: object) -> None:
         for name in self.names:
             if name in self.manager.rows:
-                yield _FakeProcedureRow(
-                    manager=self.manager,
-                    name=name,
-                    pk=self.manager.pks[name],
-                )
-
-
-class _FakeProcedureRow:
-    def __init__(self, *, manager: _FakeProcedureManager, name: str, pk: int) -> None:
-        self.manager = manager
-        self.name = name
-        self.pk = pk
-        self.enabled = bool(manager.rows[name]["enabled"])
-
-    def save(self, *, update_fields: list[str]) -> None:
-        assert update_fields == ["enabled"]
-        self.manager.rows[self.name]["enabled"] = self.enabled
-
-    def delete(self) -> None:
-        self.manager.rows.pop(self.name, None)
+                self.manager.rows[name].update(values)
 
 
 class _FakeProcedureManager:
@@ -379,32 +307,12 @@ class _FakeCommandManager:
         return SimpleNamespace(procedure=procedure, sequence=sequence, **defaults), True
 
 
-class _FakeExecutionQuerySet:
-    def __init__(self, exists: bool) -> None:
-        self._exists = exists
-
-    def exists(self) -> bool:
-        return self._exists
-
-
-class _FakeExecutionManager:
-    def __init__(self) -> None:
-        self.procedure_ids: set[int] = set()
-
-    def filter(self, *, procedure_id: int) -> _FakeExecutionQuerySet:
-        return _FakeExecutionQuerySet(procedure_id in self.procedure_ids)
-
-
 class _FakeRPCProcedure:
     objects: _FakeProcedureManager
 
 
 class _FakeRPCProcedureCommand:
     objects: _FakeCommandManager
-
-
-class _FakeRPCExecution:
-    objects: _FakeExecutionManager
 
 
 def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:

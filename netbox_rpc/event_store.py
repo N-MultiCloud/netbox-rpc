@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from typing import Any
 
 import jsonschema
-import yaml
 from django.db import IntegrityError
 from django.utils import timezone
 
@@ -46,17 +45,21 @@ MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
 # Keep in sync with the Akvorado and InfluxDB normalization-layer content limits.
-_LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "compose_content", "content")
+_LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "content")
 _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 StringLimitPath = tuple[str, ...]
 _SECRET_CONTENT_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|(?m:^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
+    r"access[-_]?key|private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
     r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']+)"
     r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+)"
     r"|(?i:\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@)"
 )
@@ -79,21 +82,6 @@ def _is_sensitive_key(key: str) -> bool:
     if normalized in SAFE_REFERENCE_KEYS or normalized.endswith("_credential_pk"):
         return False
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
-
-
-def _redact_parsed_yaml(value: object, *, parent_key: str = "") -> object:
-    if parent_key and _is_sensitive_key(parent_key):
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        return {
-            str(key): _redact_parsed_yaml(item, parent_key=str(key))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, list):
-        return [_redact_parsed_yaml(item, parent_key=parent_key) for item in value]
-    if isinstance(value, str):
-        return _SECRET_CONTENT_RE.sub("[REDACTED]", value)
-    return value
 
 
 def redact_event_value(
@@ -139,21 +127,7 @@ def redact_event_value(
         limits = string_limits or {}
         max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
         if path in limits:
-            parsed_yaml_redacted = False
-            try:
-                parsed = yaml.safe_load(value)
-                if isinstance(parsed, (dict, list)):
-                    value = yaml.safe_dump(
-                        _redact_parsed_yaml(parsed),
-                        default_flow_style=False,
-                        sort_keys=True,
-                    )
-                    parsed_yaml_redacted = True
-            except Exception:
-                # Redaction must remain fail-safe for adversarial YAML input.
-                pass
-            if not parsed_yaml_redacted:
-                value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
+            value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
         if len(value) > max_length:
             return f"{value[:max_length]}...[truncated]"
         return value

@@ -42,7 +42,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants = types.ModuleType("netbox_rpc.constants")
     constants.AKVORADO_1_PROCEDURE_NAMES = {
         "service.akvorado.1.config_read",
-        "service.akvorado.1.deploy_stack",
+        "service.akvorado.1.config_deploy",
     }
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
@@ -155,20 +155,20 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
     assert "does not exist" in str(exc_info.value)
 
 
-def test_unsafe_content_is_rejected_before_serializer_save(
+def test_unsafe_config_content_is_rejected_before_serializer_save(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command_handlers, ValidationError, RPCExecutionError = command_handlers_module
     procedure = SimpleNamespace(
-        name="service.akvorado.1.deploy_stack",
+        name="service.akvorado.1.config_deploy",
         enabled=True,
         approval_required=False,
         params_schema={},
     )
 
     class Serializer:
-        validated_data = {"procedure": procedure, "params": {"compose_content": "x"}}
+        validated_data = {"procedure": procedure, "params": {"config_content": "x"}}
         saved = False
 
         def is_valid(self, *, raise_exception: bool) -> None:
@@ -193,7 +193,7 @@ def test_unsafe_content_is_rejected_before_serializer_save(
     monkeypatch.setattr(command_handlers, "_verify_backend_capability", lambda p: None)
 
     def reject_unsafe_content(name, params):
-        raise RPCExecutionError("unsafe Compose environment", code="RPC_PARAM_INVALID")
+        raise RPCExecutionError("unsafe config content", code="RPC_PARAM_INVALID")
 
     monkeypatch.setattr(
         command_handlers,

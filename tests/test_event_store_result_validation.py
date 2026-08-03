@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 
 @pytest.fixture()
@@ -159,7 +158,7 @@ def test_schema_bounded_large_config_read_content_is_not_truncated(
 
     assert len(events) == 1
     stored_content = events[0].result["content"]
-    assert yaml.safe_load(stored_content) == yaml.safe_load(content)
+    assert stored_content == content
     assert "...[truncated]" not in stored_content
 
 
@@ -208,13 +207,12 @@ def test_schema_bounded_large_config_read_redacts_secret_content(
 
     assert len(events) == 1
     stored_content = events[0].result["content"]
-    expected = yaml.safe_load(content)
-    expected["password"] = "[REDACTED]"
-    assert yaml.safe_load(stored_content) == expected
+    expected = f"{prefix}[REDACTED]\n{suffix}"
+    assert stored_content == expected
     assert "hunter2" not in stored_content
 
 
-def test_large_compose_content_redacts_block_scalar_secret(
+def test_large_config_content_redacts_block_scalar_secret(
     event_store_module,
 ) -> None:
     event_store, _ = event_store_module
@@ -228,56 +226,78 @@ def test_large_compose_content_redacts_block_scalar_secret(
     )
 
     redacted = event_store.redact_event_data(
-        {"normalized_params": {"compose_content": content}},
+        {"normalized_params": {"config_content": content}},
         string_limits={
-            ("normalized_params", "compose_content"): 1024 * 1024,
+            ("normalized_params", "config_content"): 1024 * 1024,
         },
     )
 
-    stored_content = redacted["normalized_params"]["compose_content"]
+    stored_content = redacted["normalized_params"]["config_content"]
+    assert stored_content == "services:\n  akvorado:\n    environment:\n[REDACTED]"
     assert "hunter2" not in stored_content
     assert "more-secret-line" not in stored_content
-    assert yaml.safe_load(stored_content)["services"]["akvorado"]["environment"][
-        "password"
-    ] == "[REDACTED]"
 
 
-def test_large_compose_content_redacts_single_line_secret(
+def test_large_config_content_redacts_single_line_secret(
     event_store_module,
 ) -> None:
     event_store, _ = event_store_module
     content = "environment:\n  secret: hunter2\n"
 
     redacted = event_store.redact_event_data(
-        {"normalized_params": {"compose_content": content}},
+        {"normalized_params": {"config_content": content}},
         string_limits={
-            ("normalized_params", "compose_content"): 1024 * 1024,
+            ("normalized_params", "config_content"): 1024 * 1024,
         },
     )
 
-    stored_content = redacted["normalized_params"]["compose_content"]
+    stored_content = redacted["normalized_params"]["config_content"]
+    assert stored_content == "environment:\n[REDACTED]\n"
     assert "hunter2" not in stored_content
-    assert yaml.safe_load(stored_content)["environment"]["secret"] == "[REDACTED]"
 
 
-def test_large_compose_content_redacts_secret_shaped_scalars(
+def test_large_config_content_redacts_secret_shaped_scalars(
     event_store_module,
 ) -> None:
     event_store, _ = event_store_module
-    contents = (
-        "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
-        "args:\n  - PASSWORD=hunter2\n",
+    cases = (
+        (
+            "endpoints:\n  - https://alice:hunter2@example.invalid/api\n",
+            "endpoints:\n  - [REDACTED]example.invalid/api\n",
+        ),
+        (
+            "args:\n  - PASSWORD=hunter2\n",
+            "args:\n  [REDACTED]\n",
+        ),
     )
 
-    for content in contents:
+    for content, expected in cases:
         redacted = event_store.redact_event_data(
-            {"normalized_params": {"compose_content": content}},
+            {"normalized_params": {"config_content": content}},
             string_limits={
-                ("normalized_params", "compose_content"): 1024 * 1024,
+                ("normalized_params", "config_content"): 1024 * 1024,
             },
         )
 
-        assert "hunter2" not in str(redacted)
+        assert redacted["normalized_params"]["config_content"] == expected
+
+
+def test_large_config_content_redacts_slash_prefixed_secret(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "settings:\n  password: /hunter2\n"
+
+    redacted = event_store.redact_event_data(
+        {"normalized_params": {"config_content": content}},
+        string_limits={
+            ("normalized_params", "config_content"): 1024 * 1024,
+        },
+    )
+
+    assert redacted["normalized_params"]["config_content"] == (
+        "settings:\n[REDACTED]\n"
+    )
 
 
 def test_large_non_yaml_content_keeps_existing_regex_fallback_behavior(

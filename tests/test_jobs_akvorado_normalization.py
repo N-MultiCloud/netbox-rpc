@@ -14,11 +14,9 @@ import pytest
 PROCEDURE_NAMES = (
     "service.akvorado.1.config_read",
     "service.akvorado.1.config_deploy",
-    "service.akvorado.1.deploy_stack",
     "service.akvorado.1.status_stack",
     "service.akvorado.1.restart_stack",
 )
-ENV_CONTENT_REF = "nms-secret:123e4567-e89b-42d3-a456-426614174000"
 
 
 @pytest.fixture()
@@ -37,17 +35,6 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
         (
             "service.akvorado.1.config_deploy",
             {"config_content": "inlet:\n  kafka:\n    topic: flows\n"},
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
         ),
         ("service.akvorado.1.status_stack", {}),
         ("service.akvorado.1.restart_stack", {}),
@@ -74,22 +61,17 @@ def test_all_akvorado_procedures_normalize_for_worker_dispatch(
         "target_object"
     ]
 
-    for field_name in ("config_content", "compose_content"):
-        if field_name not in params:
-            assert field_name not in normalized
-            continue
-        content = str(params[field_name])
-        assert normalized[field_name] == content
+    if "config_content" in params:
+        content = str(params["config_content"])
+        assert normalized["config_content"] == content
         fingerprint = normalized["command_fingerprint"]
         assert content not in str(fingerprint)
-        assert fingerprint[f"{field_name}_sha256"] == hashlib.sha256(
+        assert fingerprint["config_content_sha256"] == hashlib.sha256(
             content.encode("utf-8")
         ).hexdigest()
-        assert fingerprint[f"{field_name}_bytes"] == len(content.encode("utf-8"))
-
-    if procedure_name.endswith("deploy_stack"):
-        assert normalized["env_content"] == ENV_CONTENT_REF
-        assert normalized["command_fingerprint"]["env_content_ref"] == ENV_CONTENT_REF
+        assert fingerprint["config_content_bytes"] == len(content.encode("utf-8"))
+    else:
+        assert "config_content" not in normalized
 
 
 @pytest.mark.parametrize("procedure_name", PROCEDURE_NAMES)
@@ -107,422 +89,44 @@ def test_akvorado_normalization_requires_existing_assigned_object(
 
 
 @pytest.mark.parametrize(
-    ("procedure_name", "params", "error_code"),
+    ("content", "error_code"),
     [
+        ("", "RPC_PARAM_INVALID"),
+        (" \n", "RPC_PARAM_INVALID"),
+        ("x" * (1024 * 1024 + 1), "RPC_PARAM_INVALID"),
+        ("inlet:\x00\n", "RPC_PARAM_INVALID"),
+        ("inlet:\u0001\n", "RPC_PARAM_INVALID"),
         (
-            "service.akvorado.1.config_deploy",
-            {"config_content": "inlet:\x00\n"},
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.config_deploy",
-            {"config_content": "inlet:\u0001\n"},
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.config_deploy",
-            {"config_content": "password: plaintext\n"},
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
+        ("password: plaintext\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ("authorization: Bearer-token\n", "RPC_PARAM_SECRET_FORBIDDEN"),
         (
-            "service.akvorado.1.config_deploy",
-            {"config_content": "endpoint: https://user:pass@example.net\n"},
+            "endpoint: https://user:pass@example.net\n",
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
+        ("password: /hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
         (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": "services:\n  akvorado:\x00\n",
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": "services:\n  akvorado:\n    api_key: plaintext\n",
-                "env_content": ENV_CONTENT_REF,
-            },
+            "password: |\n  hunter2\n  more-secret-line\n",
             "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    environment:\n"
-                    "      PUBLIC_URL: https://akvorado.example.net\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    environment:\n"
-                    "      PUBLIC_URL: ${PUBLIC_URL:-https://akvorado.example.net}\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    '    "environment":\n'
-                    "      FOO: hunter2\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    " akvorado:\n"
-                    "   deploy: {environment: {FOO: hunter2}}\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    env_file: [.env]\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_SECRET_FORBIDDEN",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    privileged: true\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    volumes:\n"
-                    "      - root:/host\n"
-                    "volumes:\n"
-                    "  root:\n"
-                    "    driver: local\n"
-                    "    driver_opts:\n"
-                    "      type: none\n"
-                    "      o: bind\n"
-                    '      device: "/"\n'
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": "volumes:\n  evil:\n    external: true\n",
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": "volumes:\n  'bad name!': null\n",
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    command: [akvorado, orchestrator, --clickhouse-password, hunter2]\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    healthcheck:\n"
-                    '      test: ["CMD", "curl", "-u", "admin:hunter2", "http://localhost/health"]\n'
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    '      - "${HOST_PATH:-/}:/host"\n'
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    "      - type: ${MOUNT_TYPE:-bind}\n"
-                    "        source: /\n"
-                    "        target: /host\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    "      - type: bind\n"
-                    "        source: ${ETC_PATH}\n"
-                    "        target: /host\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    '      - "not a valid volume!:/data"\n'
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    network_mode: host\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    cap_add: [SYS_ADMIN]\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    '    devices: ["/dev/kvm:/dev/kvm"]\n'
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    build: .\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    "      - /:/host:ro\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "    volumes:\n"
-                    "      - type: bind\n"
-                    "        source: /var/run/docker.sock\n"
-                    "        target: /var/run/docker.sock\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
-        ),
-        (
-            "service.akvorado.1.deploy_stack",
-            {
-                "compose_content": (
-                    "services:\n"
-                    "  akvorado:\n"
-                    "    image: akvorado:latest\n"
-                    "secrets:\n"
-                ),
-                "env_content": ENV_CONTENT_REF,
-            },
-            "RPC_PARAM_INVALID",
         ),
     ],
 )
-def test_akvorado_normalization_rejects_unsafe_content(
+def test_akvorado_normalization_rejects_unsafe_config_content(
     jobs_module,
-    procedure_name: str,
-    params: dict[str, object],
+    content: str,
     error_code: str,
 ) -> None:
     with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
-        jobs_module.normalize_execution_params(_execution(procedure_name, params))
-
-    assert exc_info.value.code == error_code
-
-
-def test_compose_environment_allows_only_exact_external_references(jobs_module) -> None:
-    compose_content = (
-        "services:\n"
-        "  akvorado:\n"
-        '    "environment": # externally supplied\n'
-        "      - PUBLIC_URL=${PUBLIC_URL}\n"
-        "      - LOG_LEVEL\n"
-    )
-
-    normalized = jobs_module.normalize_execution_params(
-        _execution(
-            "service.akvorado.1.deploy_stack",
-            {"compose_content": compose_content, "env_content": ENV_CONTENT_REF},
-        )
-    )
-
-    assert normalized["compose_content"] == compose_content
-
-
-def test_compose_structure_accepts_realistic_akvorado_stack(jobs_module) -> None:
-    compose_content = (
-        "name: akvorado\n"
-        "services:\n"
-        "  akvorado:\n"
-        "    image: ghcr.io/akvorado/akvorado:latest\n"
-        "    ports:\n"
-        '      - "8080:8080"\n'
-        "    volumes:\n"
-        "      - /etc/akvorado/akvorado.yaml:/etc/akvorado/akvorado.yaml:ro\n"
-        "      - akvorado-data:/var/lib/akvorado\n"
-        "    environment:\n"
-        "      KAFKA_BROKERS: ${KAFKA_BROKERS}\n"
-        "      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}\n"
-        "    depends_on:\n"
-        "      - clickhouse\n"
-        "      - redis\n"
-        "    restart: unless-stopped\n"
-        "  clickhouse:\n"
-        "    image: clickhouse/clickhouse-server:latest\n"
-        "    volumes:\n"
-        "      - clickhouse-data:/var/lib/clickhouse\n"
-        "    restart: unless-stopped\n"
-        "  redis:\n"
-        "    image: redis:latest\n"
-        "    restart: unless-stopped\n"
-        "volumes:\n"
-        "  akvorado-data: {}\n"
-        "  clickhouse-data: {}\n"
-    )
-
-    normalized = jobs_module.normalize_execution_params(
-        _execution(
-            "service.akvorado.1.deploy_stack",
-            {"compose_content": compose_content, "env_content": ENV_CONTENT_REF},
-        )
-    )
-
-    assert normalized["compose_content"] == compose_content
-
-
-def test_compose_environment_rejects_invalid_yaml_cleanly(jobs_module) -> None:
-    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
         jobs_module.normalize_execution_params(
             _execution(
-                "service.akvorado.1.deploy_stack",
-                {
-                    "compose_content": "services:\n  akvorado: [\n",
-                    "env_content": ENV_CONTENT_REF,
-                },
+                "service.akvorado.1.config_deploy",
+                {"config_content": content},
             )
         )
 
-    assert exc_info.value.code == "RPC_PARAM_INVALID"
+    assert exc_info.value.code == error_code
 
 
 def test_akvorado_target_identity_disambiguates_duplicate_display_names(

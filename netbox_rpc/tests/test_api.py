@@ -48,10 +48,7 @@ def _akvorado_procedure(name: str, *, approval_required: bool = False):
     procedure.params_schema = {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            "compose_content": {"type": "string", "minLength": 1},
-            "env_content": {"type": "string", "minLength": 1},
-        },
+        "properties": {},
     }
     procedure.save()
     return procedure
@@ -214,34 +211,3 @@ class AkvoradoCreationSecurityTests(TestCase):
 
         assert execution.assigned_object_id == self.device.pk
         assert execution.requested_by_id == user.pk
-
-    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
-    def test_unsafe_quoted_compose_environment_is_rejected_before_save(
-        self,
-        enqueue,
-    ):
-        procedure = _akvorado_procedure(
-            "service.akvorado.1.deploy_stack",
-            approval_required=True,
-        )
-        procedure.params_schema["required"] = ["compose_content", "env_content"]
-        procedure.save(update_fields=["params_schema"])
-        user = make_user("akvorado-compose-creator", superuser=True)
-        params = {
-            "compose_content": (
-                "services:\n"
-                "  akvorado:\n"
-                '    "environment":\n'
-                "      FOO: hunter2\n"
-            ),
-            "env_content": "nms-secret:123e4567-e89b-42d3-a456-426614174000",
-        }
-
-        with self.assertRaises(ValidationError):
-            command_handlers.create_execution(
-                serializer=self._serializer(procedure=procedure, params=params),
-                user=user,
-            )
-
-        assert not RPCExecution.objects.filter(procedure=procedure).exists()
-        enqueue.assert_not_called()

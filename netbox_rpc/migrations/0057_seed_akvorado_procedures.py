@@ -1,8 +1,8 @@
 """Seed the Akvorado v1 service-management procedure catalog.
 
-File bodies are structured executor input.  The backend must consume config,
-Compose, and referenced env-file content through ``input_data``; none of these
-values may be substituted into a shell command line.
+File bodies are structured executor input. The backend must consume config
+content through ``input_data``; it may not be substituted into a shell command
+line.
 """
 
 from django.db import migrations
@@ -17,7 +17,13 @@ _SECRET_CONTENT_PATTERNS = (
         r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
         r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
         r"private[-_]?key|credential)"
-        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+"
+        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']+"
+    ),
+    (
+        r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
+        r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+        r"private[-_]?key|credential)"
+        r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
     ),
     r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
@@ -32,18 +38,6 @@ _INPUT_DATA_CONTENT = {
     "description": (
         "Non-secret file content transported to the SSH executor through structured "
         "input_data; never interpolated into shell argv."
-    ),
-}
-_ENV_CONTENT_REFERENCE = {
-    "type": "string",
-    "pattern": (
-        r"^nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
-        r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}(?![\s\S])"
-    ),
-    "description": (
-        "Reference pointer to backend-managed env-file content. The executor resolves "
-        "the reference and supplies the bytes through structured input_data; plaintext "
-        "env secrets are never stored in RPC params or argv."
     ),
 }
 
@@ -116,33 +110,6 @@ AKVORADO_PROCEDURES = (
         "params_schema": _params(
             ("config_content",),
             {"config_content": _INPUT_DATA_CONTENT},
-        ),
-        "result_schema": _result(
-            ("deploy_status", "validation_output"),
-            {"deploy_status": _STATUS, "validation_output": _OUTPUT},
-        ),
-    },
-    {
-        "name": "service.akvorado.1.deploy_stack",
-        "handler_id": "service.akvorado.1.deploy_stack",
-        "target_models": _TARGET_MODELS,
-        "effect": "write",
-        "timeout_seconds": 300,
-        "approval_required": True,
-        "transport_driver": "asyncssh",
-        "transport_driver_chain": [],
-        "output_parser": "none",
-        "output_schema": {},
-        "description": (
-            "Deploy the Akvorado Compose stack from structured input_data and an "
-            "env-content secret reference."
-        ),
-        "params_schema": _params(
-            ("compose_content", "env_content"),
-            {
-                "compose_content": _INPUT_DATA_CONTENT,
-                "env_content": _ENV_CONTENT_REFERENCE,
-            },
         ),
         "result_schema": _result(
             ("deploy_status", "validation_output"),
@@ -224,17 +191,10 @@ def seed_akvorado_procedures(apps, schema_editor):
 
 
 def unseed_akvorado_procedures(apps, schema_editor):
-    RPCExecution = apps.get_model("netbox_rpc", "RPCExecution")
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    procedures = RPCProcedure.objects.filter(
+    RPCProcedure.objects.filter(
         name__in=[item["name"] for item in AKVORADO_PROCEDURES]
-    )
-    for procedure in procedures:
-        if RPCExecution.objects.filter(procedure_id=procedure.pk).exists():
-            procedure.enabled = False
-            procedure.save(update_fields=["enabled"])
-        else:
-            procedure.delete()
+    ).update(enabled=False)
 
 
 class Migration(migrations.Migration):

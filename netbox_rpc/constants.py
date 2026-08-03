@@ -219,14 +219,12 @@ INFLUXDB_1_PROCEDURE_NAMES = frozenset(
 
 AKVORADO_1_CONFIG_READ = "service.akvorado.1.config_read"
 AKVORADO_1_CONFIG_DEPLOY = "service.akvorado.1.config_deploy"
-AKVORADO_1_DEPLOY_STACK = "service.akvorado.1.deploy_stack"
 AKVORADO_1_STATUS_STACK = "service.akvorado.1.status_stack"
 AKVORADO_1_RESTART_STACK = "service.akvorado.1.restart_stack"
 AKVORADO_1_PROCEDURE_NAMES = frozenset(
     {
         AKVORADO_1_CONFIG_READ,
         AKVORADO_1_CONFIG_DEPLOY,
-        AKVORADO_1_DEPLOY_STACK,
         AKVORADO_1_STATUS_STACK,
         AKVORADO_1_RESTART_STACK,
     }
