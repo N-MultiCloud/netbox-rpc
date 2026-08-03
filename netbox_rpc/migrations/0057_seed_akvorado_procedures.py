@@ -11,21 +11,25 @@ from django.db import migrations
 _TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
 _MAX_FILE_CONTENT = 1024 * 1024
 _MAX_OUTPUT = 64 * 1024
+# Best-effort defense in depth, not a complete secret detector. Durable storage
+# relies on unconditional event-store redaction; the future backend renderer
+# must accept credential references rather than literal secrets.
 _SECRET_CONTENT_PATTERNS = (
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
     (
         r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
         r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
         r"private[-_]?key|credential)"
-        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']+"
+        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[ \t]*[^\s\"']+"
     ),
     (
         r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
         r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
         r"private[-_]?key|credential)"
-        r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
+        r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
+        r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
     ),
-    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+$",
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]",
 )

@@ -11,7 +11,7 @@ from rest_framework.exceptions import ValidationError
 from netbox_rpc.application import command_handlers
 from netbox_rpc.backends import BackendTarget
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
-from netbox_rpc.models import RPCExecution
+from netbox_rpc.models import RPCExecution, RPCProcedure
 
 from ._common import (
     enable_rpc_integration,
@@ -68,6 +68,29 @@ class RunExecutionTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_FAILED
         assert ex.error_code == "RPC_BACKEND_NOT_CONFIGURED"
+
+    def test_disabled_akvorado_procedure_fails_before_worker_dispatch(self):
+        procedure = make_procedure("service.akvorado.1.config_read")
+        RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=True)
+        procedure.refresh_from_db()
+        ex = make_execution(procedure=procedure)
+        RPCExecutionAggregate(ex).queue()
+        RPCProcedure.objects.filter(pk=procedure.pk).update(enabled=False)
+        ex.refresh_from_db()
+
+        with (
+            mock.patch.object(command_handlers, "resolve_backend") as resolve,
+            mock.patch("netbox_rpc.jobs._call_backend") as dispatch,
+        ):
+            command_handlers.run_execution(ex)
+
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_FAILED
+        assert ex.error_code == "RPC_PROCEDURE_DISABLED"
+        assert "ExecutionStarted" not in event_names(ex)
+        assert event_names(ex)[-1] == "ExecutionFailed"
+        resolve.assert_not_called()
+        dispatch.assert_not_called()
 
     def test_malformed_akvorado_config_deploy_result_fails_closed(self):
         self._assert_malformed_akvorado_result_fails_closed(

@@ -101,7 +101,10 @@ def test_akvorado_normalization_requires_existing_assigned_object(
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
         ("password: plaintext\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ('password: " hunter2"\n', "RPC_PARAM_SECRET_FORBIDDEN"),
         ("authorization: Bearer-token\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ("Authorization: Bearer hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ("authorization=hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
         (
             "endpoint: https://user:pass@example.net\n",
             "RPC_PARAM_SECRET_FORBIDDEN",
@@ -111,6 +114,9 @@ def test_akvorado_normalization_requires_existing_assigned_object(
             "password: |\n  hunter2\n  more-secret-line\n",
             "RPC_PARAM_SECRET_FORBIDDEN",
         ),
+        ("password: |2\n  hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ("password: |-2\n  hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
+        ("password: |2-\n  hunter2\n", "RPC_PARAM_SECRET_FORBIDDEN"),
     ],
 )
 def test_akvorado_normalization_rejects_unsafe_config_content(
@@ -127,6 +133,21 @@ def test_akvorado_normalization_rejects_unsafe_config_content(
         )
 
     assert exc_info.value.code == error_code
+
+
+def test_akvorado_normalization_allows_non_secret_block_and_author_text(
+    jobs_module,
+) -> None:
+    content = "description: |2\n  hello\nbiographer: the author wrote this\n"
+
+    normalized = jobs_module.normalize_execution_params(
+        _execution(
+            "service.akvorado.1.config_deploy",
+            {"config_content": content},
+        )
+    )
+
+    assert normalized["config_content"] == content
 
 
 def test_akvorado_target_identity_disambiguates_duplicate_display_names(

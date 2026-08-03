@@ -55,12 +55,13 @@ _SECRET_CONTENT_RE = re.compile(
     r"|(?m:^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
+    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+$)"
     r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']+)"
-    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+)"
     r"|(?i:\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@)"
 )
 
@@ -126,8 +127,7 @@ def redact_event_value(
     if isinstance(value, str):
         limits = string_limits or {}
         max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
-        if path in limits:
-            value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
+        value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
         if len(value) > max_length:
             return f"{value[:max_length]}...[truncated]"
         return value
@@ -166,11 +166,12 @@ def append_execution_event(
     """Append one durable execution event with per-execution sequence ordering."""
     sequence = _next_event_sequence(execution)
     event_data = redact_event_data(data, string_limits=string_limits)
+    redacted_message = _SECRET_CONTENT_RE.sub("[REDACTED]", message)
     payload_hash = _stable_hash(
         {
             "level": level,
             "event": event,
-            "message": message,
+            "message": redacted_message,
             "data": event_data,
         }
     )
@@ -182,7 +183,7 @@ def append_execution_event(
                     sequence=sequence,
                     level=level,
                     event=event,
-                    message=message,
+                    message=redacted_message,
                     data=event_data,
                     payload_hash=payload_hash,
                 )
@@ -217,7 +218,8 @@ def _append_and_project(
         event.data,
         string_limits=string_limits,
     )
-    projected = apply(ProjectionState.from_execution(execution), event)
+    redacted_event = type(event).from_data(record.data)
+    projected = apply(ProjectionState.from_execution(execution), redacted_event)
     _write_projection(execution, projected)
     return record
 

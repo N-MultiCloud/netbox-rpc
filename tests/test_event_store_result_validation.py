@@ -238,6 +238,47 @@ def test_large_config_content_redacts_block_scalar_secret(
     assert "more-secret-line" not in stored_content
 
 
+@pytest.mark.parametrize("indicator", ("|2", "|-2", "|2-"))
+def test_block_scalar_indent_indicators_redact_the_full_secret_body(
+    event_store_module,
+    indicator: str,
+) -> None:
+    event_store, _ = event_store_module
+    content = f"password: {indicator}\n  hunter2\n"
+
+    redacted = event_store.redact_event_data({"detail": content})
+
+    assert redacted["detail"] == "[REDACTED]"
+    assert "hunter2" not in redacted["detail"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ("Authorization: Bearer hunter2", "authorization=hunter2"),
+)
+def test_authorization_redaction_consumes_the_rest_of_the_line(
+    event_store_module,
+    content: str,
+) -> None:
+    event_store, _ = event_store_module
+
+    redacted = event_store.redact_event_data({"detail": content})
+
+    assert redacted["detail"] == "[REDACTED]"
+    assert "hunter2" not in redacted["detail"]
+
+
+def test_non_secret_block_scalar_and_author_word_are_untouched(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    content = "description: |2\n  hello\nbiographer: the author wrote this\n"
+
+    redacted = event_store.redact_event_data({"detail": content})
+
+    assert redacted["detail"] == content
+
+
 def test_large_config_content_redacts_single_line_secret(
     event_store_module,
 ) -> None:

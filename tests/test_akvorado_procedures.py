@@ -239,9 +239,15 @@ def test_content_contract_uses_input_data_and_safe_representative_argv(migration
     [
         "valid:\x00false\n",
         "password: plaintext\n",
+        'password: " hunter2"\n',
         "password: /hunter2\n",
         "password: |\n  hunter2\n  more-secret-line\n",
+        "password: |2\n  hunter2\n",
+        "password: |-2\n  hunter2\n",
+        "password: |2-\n  hunter2\n",
         "authorization: Bearer-token\n",
+        "Authorization: Bearer hunter2\n",
+        "authorization=hunter2\n",
         "endpoint: https://user:pass@example.net\n",
         "-----BEGIN OPENSSH PRIVATE KEY-----\n",
     ],
@@ -257,6 +263,16 @@ def test_content_schema_rejects_nul_and_plaintext_secrets(
             {"config_content": content},
             by_name["service.akvorado.1.config_deploy"]["params_schema"],
         )
+
+
+def test_content_schema_allows_non_secret_block_and_author_text(migration) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+    content = "description: |2\n  hello\nbiographer: the author wrote this\n"
+
+    validate(
+        {"config_content": content},
+        by_name["service.akvorado.1.config_deploy"]["params_schema"],
+    )
 
 
 def _model_lookup(app_label: str, model_name: str):

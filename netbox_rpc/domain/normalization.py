@@ -225,22 +225,29 @@ _INFLUXDB_SECRET_REF_RE = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
+# Best-effort defense in depth, not a complete secret detector. Durable storage
+# relies on unconditional event-store redaction; the future backend renderer
+# must accept credential references rather than literal secrets.
 _AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
     r"private[-_]?key|credential)"
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
-    r"[\"']?[^\s\"']+"
+    r"[\"']?[ \t]*[^\s\"']+"
 )
+# Best-effort defense in depth, not a complete secret detector. Durable storage
+# relies on unconditional event-store redaction; the future backend renderer
+# must accept credential references rather than literal secrets.
 _AKVORADO_BLOCK_SCALAR_SECRET_RE = re.compile(
     r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
     r"private[-_]?key|credential)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>][+-]?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
+    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*$(?:\n(?:\1[ \t].*|[ \t]*$))*"
 )
 _AKVORADO_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _AKVORADO_AUTHORIZATION_RE = re.compile(
-    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+"
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+$"
 )
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"

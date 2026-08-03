@@ -63,9 +63,49 @@ class EventStoreProjectionTests(TestCase):
         np = ev.data["normalized_params"]
         assert np["password"] == "[REDACTED]"
         assert np["rpc_ssh_credential_pk"] == 7
-        # The projection keeps the raw operational value for dispatch.
         ex.refresh_from_db()
-        assert ex.normalized_params["password"] == "topsecret"
+        assert ex.normalized_params["password"] == "[REDACTED]"
+        assert event_store.rebuild_projection(ex) == ProjectionState.from_execution(ex)
+
+    def test_failure_and_progress_strings_redact_without_registered_limits(self):
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.record_backend_response(
+            {
+                "ok": False,
+                "error_code": "RPC_VALIDATION_FAILED",
+                "error_message": "password: hunter2",
+                "events": [
+                    {
+                        "level": "info",
+                        "event": "BackendProgress",
+                        "message": "Authorization: Bearer hunter2",
+                        "data": {"detail": "password: hunter2"},
+                    }
+                ],
+            }
+        )
+
+        ex.refresh_from_db()
+        progress = ex.events.get(event="BackendProgress")
+        failure = ex.events.get(event="ExecutionFailed")
+        assert progress.message == "[REDACTED]"
+        assert progress.data["detail"] == "[REDACTED]"
+        assert failure.message == "[REDACTED]"
+        assert failure.data["error_message"] == "[REDACTED]"
+        assert ex.error_message == "[REDACTED]"
+        assert "hunter2" not in str(progress.data)
+        assert "hunter2" not in str(failure.data)
+        assert failure.payload_hash == event_store._stable_hash(
+            {
+                "level": failure.level,
+                "event": failure.event,
+                "message": failure.message,
+                "data": failure.data,
+            }
+        )
 
 
 class RebuildOracleTests(TestCase):
@@ -102,6 +142,29 @@ class RebuildOracleTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_FAILED
         assert ex.error_code == "RPC_TEST_FAIL"
+
+    def test_redacted_live_normalized_projection_matches_ledger_rebuild(self):
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.normalize(
+            {
+                "config_content": 'password = "/hunter2"\n',
+                "command_fingerprint": {},
+            },
+            "hash123",
+        )
+
+        ex.refresh_from_db()
+        normalized = ex.events.get(event="ParametersNormalized")
+        rebuilt = event_store.rebuild_projection(ex)
+        expected = '[REDACTED]"\n'
+        assert normalized.data["normalized_params"]["config_content"] == expected
+        assert ex.normalized_params["config_content"] == expected
+        assert rebuilt.normalized_params["config_content"] == expected
+        assert rebuilt == ProjectionState.from_execution(ex)
+        assert "hunter2" not in str(ex.normalized_params)
 
     def test_cancelled_path(self):
         ex = make_execution()
@@ -177,7 +240,7 @@ class RebuildOracleTests(TestCase):
             "services:\n"
             "  akvorado:\n"
             "    environment:\n"
-            "      password: |\n"
+            "      password: |2\n"
             "        hunter2\n"
             "        more-secret-line\n"
         )

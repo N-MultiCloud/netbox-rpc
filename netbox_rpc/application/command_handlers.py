@@ -208,6 +208,18 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
             pass
         return
 
+    procedure = getattr(execution, "procedure", None)
+    if procedure is not None and not getattr(procedure, "enabled", True):
+        try:
+            RPCExecutionAggregate(execution).fail(
+                "The RPC procedure for this execution has been disabled; "
+                "execution not dispatched.",
+                "RPC_PROCEDURE_DISABLED",
+            )
+        except RPCExecutionAggregateError:
+            pass
+        return
+
     try:
         execution = _transition_locked(execution, lambda agg: agg.start())
     except RPCExecutionAggregateError:
