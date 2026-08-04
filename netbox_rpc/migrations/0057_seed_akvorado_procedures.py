@@ -102,12 +102,14 @@ AKVORADO_PROCEDURES = (
         "handler_id": "service.akvorado.1.config_deploy",
         "target_models": _TARGET_MODELS,
         "effect": "write",
-        # Handler's own sequential SSH-step budget, worst case (stage 30 +
-        # validate 60 + snapshot 20 + activate 15 + restart 60 + rollback
-        # restore 15 + rollback restart 60 = 260s); stay comfortably above it
-        # so the HTTP client deadline (timeout_seconds + 10) never fires
-        # before the handler's own rollback path can complete.
-        "timeout_seconds": 300,
+        # Handler's own sequential SSH-step budget, worst case: stage 30 +
+        # validate 60 + snapshot 20 + activate 15 + restart 60 + forward
+        # health-wait 60 (post-restart orchestrator-healthy poll, round-4
+        # fix) + rollback restore 15 + rollback restart 60 + rollback
+        # health-wait 60 = 380s. Stay comfortably above it so the HTTP
+        # client deadline (timeout_seconds + 10) never fires before the
+        # handler's own rollback path can complete.
+        "timeout_seconds": 450,
         "approval_required": True,
         "transport_driver": "asyncssh",
         "transport_driver_chain": [],
