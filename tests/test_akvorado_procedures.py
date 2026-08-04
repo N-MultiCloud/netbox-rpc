@@ -87,9 +87,9 @@ def test_seed_creates_four_standalone_procedures_and_safe_command_rows(migration
         for name, procedure in procedures.rows.items()
     } == {
         "service.akvorado.1.config_read": 30,
-        "service.akvorado.1.config_deploy": 120,
-        "service.akvorado.1.status_stack": 60,
-        "service.akvorado.1.restart_stack": 120,
+        "service.akvorado.1.config_deploy": 300,
+        "service.akvorado.1.status_stack": 90,
+        "service.akvorado.1.restart_stack": 420,
     }
 
 
