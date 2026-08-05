@@ -324,6 +324,27 @@ def test_dispatch_lease_key_lineage_references_are_not_redacted(
     assert reconstructed.key_version == 7
 
 
+def test_samba_password_fingerprint_is_preserved_but_plaintext_is_redacted(
+    event_store_module,
+) -> None:
+    event_store, _ = event_store_module
+    fingerprint = "a" * 64
+
+    redacted = event_store.redact_event_data(
+        {
+            "password": "hunter2",
+            "password_sha256": fingerprint,
+            "password_bytes": 7,
+        }
+    )
+
+    assert redacted == {
+        "password": "[REDACTED]",
+        "password_bytes": 7,
+        "password_sha256": fingerprint,
+    }
+
+
 def test_large_config_content_redacts_single_line_secret(
     event_store_module,
 ) -> None:

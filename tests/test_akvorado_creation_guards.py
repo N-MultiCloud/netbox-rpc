@@ -14,7 +14,10 @@ import pytest
 @pytest.fixture()
 def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     class ValidationError(Exception):
-        pass
+        def __init__(self, detail, *, code=None):
+            super().__init__(detail)
+            self.detail = detail
+            self.code = code
 
     class PermissionDenied(Exception):
         pass
@@ -153,6 +156,7 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
             object(),
         )
 
+    assert exc_info.value.code == "does_not_exist"
     assert "does not exist" in str(exc_info.value)
 
 

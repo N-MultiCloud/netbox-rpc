@@ -202,7 +202,8 @@ def _require_akvorado_assigned_object(
     object_id = validated_data.get("assigned_object_id")
     if content_type is None or object_id is None:
         raise drf_serializers.ValidationError(
-            {"assigned_object_id": "An assigned NetBox object is required."}
+            {"assigned_object_id": "An assigned NetBox object is required."},
+            code="required",
         )
     try:
         model_class = content_type.model_class()
@@ -215,7 +216,8 @@ def _require_akvorado_assigned_object(
         assigned_object = None
     if assigned_object is None:
         raise drf_serializers.ValidationError(
-            {"assigned_object_id": "The assigned NetBox object does not exist."}
+            {"assigned_object_id": "The assigned NetBox object does not exist."},
+            code="does_not_exist",
         )
 
 

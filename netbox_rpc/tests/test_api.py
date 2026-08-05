@@ -115,7 +115,9 @@ class ExecutionApiTests(TestCase):
         )
 
         assert resp.status_code == 400, resp.content
-        assert "does not exist" in str(resp.data["assigned_object_id"])
+        detail = resp.data["assigned_object_id"]
+        assert getattr(detail, "code", None) == "does_not_exist", resp.data
+        assert "does not exist" in str(detail), resp.data
         assert not RPCExecution.objects.filter(procedure=procedure).exists()
 
     def test_put_and_patch_are_method_not_allowed(self):
