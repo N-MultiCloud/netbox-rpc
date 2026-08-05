@@ -88,7 +88,7 @@ def test_seed_creates_four_standalone_procedures_and_safe_command_rows(migration
     } == {
         "service.akvorado.1.config_read": 30,
         "service.akvorado.1.config_deploy": 450,
-        "service.akvorado.1.status_stack": 90,
+        "service.akvorado.1.status_stack": 150,
         "service.akvorado.1.restart_stack": 420,
     }
 
