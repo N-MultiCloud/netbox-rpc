@@ -12,6 +12,10 @@ dependencies = [
     # Jinja2 backs command-template validation (render_mode="jinja"). NetBox
     # already ships it; declared explicitly so standalone/CI installs have it.
     "Jinja2>=3.1",
+    # PyYAML backs the Akvorado config-content secret-key decode check
+    # (domain/normalization.py). NetBox already ships it; declared explicitly
+    # so standalone/CI installs have it.
+    "PyYAML>=6.0",
 ]
 authors = [
     {name = "Emerson Felipe", email = "emerson.felipe@nmultifibra.com.br"},

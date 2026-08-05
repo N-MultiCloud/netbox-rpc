@@ -282,6 +282,10 @@ per-execution sequence cannot be allocated, the command state transition raises
 instead of silently dropping audit history. The execution-event API is read-only,
 model saves reject normal update/delete, and the migration installs PostgreSQL
 triggers so the event ledger remains append-only below the ORM.
+Before a truthy backend response can append `ExecutionSucceeded`, the raw inner
+`result` is validated against the procedure's `result_schema`. A mismatch emits
+`ExecutionFailed` with `RPC_RESULT_SCHEMA_MISMATCH` and a bounded, value-free
+diagnostic instead of projecting malformed output as success.
 
 `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
 (with its `RPCIntentProcedure` through model) are deliberate
@@ -468,6 +472,36 @@ use `netbox-nms` secret references for credentials. Onboarding accepts no
 caller-supplied plaintext. The execution backend generates or resolves secrets
 only in memory, uses fixed loopback product APIs, and returns only references
 and non-secret resource identifiers.
+
+### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
+
+Migration `0057` seeds four typed procedures targeting `dcim.device` and
+`virtualization.virtualmachine`.
+
+| Procedure | Effect | Timeout | Purpose |
+|---|---|---|---|
+| `config_read` | read | 30s | Read the current `akvorado.yaml` content |
+| `status_stack` | read | 60s | Read the current Compose stack status |
+| `config_deploy` | write | 120s | Validate and deploy `akvorado.yaml` from structured `input_data` |
+| `restart_stack` | write | 120s | Restart the Compose stack and report status |
+
+Both write procedures set `approval_required=True`. `config_content` is a
+structured `input_data` string payload — never argv-interpolated — and only its
+sha256 digest and byte count enter the command fingerprint. NUL/unsafe control
+characters, plaintext secret assignments, credential URLs, and private keys are
+rejected before persistence/dispatch. All four handler IDs are
+listed in `command_contract.EXEMPT_HANDLER_RATIONALE` and seeded with one
+`backend-orchestrated` representative command row each, since Akvorado
+config deployment is backend-orchestrated content handling, not fixed argv.
+This catalog is the only sanctioned way to read or change Akvorado config or
+stack lifecycle state; `netbox-observability`'s
+`AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
+metadata only.
+
+The API accepts no caller-controlled Akvorado host/`target` parameter. Every
+execution must reference an existing assigned `dcim.device` or
+`virtualization.virtualmachine`; normalization derives the backend target name
+only from that NetBox object so request params cannot pivot SSH dispatch.
 
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 

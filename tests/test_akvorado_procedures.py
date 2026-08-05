@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from jsonschema import Draft202012Validator, ValidationError, validate
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATION_MODULE = "netbox_rpc.migrations.0057_seed_akvorado_procedures"
+PROCEDURE_NAMES = {
+    "service.akvorado.1.config_read",
+    "service.akvorado.1.config_deploy",
+    "service.akvorado.1.status_stack",
+    "service.akvorado.1.restart_stack",
+}
+TARGET = "akvorado-01.example.net"
+
+
+@pytest.fixture()
+def migration(monkeypatch: pytest.MonkeyPatch):
+    _install_migration_import_stubs(monkeypatch)
+    sys.modules.pop(MIGRATION_MODULE, None)
+    module = importlib.import_module(MIGRATION_MODULE)
+    yield module
+    sys.modules.pop(MIGRATION_MODULE, None)
+
+
+def test_seed_creates_four_standalone_procedures_and_safe_command_rows(migration) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+    apps = SimpleNamespace(get_model=_model_lookup)
+
+    migration.seed_akvorado_procedures(apps, None)
+
+    assert migration.Migration.dependencies == [
+        ("netbox_rpc", "0056_seed_influxdb_onboarding_procedures")
+    ]
+    assert set(procedures.rows) == PROCEDURE_NAMES
+    assert len(commands.rows) == 4
+    for name, procedure in procedures.rows.items():
+        assert procedure["handler_id"] == name
+        assert procedure["version"] == 1
+        assert procedure["enabled"] is False
+        assert procedure["target_models"] == [
+            "dcim.device",
+            "virtualization.virtualmachine",
+        ]
+        assert procedure["transport_driver"] == "asyncssh"
+        assert procedure["transport_driver_chain"] == []
+        assert procedure["output_parser"] == "none"
+        assert procedure["output_schema"] == {}
+
+        command = commands.rows[(name, 1)]
+        assert command["argv"][0] == "backend-orchestrated"
+        assert all("content" not in token for token in command["argv"])
+        assert all("{" not in token and "}" not in token for token in command["argv"])
+
+    assert procedures.rows["service.akvorado.1.config_read"]["effect"] == "read"
+    assert (
+        procedures.rows["service.akvorado.1.config_read"]["approval_required"]
+        is False
+    )
+    assert procedures.rows["service.akvorado.1.config_deploy"]["effect"] == "write"
+    assert (
+        procedures.rows["service.akvorado.1.config_deploy"]["approval_required"]
+        is True
+    )
+    assert procedures.rows["service.akvorado.1.status_stack"]["effect"] == "read"
+    assert (
+        procedures.rows["service.akvorado.1.status_stack"]["approval_required"]
+        is False
+    )
+    assert procedures.rows["service.akvorado.1.restart_stack"]["effect"] == "write"
+    assert (
+        procedures.rows["service.akvorado.1.restart_stack"]["approval_required"]
+        is True
+    )
+    assert {
+        name: procedure["timeout_seconds"]
+        for name, procedure in procedures.rows.items()
+    } == {
+        "service.akvorado.1.config_read": 30,
+        "service.akvorado.1.config_deploy": 450,
+        "service.akvorado.1.status_stack": 150,
+        "service.akvorado.1.restart_stack": 420,
+    }
+
+
+def test_unseed_unconditionally_disables_all_procedures_without_relation_queries(
+    migration,
+) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+    migration.seed_akvorado_procedures(
+        SimpleNamespace(get_model=_model_lookup),
+        None,
+    )
+    for row in procedures.rows.values():
+        row["enabled"] = True
+
+    def reverse_model_lookup(app_label: str, model_name: str):
+        assert (app_label, model_name) == ("netbox_rpc", "RPCProcedure")
+        return _FakeRPCProcedure
+
+    migration.unseed_akvorado_procedures(
+        SimpleNamespace(get_model=reverse_model_lookup),
+        None,
+    )
+
+    assert set(procedures.rows) == PROCEDURE_NAMES
+    assert all(row["enabled"] is False for row in procedures.rows.values())
+
+
+def test_all_akvorado_params_and_result_schemas_accept_valid_documents(
+    migration,
+) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+    valid_params = {
+        "service.akvorado.1.config_read": {},
+        "service.akvorado.1.config_deploy": {
+            "config_content": "inlet:\n  kafka:\n    topic: flows\n",
+        },
+        "service.akvorado.1.status_stack": {},
+        "service.akvorado.1.restart_stack": {},
+    }
+    valid_results = {
+        "service.akvorado.1.config_read": {
+            "ok": True,
+            "procedure": "service.akvorado.1.config_read",
+            "target": TARGET,
+            "content": "inlet: {}\n",
+        },
+        "service.akvorado.1.config_deploy": {
+            "ok": True,
+            "procedure": "service.akvorado.1.config_deploy",
+            "target": TARGET,
+            "deploy_status": "deployed",
+            "validation_output": "configuration is valid",
+        },
+        "service.akvorado.1.status_stack": {
+            "ok": True,
+            "procedure": "service.akvorado.1.status_stack",
+            "target": TARGET,
+            "status": "running",
+            "output": "akvorado running",
+        },
+        "service.akvorado.1.restart_stack": {
+            "ok": True,
+            "procedure": "service.akvorado.1.restart_stack",
+            "target": TARGET,
+            "status": "running",
+            "output": "akvorado restarted",
+        },
+    }
+
+    for name, row in by_name.items():
+        Draft202012Validator.check_schema(row["params_schema"])
+        Draft202012Validator.check_schema(row["result_schema"])
+        validate(valid_params[name], row["params_schema"])
+        validate(valid_results[name], row["result_schema"])
+
+
+@pytest.mark.parametrize(
+    ("procedure_name", "params"),
+    [
+        ("service.akvorado.1.config_read", {"target": TARGET}),
+        ("service.akvorado.1.config_deploy", {"config_content": ""}),
+        (
+            "service.akvorado.1.config_deploy",
+            {"config_content": "valid: true\n", "command": "id"},
+        ),
+        ("service.akvorado.1.status_stack", {"target": "host;id"}),
+        (
+            "service.akvorado.1.restart_stack",
+            {"shell": "docker compose restart"},
+        ),
+    ],
+)
+def test_akvorado_params_schemas_reject_missing_unsafe_or_extra_input(
+    migration,
+    procedure_name: str,
+    params: dict[str, object],
+) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+
+    with pytest.raises(ValidationError):
+        validate(params, by_name[procedure_name]["params_schema"])
+
+
+@pytest.mark.parametrize("procedure_name", sorted(PROCEDURE_NAMES))
+def test_akvorado_result_schemas_reject_incomplete_results(
+    migration,
+    procedure_name: str,
+) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+
+    with pytest.raises(ValidationError):
+        validate(
+            {"ok": True, "procedure": procedure_name, "target": TARGET},
+            by_name[procedure_name]["result_schema"],
+        )
+
+
+def test_content_contract_uses_input_data_and_safe_representative_argv(migration) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "command_contract",
+        ROOT / "netbox_rpc/command_contract.py",
+    )
+    assert spec and spec.loader
+    command_contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(command_contract)
+
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+    for handler_id in PROCEDURE_NAMES:
+        assert handler_id in command_contract.EXEMPT_HANDLER_IDS
+        command = migration._command(
+            handler_id.rsplit(".", 1)[-1].replace("_", "-"), "representative"
+        )
+        assert all(command_contract.token_is_safe(token) for token in command["argv"])
+
+    deploy = by_name["service.akvorado.1.config_deploy"]["params_schema"]
+    assert "input_data" in deploy["properties"]["config_content"]["description"]
+    for row in by_name.values():
+        assert "target" not in row["params_schema"]["properties"]
+        assert "target" not in row["params_schema"]["required"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "valid:\x00false\n",
+        "password: plaintext\n",
+        'password: " hunter2"\n',
+        "password: /hunter2\n",
+        "password: |\n  hunter2\n  more-secret-line\n",
+        "password: |2\n  hunter2\n",
+        "password: |-2\n  hunter2\n",
+        "password: |2-\n  hunter2\n",
+        "authorization: Bearer-token\n",
+        "Authorization: Bearer hunter2\n",
+        "authorization=hunter2\n",
+        "endpoint: https://user:pass@example.net\n",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+    ],
+)
+def test_content_schema_rejects_nul_and_plaintext_secrets(
+    migration,
+    content: str,
+) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+
+    with pytest.raises(ValidationError):
+        validate(
+            {"config_content": content},
+            by_name["service.akvorado.1.config_deploy"]["params_schema"],
+        )
+
+
+def test_content_schema_allows_non_secret_block_and_author_text(migration) -> None:
+    by_name = {row["name"]: row for row in migration.AKVORADO_PROCEDURES}
+    content = "description: |2\n  hello\nbiographer: the author wrote this\n"
+
+    validate(
+        {"config_content": content},
+        by_name["service.akvorado.1.config_deploy"]["params_schema"],
+    )
+
+
+def _model_lookup(app_label: str, model_name: str):
+    models = {
+        ("netbox_rpc", "RPCProcedure"): _FakeRPCProcedure,
+        ("netbox_rpc", "RPCProcedureCommand"): _FakeRPCProcedureCommand,
+    }
+    return models[(app_label, model_name)]
+
+
+class _FakeQuerySet:
+    def __init__(self, manager: _FakeProcedureManager, names: list[str]) -> None:
+        self.manager = manager
+        self.names = names
+
+    def update(self, **values: object) -> None:
+        for name in self.names:
+            if name in self.manager.rows:
+                self.manager.rows[name].update(values)
+
+
+class _FakeProcedureManager:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, object]] = {}
+        self.pks: dict[str, int] = {}
+
+    def update_or_create(self, *, name: str, defaults: dict[str, object]):
+        self.rows[name] = dict(defaults)
+        self.pks.setdefault(name, len(self.pks) + 1)
+        return SimpleNamespace(name=name, pk=self.pks[name], **defaults), True
+
+    def filter(self, *, name__in: list[str]) -> _FakeQuerySet:
+        return _FakeQuerySet(self, name__in)
+
+
+class _FakeCommandManager:
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, int], dict[str, object]] = {}
+
+    def update_or_create(
+        self,
+        *,
+        procedure: SimpleNamespace,
+        sequence: int,
+        defaults: dict[str, object],
+    ):
+        self.rows[(procedure.name, sequence)] = dict(defaults)
+        return SimpleNamespace(procedure=procedure, sequence=sequence, **defaults), True
+
+
+class _FakeRPCProcedure:
+    objects: _FakeProcedureManager
+
+
+class _FakeRPCProcedureCommand:
+    objects: _FakeCommandManager
+
+
+def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    netbox = types.ModuleType("netbox")
+    netbox_plugins = types.ModuleType("netbox.plugins")
+
+    class PluginConfig:
+        def ready(self) -> None:
+            return None
+
+    netbox_plugins.PluginConfig = PluginConfig
+
+    django = types.ModuleType("django")
+    django_db = types.ModuleType("django.db")
+
+    class RunPython:
+        noop = staticmethod(lambda apps, schema_editor: None)
+
+        def __init__(self, code, reverse_code=None) -> None:
+            self.code = code
+            self.reverse_code = reverse_code
+
+    django_db.migrations = SimpleNamespace(
+        Migration=object,
+        RunPython=RunPython,
+    )
+    django.db = django_db
+
+    monkeypatch.setitem(sys.modules, "netbox", netbox)
+    monkeypatch.setitem(sys.modules, "netbox.plugins", netbox_plugins)
+    monkeypatch.setitem(sys.modules, "django", django)
+    monkeypatch.setitem(sys.modules, "django.db", django_db)

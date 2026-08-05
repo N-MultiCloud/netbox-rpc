@@ -8,7 +8,11 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 from ..constants import (
+    AKVORADO_1_CONFIG_DEPLOY,
+    AKVORADO_1_PROCEDURE_NAMES,
     DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
@@ -221,6 +225,39 @@ _INFLUXDB_SECRET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$")
 _INFLUXDB_SECRET_REF_RE = re.compile(
     r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
+_AKVORADO_SENSITIVE_KEY_RE = re.compile(
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
+    r"access[-_]?key|private[-_]?key|credential)",
+    re.IGNORECASE,
+)
+# Best-effort raw-text defense in depth. The decoded-key YAML walk below is the
+# pre-persistence guard for RPCExecution.params; event-store redaction separately
+# protects normalized/event data. Backends must accept credential references.
+_AKVORADO_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?im)(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+    r"private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*"
+    r"[\"']?[ \t]*[^\s\"']+"
+)
+# Kept separate because block-scalar bodies need to be consumed as a unit by the
+# event-store counterpart; the decoded-key walk remains the persistence guard.
+_AKVORADO_BLOCK_SCALAR_SECRET_RE = re.compile(
+    r"(?m)^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
+    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|access[-_]?key|"
+    r"private[-_]?key|credential)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?"
+    r"$(?:\n(?:\1[ \t].*|[ \t]*$))*"
+)
+_AKVORADO_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_AKVORADO_AUTHORIZATION_RE = re.compile(
+    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+?(?=\r?$)"
+)
+_AKVORADO_URL_CREDENTIAL_RE = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
 )
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
@@ -565,6 +602,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in INFLUXDB_1_PROCEDURE_NAMES:
         return _normalize_influxdb_1_execution(execution, target)
+
+    if procedure_name in AKVORADO_1_PROCEDURE_NAMES:
+        return _normalize_akvorado_1_execution(execution)
 
     if procedure_name == LINUX_PROXMOX_QEMU_VM_LIFECYCLE:
         return _normalize_proxmox_qemu_vm_lifecycle_execution(execution, target)
@@ -1171,6 +1211,161 @@ def _normalize_influxdb_1_execution(
 
     _copy_optional_ssh_overrides(params, normalized)
     return normalized
+
+
+def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
+    """Normalize the typed Akvorado procedure family.
+
+    Akvorado is always bound to the execution's assigned NetBox object. The
+    caller cannot select or override an SSH host in params. ``target`` is a
+    human-readable display string for logs and audit only; credential and host
+    resolution MUST use ``target_object`` (content_type plus object_id), never
+    the display name. File bodies remain structured input_data and only their
+    digest metadata is included in the command fingerprint.
+    """
+
+    assigned_object = getattr(execution, "assigned_object", None)
+    if assigned_object is None:
+        raise RPCExecutionError(
+            "Akvorado procedures require an existing assigned NetBox object.",
+            code="RPC_TARGET_REQUIRED",
+        )
+    target = str(getattr(assigned_object, "name", None) or assigned_object).strip()
+    if not target or any(ord(char) < 32 or ord(char) == 127 for char in target):
+        raise RPCExecutionError(
+            "The assigned NetBox object does not provide a safe target name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    target_object = {
+        "content_type": (
+            f"{execution.assigned_object_type.app_label}."
+            f"{execution.assigned_object_type.model}"
+        ),
+        "object_id": execution.assigned_object_id,
+    }
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            "target_object": target_object,
+        },
+    }
+
+    if procedure_name == AKVORADO_1_CONFIG_DEPLOY:
+        content = _normalize_akvorado_content(
+            params.get("config_content"),
+            "config_content",
+        )
+        normalized["config_content"] = content
+        normalized["command_fingerprint"].update(
+            {
+                "config_content_sha256": _hash_text(content),
+                "config_content_bytes": len(content.encode("utf-8")),
+            }
+        )
+
+    return normalized
+
+
+def validate_akvorado_content_params(
+    procedure_name: str,
+    params: dict[str, Any],
+) -> None:
+    """Validate Akvorado file bodies before persistence or dispatch.
+
+    Creation calls this before saving the immutable execution params. Worker
+    normalization repeats the same checks below as defense in depth.
+    """
+
+    if procedure_name == AKVORADO_1_CONFIG_DEPLOY:
+        _normalize_akvorado_content(
+            params.get("config_content"),
+            "config_content",
+        )
+
+
+def _normalize_akvorado_content(
+    raw_content: object,
+    field_name: str,
+) -> str:
+    if not isinstance(raw_content, str) or not raw_content.strip():
+        raise RPCExecutionError(
+            f"{field_name} must be a non-empty string.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(raw_content) > _AKVORADO_MAX_CONTENT_LEN:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most {_AKVORADO_MAX_CONTENT_LEN} characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(_akvorado_unsafe_codepoint(char) for char in raw_content):
+        raise RPCExecutionError(
+            f"{field_name} contains control characters unsafe for JSONB storage.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(
+        pattern.search(raw_content)
+        for pattern in (
+            _AKVORADO_PRIVATE_KEY_RE,
+            _AKVORADO_SECRET_ASSIGNMENT_RE,
+            _AKVORADO_BLOCK_SCALAR_SECRET_RE,
+            _AKVORADO_AUTHORIZATION_RE,
+            _AKVORADO_URL_CREDENTIAL_RE,
+        )
+    ):
+        raise RPCExecutionError(
+            f"{field_name} contains secret-shaped material; use an nms-secret reference instead.",
+            code="RPC_PARAM_SECRET_FORBIDDEN",
+        )
+    try:
+        parsed_content = yaml.safe_load(raw_content)
+    except yaml.YAMLError:
+        # The backend's existing config parser owns syntax diagnostics. This
+        # pre-persistence guard only adds decoded-key inspection when parsing
+        # succeeds; the raw-text checks above still apply to malformed input.
+        return raw_content
+    if _akvorado_has_sensitive_decoded_key(parsed_content):
+        raise RPCExecutionError(
+            f"{field_name} contains secret-shaped material; use an nms-secret reference instead.",
+            code="RPC_PARAM_SECRET_FORBIDDEN",
+        )
+    return raw_content
+
+
+def _akvorado_has_sensitive_decoded_key(
+    value: object,
+    seen: set[int] | None = None,
+) -> bool:
+    """Walk a safe-loaded YAML tree and inspect decoded mapping keys."""
+
+    if not isinstance(value, (dict, list)):
+        return False
+    seen = seen if seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return False
+    seen.add(value_id)
+    if isinstance(value, dict):
+        return any(
+            _AKVORADO_SENSITIVE_KEY_RE.search(str(key))
+            or _akvorado_has_sensitive_decoded_key(item, seen)
+            for key, item in value.items()
+        )
+    return any(_akvorado_has_sensitive_decoded_key(item, seen) for item in value)
+
+
+def _akvorado_unsafe_codepoint(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        (codepoint < 32 and char not in {"\t", "\n", "\r"})
+        or 127 <= codepoint <= 159
+        or 0xD800 <= codepoint <= 0xDFFF
+    )
 
 
 def _normalize_influxdb_named_value(
