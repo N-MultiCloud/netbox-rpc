@@ -43,7 +43,9 @@ class JinjaCommandCleanTests(TestCase):
         return RPCProcedureCommand(**defaults)
 
     def test_jinja_command_with_declared_param_and_target_is_valid(self):
-        self._command(argv=["/bin/set", "{{ params.vlan_id }}", "{{ target.name }}"]).full_clean()
+        self._command(
+            argv=["/bin/set", "{{ params.vlan_id }}", "{{ target.name }}"]
+        ).full_clean()
 
     def test_jinja_command_rejects_unknown_param(self):
         with self.assertRaises(ValidationError):
@@ -84,9 +86,7 @@ class JinjaCommandCleanTests(TestCase):
 
 class OutputCaptureCleanTests(TestCase):
     def setUp(self):
-        self.proc = make_procedure(
-            "network.device.test.capture", params_schema=_SCHEMA
-        )
+        self.proc = make_procedure("network.device.test.capture", params_schema=_SCHEMA)
 
     def test_regex_capture_requires_single_group(self):
         bad = RPCProcedureCommand(
@@ -250,7 +250,7 @@ class TemplatingContractTests(TestCase):
             procedure=self.proc,
             sequence=1,
             render_mode=RPCProcedureCommand.RENDER_MODE_JINJA,
-            argv=["/usr/sbin/qm", "start", "{{ vars.vmid }}"],
+            argv=["/usr/sbin/qm", "start", "{{ params.vlan_id }}"],
             produces_var="job_id",
             capture_kind="regex",
             capture_expression=r"job=(\d+)",

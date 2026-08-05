@@ -43,6 +43,7 @@ from ..constants import (
     INFLUXDB_1_SERVICE_CONTROL,
     INFLUXDB_1_TOKEN_CREATE,
     LINUX_COLLECT_FACTS,
+    LINUX_ENV_FILE_UPSERT_VAR,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
@@ -80,6 +81,15 @@ from ..constants import (
     SAMBA_1_SHARE_DELETE,
     SAMBA_1_SHARE_UPSERT,
     SAMBA_1_SERVICE_CONTROL,
+    SAMBA_1_USER_CREATE,
+    SAMBA_1_USER_DELETE,
+    SAMBA_1_USER_SET_PASSWORD,
+    SAMBA_1_USER_ENABLE,
+    SAMBA_1_USER_DISABLE,
+    SAMBA_1_GROUP_CREATE,
+    SAMBA_1_GROUP_DELETE,
+    SAMBA_1_GROUP_ADD_MEMBERS,
+    SAMBA_1_GROUP_REMOVE_MEMBERS,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -94,6 +104,74 @@ from ..command_templating import RENDER_JINJA
 from ..models import RPCLinuxServiceAllowlist, RPCExecution
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+# Absolute path, no traversal, no control characters — mirrors
+# models.ENVIRONMENT_FILE_PATH_RE (duplicated, not imported, so the
+# stub-based pure-domain test suite need not model netbox_rpc.models).
+_ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
+
+# Hard-coded fail-closed gate for os.linux_env_file.upsert_var, independent of
+# RPCProcedure.enabled (ordinary mutable catalog data that an operator could
+# flip without knowing the trust boundary below is still open). Flip to True
+# only once ALL THREE preconditions hold:
+#   1. The paired nms-backend execution handler is deployed.
+#   2. credential_pk is object-scoped-authorization checked against the
+#      requesting user before its DeviceCredential is resolved (issue #203).
+#   3. approval_required executions for this procedure are routed through an
+#      approval-time snapshot of the resolved RPCLinuxServiceAllowlist policy
+#      (environment_file/systemd_unit/target_models/
+#      ssh_credential_override_id), re-validated for drift at worker-claim
+#      time (issue #163, items 2 and 9 -- not #165, which only shipped the
+#      approve/reject API/UI). Today create_execution() enforces
+#      approval_required as a permission check only and calls
+#      RPCExecutionAggregate.queue() directly, so an approver's decision is
+#      never bound to the allowlist row the worker resolves later below.
+#      That TOCTOU window is unreachable while this gate is closed --
+#      test_upsert_var_gate_blocks_by_default asserts the allowlist lookup
+#      never runs -- but must stay closed until #163 lands, independent of
+#      #203.
+# Tests open the gate via
+# sys.modules["netbox_rpc.domain.normalization"]._LINUX_ENV_FILE_UPSERT_AVAILABLE.
+#
+# Enforced at three points through code_gate_unavailable_reason() below, so
+# they can never diverge: admission time (command_handlers.create_execution,
+# before an RPCExecution row can even be created), advertisement time
+# (RPCProcedureViewSet.available -- /procedures/available/), and
+# worker-claim time (this module, retained as defense in depth for a row
+# created by an older process before this gate existed, or claimed by a
+# worker running stale code during a rolling deployment). No mixed-worker
+# upgrade/rollback quarantine tooling is added for that scenario: this
+# procedure ships with RPCProcedure.enabled=False (0060/0061) AND this flag
+# False, so no RPCExecution row against it can exist in any real deployment
+# today, making "an already-queued execution survives across a version
+# skew" unreachable in practice. Revisit if that ever changes -- e.g. if a
+# future change enables the procedure before all three preconditions above
+# are met.
+_LINUX_ENV_FILE_UPSERT_AVAILABLE = False
+
+
+def code_gate_unavailable_reason(procedure_name: str) -> str | None:
+    """Return why ``procedure_name`` is hard-gated shut, or None if clear.
+
+    Single source of truth for the fail-closed code-level gates above
+    (independent of RPCProcedure.enabled, which is mutable catalog data an
+    operator could flip without knowing a gate below it is still closed).
+    Call this at admission time (create_execution), advertisement time
+    (/procedures/available/), and worker-claim time (this module) so the
+    three enforcement points can never diverge.
+    """
+
+    if procedure_name == "os.linux_env_file.upsert_var" and not _LINUX_ENV_FILE_UPSERT_AVAILABLE:
+        return (
+            "os.linux_env_file.upsert_var cannot run yet: the nms-backend "
+            "execution handler is not deployed, credential_pk is not "
+            "object-scoped-authorization checked against the requester "
+            "(issue #203), and approval decisions are not yet bound to an "
+            "allowlist-policy snapshot (issue #163)."
+        )
+    return None
+
+
 _PROXMOX_STORAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PROXMOX_BRIDGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _PROXMOX_VM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
@@ -259,6 +337,16 @@ _AKVORADO_AUTHORIZATION_RE = re.compile(
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
 )
+# Samba/AD user and group identifiers (issue #160). The first character must
+# be a safe alphanumeric/underscore so a value can never be read as a
+# samba-tool option (e.g. "--force"); "-", ".", and "@" (UPN-style names) are
+# only allowed after the first character.
+_SAMBA_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$")
+_SAMBA_MAX_GROUP_MEMBERS = 128
+# Defensive shape check for the password fingerprint computed and persisted by
+# command_handlers._scrub_password_param() before this normalizer ever runs;
+# this normalizer never sees a raw password.
+_HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}$")
 # Samba smb.conf parameter names are case-insensitive and whitespace-insensitive.
 # Several parameter families execute host commands: "* script", "* command", and
 # "* action", plus the preexec/postexec family. "root preexec" runs as root, so
@@ -532,6 +620,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
             "target": target,
             "command_fingerprint": {"handler_id": execution.procedure.handler_id},
         }
+
+    if procedure_name == LINUX_ENV_FILE_UPSERT_VAR:
+        return _normalize_linux_env_file_upsert_execution(execution, target)
 
     if procedure_name == HUAWEI_MA5800_R024_START_ONT:
         params = execution.params or {}
@@ -1539,6 +1630,63 @@ def _normalize_samba_1_execution(
         normalized["command_fingerprint"]["action"] = action
         normalized["command_fingerprint"]["systemd_unit"] = systemd_unit
 
+    if procedure_name in {
+        SAMBA_1_USER_CREATE,
+        SAMBA_1_USER_DELETE,
+        SAMBA_1_USER_SET_PASSWORD,
+        SAMBA_1_USER_ENABLE,
+        SAMBA_1_USER_DISABLE,
+    }:
+        username = _normalize_samba_username(params.get("username"))
+        normalized["username"] = username
+        normalized["command_fingerprint"]["username"] = username
+
+    if procedure_name in {SAMBA_1_USER_CREATE, SAMBA_1_USER_SET_PASSWORD}:
+        # #160: the raw password never reaches this normalizer. It is scrubbed
+        # to password_sha256/password_bytes in command_handlers.create_execution()
+        # before the execution row is ever persisted; this only re-validates
+        # and forwards that already-computed, non-reversible fingerprint.
+        fingerprint = _extract_samba_password_fingerprint(params)
+        normalized["password_sha256"] = fingerprint["password_sha256"]
+        normalized["password_bytes"] = fingerprint["password_bytes"]
+        normalized["command_fingerprint"]["password_sha256"] = fingerprint[
+            "password_sha256"
+        ]
+        normalized["command_fingerprint"]["password_bytes"] = fingerprint[
+            "password_bytes"
+        ]
+
+    if procedure_name == SAMBA_1_USER_CREATE:
+        full_name = _normalize_samba_share_text(params.get("full_name"))
+        if full_name:
+            normalized["full_name"] = full_name
+            normalized["command_fingerprint"]["full_name_sha256"] = _hash_text(
+                full_name
+            )
+        disabled = _bool_param(params, "disabled", False)
+        normalized["disabled"] = disabled
+        normalized["command_fingerprint"]["disabled"] = disabled
+
+    if procedure_name in {SAMBA_1_GROUP_CREATE, SAMBA_1_GROUP_DELETE}:
+        group_name = _normalize_samba_group_name(params.get("group_name"))
+        normalized["group_name"] = group_name
+        normalized["command_fingerprint"]["group_name"] = group_name
+
+    if procedure_name in {SAMBA_1_GROUP_ADD_MEMBERS, SAMBA_1_GROUP_REMOVE_MEMBERS}:
+        group_name = _normalize_samba_group_name(params.get("group_name"))
+        members = _normalize_samba_member_list(params.get("members"), "members")
+        if not members:
+            raise RPCExecutionError(
+                "members must contain at least one safe Samba/AD identifier.",
+                code="RPC_PARAM_INVALID",
+            )
+        members_csv = ",".join(members)
+        normalized["group_name"] = group_name
+        normalized["members"] = members
+        normalized["members_csv"] = members_csv
+        normalized["command_fingerprint"]["group_name"] = group_name
+        normalized["command_fingerprint"]["members"] = members
+
     _copy_optional_ssh_overrides(params, normalized)
     return normalized
 
@@ -1865,6 +2013,87 @@ def _normalize_samba_share_name(raw_name: object) -> str:
             code="RPC_PARAM_INVALID",
         )
     return share_name
+
+
+def _normalize_samba_username(raw_username: object) -> str:
+    username = str(raw_username or "").strip()
+    if not username or not _SAMBA_IDENTIFIER_RE.fullmatch(username):
+        raise RPCExecutionError(
+            "username must be a safe Samba/AD identifier without shell "
+            "metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return username
+
+
+def _normalize_samba_group_name(raw_group_name: object) -> str:
+    group_name = str(raw_group_name or "").strip()
+    if not group_name or not _SAMBA_IDENTIFIER_RE.fullmatch(group_name):
+        raise RPCExecutionError(
+            "group_name must be a safe Samba/AD identifier without shell "
+            "metacharacters.",
+            code="RPC_PARAM_INVALID",
+        )
+    return group_name
+
+
+def _normalize_samba_member_list(raw_values: object, field_name: str) -> list[str]:
+    if raw_values in (None, ""):
+        return []
+    if not isinstance(raw_values, (list, tuple)):
+        raise RPCExecutionError(
+            f"{field_name} must be a list of safe Samba/AD identifiers.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(raw_values) > _SAMBA_MAX_GROUP_MEMBERS:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most {_SAMBA_MAX_GROUP_MEMBERS} entries.",
+            code="RPC_PARAM_INVALID",
+        )
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        value = _normalize_samba_username(raw_value)
+        if value in seen:
+            raise RPCExecutionError(
+                f"{field_name} entries must be unique.",
+                code="RPC_PARAM_INVALID",
+            )
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _extract_samba_password_fingerprint(params: dict[str, Any]) -> dict[str, Any]:
+    """Re-validate the already-scrubbed password fingerprint.
+
+    This function NEVER receives, reads, or forwards a raw password. By the
+    time this normalizer runs, command_handlers.create_execution() has already
+    replaced any caller-supplied ``password`` with ``password_sha256`` /
+    ``password_bytes`` before the execution row was persisted (see #160). This
+    only defensively re-validates the shape of that fingerprint.
+    """
+    password_sha256 = str(params.get("password_sha256") or "").strip().lower()
+    if not password_sha256 or not _HEX_SHA256_RE.fullmatch(password_sha256):
+        raise RPCExecutionError(
+            "password_sha256 must be a 64-character lowercase hex sha256 "
+            "digest computed by the server; a raw password was never expected "
+            "here.",
+            code="RPC_PARAM_INVALID",
+        )
+    password_bytes = params.get("password_bytes")
+    if not isinstance(password_bytes, int) or isinstance(password_bytes, bool):
+        raise RPCExecutionError(
+            "password_bytes must be an integer byte count computed by the "
+            "server.",
+            code="RPC_PARAM_INVALID",
+        )
+    if password_bytes < 1 or password_bytes > 4096:
+        raise RPCExecutionError(
+            "password_bytes must be between 1 and 4096.",
+            code="RPC_PARAM_INVALID",
+        )
+    return {"password_sha256": password_sha256, "password_bytes": password_bytes}
 
 
 def _normalize_passbolt_migration_execution(
@@ -2278,6 +2507,81 @@ def _normalize_linux_service_execution(
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "systemd_unit": unit,
+        },
+    }
+    if allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
+
+
+def _normalize_linux_env_file_upsert_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Resolve a service's fixed env-file path and retain credential refs only."""
+
+    # Defense in depth: create_execution() and /procedures/available/ already
+    # consult code_gate_unavailable_reason() before an execution can be
+    # created or advertised, but a worker may still claim a row created by
+    # an older process (rolling deployment, mixed worker versions) — recheck
+    # here so no code path can reach the allowlist/credential lookup below
+    # while the gate is closed.
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    params = execution.params or {}
+    slug = str(params.get("service_slug") or "").strip()
+    allow = RPCLinuxServiceAllowlist.objects.filter(slug=slug, enabled=True).first()
+    if allow is None:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowlisted.",
+            code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
+        )
+
+    target_models = set(allow.target_models or [])
+    if target_models and execution.target_model_label not in target_models:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} is not allowed for {execution.target_model_label}.",
+            code="RPC_LINUX_SERVICE_TARGET_DENIED",
+        )
+
+    environment_file = str(allow.environment_file or "").strip()
+    if not environment_file:
+        raise RPCExecutionError(
+            f"Linux service {slug!r} has no environment file configured.",
+            code="RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING",
+        )
+    if not _ENVIRONMENT_FILE_PATH_RE.fullmatch(environment_file):
+        # Defensive recheck: the allowlist model's clean() already enforces
+        # this shape, but a row written outside full_clean() (fixture, data
+        # migration, bulk update) must not reach the backend unvalidated.
+        raise RPCExecutionError(
+            f"Linux service {slug!r} has a malformed environment file path.",
+            code="RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING",
+        )
+
+    var_name = str(params.get("var_name") or "")
+    if not _LINUX_ENV_VAR_NAME_RE.fullmatch(var_name):
+        raise RPCExecutionError(
+            "var_name must match ^[A-Z][A-Z0-9_]*$.",
+            code="RPC_PARAM_INVALID",
+        )
+    credential_pk = _int_range(params, "credential_pk", 1, None)
+    systemd_unit = allow.systemd_unit
+    result = {
+        "target": target,
+        "service_slug": slug,
+        "systemd_unit": systemd_unit,
+        "environment_file": environment_file,
+        "var_name": var_name,
+        "credential_pk": credential_pk,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "systemd_unit": systemd_unit,
+            "environment_file": environment_file,
+            "var_name": var_name,
+            "credential_pk": credential_pk,
         },
     }
     if allow.ssh_credential_override_id is not None:

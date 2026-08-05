@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import jsonschema
@@ -12,10 +13,39 @@ from ..constants import AKVORADO_1_PROCEDURE_NAMES
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
     RPCExecutionError,
+    code_gate_unavailable_reason,
     normalize_execution_params,
     validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
+
+# Handler IDs whose params_schema declares a "password" property (issue #160:
+# service.samba.1.user_create / user_set_password). The raw password must
+# never reach a persisted RPCExecution row: _scrub_password_param() replaces
+# it with a sha256+byte-count fingerprint before serializer.save() writes the
+# row, so params/normalized_params/result/events never contain the plaintext.
+_PASSWORD_BEARING_HANDLER_IDS = frozenset(
+    {
+        "service.samba_1.user_create",
+        "service.samba_1.user_set_password",
+    }
+)
+
+
+def _scrub_password_param(params: dict[str, Any]) -> None:
+    """Replace an in-place ``password`` param with a non-reversible fingerprint.
+
+    Mutates ``params`` (the same dict object DRF will persist via
+    ``serializer.save()``) so the raw password value is never written to the
+    database, not even transiently. Downstream normalization only ever sees
+    ``password_sha256`` / ``password_bytes``.
+    """
+    if "password" not in params:
+        return
+    raw_password = params.pop("password")
+    password_bytes = str(raw_password).encode("utf-8")
+    params["password_sha256"] = hashlib.sha256(password_bytes).hexdigest()
+    params["password_bytes"] = len(password_bytes)
 
 
 def _require_enabled_and_authoritative_backend(user: object) -> object | None:
@@ -87,6 +117,15 @@ def create_execution(*, serializer: Any, user: object) -> object:
         raise drf_serializers.ValidationError(
             {"procedure_id": "This procedure is disabled."}
         )
+    # Hard-coded fail-closed gates (see code_gate_unavailable_reason) sit
+    # below RPCProcedure.enabled: an operator could flip that mutable flag
+    # without knowing a gate is still closed, so this admission-time check
+    # is the primary enforcement point, checked before an RPCExecution row
+    # can even be created. The identical check inside normalize_execution_params
+    # remains as defense in depth for a worker claiming a pre-existing row.
+    gate_reason = code_gate_unavailable_reason(procedure.name)
+    if gate_reason is not None:
+        raise drf_serializers.ValidationError({"procedure_id": gate_reason})
     if procedure.approval_required:
         if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
             raise PermissionDenied(
@@ -104,6 +143,13 @@ def create_execution(*, serializer: Any, user: object) -> object:
         validate_akvorado_content_params(procedure.name, params)
     except RPCExecutionError as exc:
         raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+
+    # #160: scrub a raw password to a fingerprint AFTER schema validation (so
+    # the caller-visible validation error still names "password") and BEFORE
+    # anything is persisted, so the plaintext value is never written to the
+    # database even transiently.
+    if procedure.handler_id in _PASSWORD_BEARING_HANDLER_IDS:
+        _scrub_password_param(params)
 
     # #167: fail closed before enqueue on a backend capability mismatch.
     _verify_backend_capability(procedure)

@@ -55,6 +55,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
+    normalization.code_gate_unavailable_reason = lambda procedure_name: None
     event_store = types.ModuleType("netbox_rpc.event_store")
     event_store.mark_execution_failed = lambda *args, **kwargs: None
 

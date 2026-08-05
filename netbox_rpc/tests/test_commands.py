@@ -31,6 +31,38 @@ class RPCProcedureCommandModelTests(TestCase):
 
         command.full_clean()
 
+    def test_clean_accepts_members_csv_runtime_placeholder(self):
+        # Regression (#160 review M1): the seeded Samba group-membership command
+        # rows reference ``{members_csv}`` — a normalizer-derived runtime value,
+        # NOT a ``params_schema`` property. It must be an allowed placeholder
+        # (COMMAND_RUNTIME_KEYS) so operators can edit/re-save the seeded rows
+        # through the UI/API without full_clean() rejecting them. Declaring it in
+        # params_schema instead would let a caller bypass per-member validation.
+        proc = make_procedure(
+            "service.samba_1.group_add_members.test",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "group_name": {"type": "string"},
+                    "members": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+        command = RPCProcedureCommand(
+            procedure=proc,
+            sequence=1,
+            argv=[
+                "sudo",
+                "/usr/bin/samba-tool",
+                "group",
+                "addmembers",
+                "{group_name}",
+                "{members_csv}",
+            ],
+        )
+
+        command.full_clean()
+
     def test_clean_rejects_bad_placeholder(self):
         command = RPCProcedureCommand(
             procedure=self.proc,

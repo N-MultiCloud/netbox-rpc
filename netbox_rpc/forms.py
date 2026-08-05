@@ -185,6 +185,7 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
         fields = (
             "slug",
             "systemd_unit",
+            "environment_file",
             "enabled",
             "target_models",
             "ssh_credential_override",

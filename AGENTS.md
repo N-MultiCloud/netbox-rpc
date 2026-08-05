@@ -486,6 +486,116 @@ be used autonomously on destructive procedures.
   stack lifecycle state — `netbox-observability`'s
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
+- InfluxDB service management is provided by the generic Ubuntu 24 systemd
+  procedures through the seeded `RPCLinuxServiceAllowlist` row
+  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
+  `dcim.device` and `virtualization.virtualmachine`. Do not add
+  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
+  a new typed procedure if a future operation cannot be modeled as service
+  lifecycle control.
+- NetBox stack service management is provided the same way, through the allowlist
+  rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
+  (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
+  (RQ background worker), both targeting `dcim.device` and
+  `virtualization.virtualmachine`. Use the existing generic Ubuntu 24 systemd
+  procedures (`os.linux.ubuntu.24.restart_service` / `status_service` /
+  `journal_tail`, etc.) against a NetBox-host `dcim.device`/VM that carries a
+  DeviceService SSH credential — never SSH the NetBox host directly.
+  **Restarting `netbox-rq` also sweeps orphaned/zombie `core.Job` rows** left by a
+  worker that died mid-job (its `job_timeout` never fires), so it is the audited
+  recovery for a NetBox RQ job stuck in `running`. `restart_service` is
+  `effect="write"`, no approval, but disruptive — present the action before
+  dispatching per the write-procedure rule below.
+- `os.linux_env_file.upsert_var` (migration `0059`/`0060`) upserts a
+  credential-backed `KEY=VALUE` line into an allowlisted service's
+  `environment_file`, then restarts its `systemd_unit`. `effect="write"`,
+  `approval_required=True` — writes a credential to a production host file, so
+  it is never dispatched autonomously. Params are `service_slug`, `var_name`
+  (`^[A-Z][A-Z0-9_]*$`), and `credential_pk` (a `netbox_nms.DeviceCredential`
+  reference); no raw secret value is ever accepted as a param, logged, or
+  persisted to `RPCExecution`/`RPCExecutionEvent` — the backend resolves
+  `credential_pk` and delivers the value over stdin, mirroring
+  `install_ssh_key`'s stdin-delivery pattern. It is an `EXEMPT_HANDLER_RATIONALE`
+  entry seeded with one `backend-orchestrated` command row, matching the Samba
+  `user_create`/`user_set_password` pattern. Migration `0060` does **not** seed
+  `environment_file` on the `netbox`/`netbox-rq` allowlist rows — confirm the
+  real `EnvironmentFile=` path against the production systemd unit and set it
+  via the `RPCLinuxServiceAllowlist` admin UI/API before dispatching this
+  procedure against them; the normalizer fails closed with
+  `RPC_LINUX_SERVICE_ENVIRONMENT_FILE_MISSING` while it is unset.
+  `environment_file` must be an absolute path with no traversal or control
+  characters — enforced both in `RPCLinuxServiceAllowlist.clean()` (model
+  layer) and defensively re-checked in the normalizer (in case a row was
+  written outside `full_clean()`). Migration `0060` seeds the procedure
+  `enabled=False`: the paired nms-backend execution handler does not exist
+  yet, and the caller-supplied `credential_pk` param is not yet
+  object-scoped-authorization checked against the requesting user before
+  the referenced `DeviceCredential`'s plaintext value is resolved — a
+  pre-existing gap shared by every `*credential_pk` param in this plugin
+  (`guest_credential_pk`, `restconf_credential_pk`, `rpc_ssh_credential_pk`),
+  tracked in issue #203. **In addition to the `enabled=False` seed**,
+  `_normalize_linux_env_file_upsert_execution()` carries a hard-coded
+  module-level gate (`_LINUX_ENV_FILE_UPSERT_AVAILABLE = False` in
+  `netbox_rpc.domain.normalization`) that unconditionally raises
+  `RPCExecutionError(code="RPC_PROCEDURE_NOT_AVAILABLE")` before any
+  allowlist or credential lookup — because `RPCProcedure.enabled` is ordinary
+  mutable catalog data an operator could flip without knowing the
+  authorization gap below is still open, this second gate enforces the same
+  refusal in code. Do not flip either gate until the execution handler is
+  deployed, #203 (or an equivalent scoped fix) has landed, **and** a third
+  precondition: `run_execution()` resolves `RPCLinuxServiceAllowlist`
+  (`environment_file`/`systemd_unit`/`target_models`/
+  `ssh_credential_override_id`) at worker-claim time, not at the time an
+  approver made their decision, so an approver can approve against one
+  allowlist policy and have the worker execute against a different one an
+  operator edited in between (`approval_required=True` on this procedure
+  makes the gap concrete, not merely theoretical). Closing it needs the
+  allowlist row snapshotted into the approval decision and re-validated for
+  drift at claim time — the general mechanism for this is `#163`'s item 2
+  ("persist a pending approval snapshot") and item 9 (post-approval,
+  pre-dispatch invalidation on drift); `create_execution()` does not yet
+  route `approval_required` executions through that snapshot workflow at all
+  (it calls `RPCExecutionAggregate.queue()` directly — see
+  `command_handlers.py`), so no procedure has this protection today. This
+  procedure inherits that pre-existing gap; it is currently unreachable in
+  practice because `_LINUX_ENV_FILE_UPSERT_AVAILABLE = False` prevents the
+  allowlist lookup from running at all (see
+  `test_upsert_var_gate_blocks_by_default`, which asserts the allowlist
+  query is never made while the gate is closed), but the gate must stay
+  closed until #163 lands for this class of procedure, not just until #203
+  does. **Migration version-skew note:** `0060` originally shipped
+  `enabled=True` and was edited in place to `enabled=False` in a later
+  commit; because Django tracks an applied migration by name only, any
+  database that already ran the original `0060` keeps the stale
+  `enabled=True` default. Additive migration `0061` re-asserts
+  `enabled=False` on the existing procedure row for exactly that case — do
+  not fix a shipped migration's data defaults in place again; add a new
+  additive migration instead. `0060`'s reverse migration deletes the
+  procedure only via `procedures.delete()`; `RPCProcedureCommand.procedure`
+  is `on_delete=CASCADE` so its command row is deleted automatically as part
+  of the same cascade, and `RPCExecution.procedure` is
+  `on_delete=PROTECT` so a `ProtectedError` is raised during collection,
+  before any row is deleted — the procedure and its commands are never left
+  in a partially-rolled-back state. **Three-layer gate enforcement:** the
+  hard-coded code-level gate is checked through one shared function,
+  `normalization.code_gate_unavailable_reason(procedure_name)`, at three
+  points so they can never diverge — (1) admission time, in
+  `command_handlers.create_execution()`, immediately after the
+  `procedure.enabled` check, so a gated procedure can never even get an
+  `RPCExecution` row created; (2) advertisement time, in
+  `RPCProcedureViewSet.available()` (`/procedures/available/`), so a gated
+  procedure never appears as dispatchable to a client; and (3) worker-claim
+  time, inside `_normalize_linux_env_file_upsert_execution()`, retained as
+  defense in depth for an `RPCExecution` row created by an older process
+  before this gate existed (rolling deployment, mixed worker versions) or
+  claimed by a worker running stale code. Round-4 adversarial review on PR
+  #202 found the gate enforced only at layer (3); layers (1) and (2) close
+  that gap so an operator flipping `RPCProcedure.enabled=True` — the only
+  scenario in which the gap was reachable — cannot get an execution created
+  or advertised while the code gate stays closed. Covered by
+  `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
+  advertisement, procedure forced `enabled=True`) alongside the existing
+  `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.
@@ -737,6 +847,95 @@ be used autonomously on destructive procedures.
   before a single trailing newline. The `user_list` and `domain_info`
   `result_schema`s contain no password/hash fields (asserted in
   `tests/test_jobs_samba_normalization.py`).
+- Samba/AD **identity management** procedures (#160) are seeded by migration
+  `0055` (command rows in `0056`). Nine procedures complete the Samba catalog
+  with user/group create/delete/enable/disable/password/membership actions,
+  all targeting `["netbox_fileserver.sambadomain", "virtualization.virtualmachine", "dcim.device"]`
+  like the rest of the Samba catalog. Handler IDs follow the same
+  `samba.1` → `samba_1` mapping (e.g. `service.samba_1.user_create`).
+  - `user_create` (write, 60s, no approval) — creates a Samba/AD user.
+    Required `username`, `password`; optional `full_name`, `disabled`.
+  - `user_delete` (**destructive, 60s, approval required**) — deletes a user
+    by `username`.
+  - `user_set_password` (write, 60s, no approval) — resets a user's password.
+    Required `username`, `password`.
+  - `user_enable` / `user_disable` (write, 30s, no approval) — enable/disable
+    a user account by `username`.
+  - `group_create` (write, 60s, no approval) — creates a group. Required
+    `group_name`.
+  - `group_delete` (**destructive, 60s, approval required**) — deletes a
+    group by `group_name`.
+  - `group_add_members` / `group_remove_members` (write, 60s, no approval) —
+    add/remove one or more users from a group. Required `group_name`,
+    `members` (1–128 unique identifiers).
+
+  **Password handling (hard security invariant).** `user_create` and
+  `user_set_password` are the only two procedures in the whole netbox-rpc
+  catalog whose `params_schema` declares a `password` property. The raw
+  password is **never** represented as an argv token and **never** persisted
+  anywhere in netbox-rpc:
+  1. It travels to `samba-tool` over **stdin only** — both handlers are
+     backend-orchestrated `EXEMPT_HANDLER_RATIONALE` entries in
+     `netbox_rpc.command_contract` (seeded with one representative
+     `backend-orchestrated` command row each in migration `0056`), because a
+     stdin-secret delivery has no faithful fixed-argv representation.
+  2. At execution-**creation** time (`command_handlers.create_execution()`),
+     immediately after `params_schema` validation and before
+     `serializer.save()`, `_scrub_password_param()` pops `password` from the
+     in-place `params` dict and replaces it with `password_sha256`
+     (`hashlib.sha256`) and `password_bytes` (byte length) — so the
+     `RPCExecution` row is never written to the database with the plaintext
+     value, not even transiently. `_PASSWORD_BEARING_HANDLER_IDS` in
+     `command_handlers.py` is the single source of truth for which two
+     handler IDs this applies to.
+  3. The async normalizer (`_extract_samba_password_fingerprint()` in
+     `netbox_rpc.domain.normalization`) never receives, reads, or forwards a
+     raw password — it only reads and forwards the pre-computed
+     `password_sha256`/`password_bytes` fingerprint fields, and defensively
+     rejects a malformed or missing fingerprint (`RPC_PARAM_INVALID`) rather
+     than falling back to any raw value.
+  4. `tests/test_jobs_samba_normalization.py` proves the normalizer never
+     leaks a password even if one is still present in `params` (belt and
+     suspenders), and `netbox_rpc/tests/test_samba_identity_password_redaction.py`
+     proves the same end to end against a real DB row: the persisted `params`,
+     the post-run `normalized_params`, and every `RPCExecutionEvent.data`
+     contain only the fingerprint, never the plaintext.
+
+  **Backend implementation is a deliberately separate, not-yet-shipped step
+  (catalog-first convention).** Like every prior Samba procedure (migrations
+  `0049`–`0052`) and every `EXEMPT_HANDLER_RATIONALE` entry, `netbox-rpc` seeds
+  the audited catalog first; the matching `service.samba_1.*` `@rpc_handler`
+  lands separately in the execution backend and is **not part of this change**
+  (no `samba` handler exists in `netbox-rpc-backend`/`nms-backend` yet). A direct
+  consequence of the invariant above: because the scrub replaces the plaintext
+  with an **irreversible** `password_sha256`, the fingerprint that reaches the
+  backend (via the pull-side execution fetch) can confirm *which* password was
+  requested but can never reconstruct it. Secure plaintext delivery to
+  `samba-tool` stdin for `user_create`/`user_set_password` therefore requires a
+  **separate operator-driven secure channel in the backend handler** (never
+  netbox-rpc's stored params/events) — designing that channel is the paired
+  backend follow-up, tracked outside #160. Until it ships, these two procedures
+  are catalog/audit-only.
+
+  Usernames, group names, and member-list entries are validated in *both* the
+  `params_schema` (migration `0055`) and the normalizer
+  (`_normalize_samba_username` / `_normalize_samba_group_name` /
+  `_normalize_samba_member_list`) with a charset-confined, safe-first-character
+  pattern, so a value can never be read as a `samba-tool` option or shell
+  metacharacter.
+
+  **`fileserver.samba.collect_state` / `fileserver.samba.deploy_config`
+  (#160, migration `0057`)** are two `RPCIntent` rows grouping the pre-existing
+  Samba read/write catalog above — `collect_state` (`execution_mode="parallel"`)
+  groups the nine read procedures (`version`, `service_status`, `config_read`,
+  `config_test`, `list_shares`, `status_report`, `user_list`, `group_list`,
+  `domain_info`); `deploy_config` (`execution_mode="sequential"`) chains
+  `config_test` → `config_deploy` → `service_control` → `service_status`. Both
+  are declarative reference data only — no executor was added; running one goes
+  through the existing `execute_intent()` (#130) fan-out, which re-applies
+  every gate per child. See [`docs/intents.md`](docs/intents.md) → "Seeded
+  intents" for the full contract. The nine identity procedures above are
+  deliberately not grouped into either intent.
 - Minecraft stack procedures are seeded by migration `0029`. They provide
   structured SSH fallback operations for game nodes and server volumes; none
   accepts arbitrary shell command text.
