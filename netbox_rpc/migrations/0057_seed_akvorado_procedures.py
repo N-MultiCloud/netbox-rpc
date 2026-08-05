@@ -132,8 +132,12 @@ AKVORADO_PROCEDURES = (
         "handler_id": "service.akvorado.1.status_stack",
         "target_models": _TARGET_MODELS,
         "effect": "read",
-        # Handler's own sequential budget: ps 30 + logs 45 = 75s.
-        "timeout_seconds": 90,
+        # Handler's own sequential budget: ps 30 + ps_json 30 + logs 45 =
+        # 105s (three sequential SSH calls, not two — the prior comment here
+        # omitted the ps_json call and under-budgeted this timeout below the
+        # handler's actual worst case). Stay comfortably above 105s so the
+        # HTTP client deadline (timeout_seconds + 10) never fires first.
+        "timeout_seconds": 150,
         "approval_required": False,
         "transport_driver": "asyncssh",
         "transport_driver_chain": [],
