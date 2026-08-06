@@ -1,0 +1,68 @@
+from django.db import migrations
+
+
+_CREDENTIAL_REF = {
+    "type": "integer",
+    "minimum": 1,
+    "description": "DeviceCredential primary key; nms-backend decrypts it at execution time.",
+}
+
+_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "procedure", "target"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "procedure": {"type": "string"},
+        "target": {"type": "string"},
+        "output": {"type": "string"},
+    },
+}
+
+HUAWEI_NE8000_BGP_PROCEDURES = [
+    {
+        "name": "Show BGP Peer (Huawei NE8000-F1A)",
+        "handler_id": "network.huawei_ne8000_f1a.show_bgp_peer",
+        "target_models": ["dcim.device"],
+        "effect": "read",
+        "timeout_seconds": 45,
+        "approval_required": False,
+        "description": "Fetch BGP peer status from a Huawei NE8000-F1A device.",
+        "params_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "vrf": {"type": "string", "default": ""},
+                "rpc_ssh_credential_pk": _CREDENTIAL_REF,
+            },
+        },
+        "result_schema": _RESULT_SCHEMA,
+    },
+]
+
+
+def seed_huawei_ne8000_bgp_procedures(apps, schema_editor):
+    RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
+    for item in HUAWEI_NE8000_BGP_PROCEDURES:
+        name = item["name"]
+        defaults = {key: value for key, value in item.items() if key != "name"}
+        RPCProcedure.objects.update_or_create(name=name, defaults=defaults)
+
+
+def unseed_huawei_ne8000_bgp_procedures(apps, schema_editor):
+    RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
+    RPCProcedure.objects.filter(
+        name__in=[item["name"] for item in HUAWEI_NE8000_BGP_PROCEDURES]
+    ).delete()
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("netbox_rpc", "0065_seed_ubuntu_upgrade_26_intent"),
+    ]
+
+    operations = [
+        migrations.RunPython(
+            seed_huawei_ne8000_bgp_procedures,
+            unseed_huawei_ne8000_bgp_procedures,
+        ),
+    ]
