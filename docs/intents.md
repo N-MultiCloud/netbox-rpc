@@ -72,6 +72,35 @@ the aggregate or its event stream. The [Procedure Runs
 tab](../AGENTS.md#procedure-runs-tab-query-side) then attributes the run as
 `Intent: <name>` instead of `Direct`.
 
+## Seeded intents
+
+Earlier documentation described `fileserver.samba.collect_state` and
+`fileserver.samba.deploy_config` as the first production intents, supposedly
+seeded by `netbox_rpc/migrations/0057_seed_fileserver_samba_intents.py`. That
+migration does not exist in this repository, and no current migration seeds
+those Samba intents. They remain possible future catalog additions, not
+installed reference data.
+
+The actual first migration-seeded intent is **Update Ubuntu OS from 24 LTS to
+26 LTS**, seeded by
+`netbox_rpc/migrations/0060_seed_ubuntu_upgrade_26_intent.py`. It groups these
+procedures in declared sequence order:
+
+1. `os.linux.ubuntu.24.upgrade_26.analyze_preupgrade`
+2. `os.linux.ubuntu.24.upgrade_26.save_preupgrade_state`
+3. `os.linux.ubuntu.24.upgrade_26.run_upgrade`
+4. `os.linux.ubuntu.24.upgrade_26.verify_postupgrade`
+
+This declaration is useful for discovery, but it is not a serialized upgrade
+workflow under v1 semantics. Calling `POST /intents/{id}/run/` creates children
+for all allowed steps in one synchronous loop, then RQ workers may run those
+children concurrently. Consequently, `save_preupgrade_state` is not guaranteed
+to finish before `run_upgrade` starts, and `verify_postupgrade` is not guaranteed
+to wait for the upgrade. Operators must dispatch the four procedures
+individually and gate each one on the prior result, following the
+[Ubuntu 24.04 to 26.04 upgrade runbook](ubuntu-24-to-26-upgrade-runbook.md),
+rather than relying on the intent's `run/` action for ordering.
+
 ## Running an intent
 
 ```

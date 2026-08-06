@@ -84,6 +84,17 @@ EXEMPT_HANDLER_RATIONALE = {
         "secret value to a fixed environment-file upsert script over stdin; the "
         "plaintext value must never be represented as argv or persisted."
     ),
+    "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
+        "Builds a timestamped backup directory and manifest from "
+        "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "
+        "the pre-upgrade analysis; directory naming and manifest assembly are "
+        "backend-orchestrated rather than a single fixed argv invocation."
+    ),
+    "os.linux.ubuntu.24.upgrade_26.run_upgrade": (
+        "Long-running, conditionally-rebooting do-release-upgrade orchestration "
+        "with a dry-run safety valve and an explicit reboot-confirmation gate; "
+        "it cannot be faithfully reduced to a single fixed argv invocation."
+    ),
     "os.linux_proxmox.convert_mellanox_nic_to_ethernet": (
         "Destructive Proxmox host workflow with discovery, interface-file rewrite, "
         "driver loading, optional network apply, and optional reboot."

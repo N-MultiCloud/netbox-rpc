@@ -90,6 +90,10 @@ from ..constants import (
     SAMBA_1_GROUP_DELETE,
     SAMBA_1_GROUP_ADD_MEMBERS,
     SAMBA_1_GROUP_REMOVE_MEMBERS,
+    UBUNTU_UPGRADE_26_PROCEDURE_NAMES,
+    UBUNTU_UPGRADE_26_RUN_UPGRADE,
+    UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
+    UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -672,6 +676,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in OOKLA_PROCEDURE_NAMES:
         return _normalize_ookla_execution(execution, target)
+
+    if procedure_name in UBUNTU_UPGRADE_26_PROCEDURE_NAMES:
+        return _normalize_ubuntu_upgrade_26_execution(execution, target)
 
     if procedure_name == "nmap-scan":
         return _normalize_nmap_execution(execution)
@@ -2989,6 +2996,68 @@ def _normalize_ookla_execution(
         if ports:
             normalized["ports"] = ports
             normalized["command_fingerprint"]["ports"] = ports
+
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+_UBUNTU_UPGRADE_26_ABS_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,255}$")
+
+
+def _normalize_ubuntu_upgrade_26_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize an Ubuntu 24->26 LTS upgrade-lifecycle execution."""
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    normalized: dict[str, Any] = {
+        "target": target,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+        },
+    }
+
+    if procedure_name == UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE:
+        if "backup_dir" in params:
+            backup_dir = params.get("backup_dir")
+            if not isinstance(backup_dir, str) or not (
+                _UBUNTU_UPGRADE_26_ABS_PATH_RE.fullmatch(backup_dir)
+            ):
+                raise RPCExecutionError(
+                    "backup_dir must be an absolute path (/... up to 255 safe chars).",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["backup_dir"] = backup_dir
+            normalized["command_fingerprint"]["backup_dir"] = backup_dir
+
+    if procedure_name == UBUNTU_UPGRADE_26_RUN_UPGRADE:
+        dry_run = bool(params.get("dry_run", True))
+        reboot_after_upgrade = bool(params.get("reboot_after_upgrade", False))
+        normalized["dry_run"] = dry_run
+        normalized["reboot_after_upgrade"] = reboot_after_upgrade
+        normalized["command_fingerprint"]["dry_run"] = dry_run
+        normalized["command_fingerprint"]["reboot_after_upgrade"] = (
+            reboot_after_upgrade
+        )
+
+    if procedure_name == UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE:
+        if "expected_version_id" in params:
+            expected_version_id = params.get("expected_version_id")
+            if (
+                not isinstance(expected_version_id, str)
+                or not expected_version_id
+                or len(expected_version_id) > 32
+            ):
+                raise RPCExecutionError(
+                    "expected_version_id must be a non-empty string of at most 32 characters.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["expected_version_id"] = expected_version_id
+            normalized["command_fingerprint"]["expected_version_id"] = (
+                expected_version_id
+            )
 
     _copy_optional_ssh_overrides(params, normalized)
     return normalized

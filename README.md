@@ -49,6 +49,7 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_listeners`
 - `os.linux.ubuntu.24.ookla.check_tls`
 - `os.linux.ubuntu.24.ookla.check_firewall`
+- `os.linux.ubuntu.24.upgrade_26.{analyze_preupgrade,save_preupgrade_state,run_upgrade,verify_postupgrade}`
 - `os.linux.ubuntu.24.{restart,status,start,stop,reload,enable,disable}_service`
   and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`,
   `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`) services.

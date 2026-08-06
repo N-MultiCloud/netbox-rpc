@@ -397,6 +397,14 @@ the agent must confirm with the user:
 3. Never pass reboot=True without separate explicit user confirmation.
 ```
 
+### Other Approval-Gated Destructive Procedures
+
+| Procedure | Required operator confirmation |
+|---|---|
+| `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
+| `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
+| `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
+
 ### Other Write Procedures
 
 The procedures below are `approval_required=False` but still modify production
@@ -1007,6 +1015,36 @@ be used autonomously on destructive procedures.
   agent-install procedures), and forwards only validated `install_dir` /
   `config_path` (absolute-path charset) and `ports` (int list, ≤16) hints. It
   must never accept arbitrary SSH command text.
+- Ubuntu 24.04 to 26.04 LTS upgrade lifecycle procedures are seeded by
+  migrations `0058` (procedures) and `0059` (commands), with the ordered
+  `Update Ubuntu OS from 24 LTS to 26 LTS` intent seeded by migration `0060`.
+  All four target `dcim.device` and `virtualization.virtualmachine`; handler IDs
+  equal procedure names:
+  - `os.linux.ubuntu.24.upgrade_26.analyze_preupgrade` is read-only and not
+    approval-gated. Its ten fixed `shell_argv` rows inspect release/kernel,
+    root disk, held packages, third-party APT source filenames, upgrader
+    presence, pending reboot state, crontab, and active sessions.
+  - `os.linux.ubuntu.24.upgrade_26.save_preupgrade_state` is an additive write
+    and not approval-gated. It is command-contract exempt because timestamped
+    directory creation and manifest assembly across APT sources, package
+    selections, holds, and analysis state are backend-orchestrated; its sole
+    command row is representative. An optional `backup_dir` is confined to the
+    absolute-path safe charset.
+  - `os.linux.ubuntu.24.upgrade_26.run_upgrade` is destructive and
+    `approval_required=True`. It is exempt because long-running
+    `do-release-upgrade`, conditional rebooting, and safety gates cannot be
+    faithfully represented by one fixed argv. The normalizer, not JSON Schema
+    defaults alone, makes omitted `dry_run` effectively `true` and omitted
+    `reboot_after_upgrade` effectively `false`.
+  - `os.linux.ubuntu.24.upgrade_26.verify_postupgrade` is read-only and not
+    approval-gated. Its six fixed argv rows inspect release/kernel, APT and
+    dpkg health, held packages, and pending reboot state; optional
+    `expected_version_id` is a bounded free-form comparison value.
+
+  The fixed analyze/verify rows contain only `SAFE_TOKEN_RE` tokens and never
+  shell strings. The v1 intent action does not serialize RQ execution; operators
+  must run and gate each procedure individually using
+  `docs/ubuntu-24-to-26-upgrade-runbook.md`.
 - `nmap-scan` is seeded by migration `0045` as a **read-only**
   (`effect="read"`, `approval_required=False`, 120s) SSH-backed diagnostic
   procedure. Handler ID: `os.linux.nmap.scan`. It targets
