@@ -88,6 +88,57 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
 - `cancel_execution(execution, user)` is a queued-only command that emits
   `ExecutionCancelled`.
 
+### Approval enforcement status
+
+The "approval permission" check in `create_execution(...)` verifies only that
+the **requesting** user holds `approve_rpcprocedure` — it is a single-actor
+permission gate, not a two-person approval. Both admission checks in
+`create_execution` are also **object-unscoped**: `execute_rpcprocedure` and
+`approve_rpcprocedure` are each checked via
+`user.has_perm("netbox_rpc.<perm>")` without passing the concrete procedure,
+while the execution serializer accepts procedures from an unrestricted
+queryset. NetBox's object-permission backend treats an objectless check as
+satisfied when the user holds that permission for *any* constrained object,
+so an execute (or approve) permission scoped to one procedure satisfies
+admission for every other enabled procedure — including, with any qualifying
+approve grant, `approval_required` ones. Per-procedure permission constraints
+are not preserved on either check. The decision handler repeats the same
+objectless approve check (plus target-procedure *view* access), so the
+decision path has the same scope limitation.
+
+The two-person workflow is a **partial foundation**, not a complete dormant
+feature. The `requested` / `pending_approval` / `approved` / `rejected` /
+`expired` states, the `RPCApprovalRequest` immutable snapshot model, the
+aggregate decision transitions, and the command-only `approve`/`reject` API
+exist and are unit-tested, but several enforcement pieces are absent beyond
+request routing:
+
+- `create_execution` does not route `approval_required` procedures through the
+  workflow: `RPCApprovalRequest` is never instantiated by the production
+  request path, and executions go straight to `queued`;
+- `approve_execution()` does not pass live protected state to the aggregate's
+  `approve()`, so the `matches_current()` snapshot-drift check is skipped;
+- no production code enforces `RPCApprovalRequest.expires_at`, so stale
+  decisions would not be rejected;
+- approval terminates at `approved` with no transition to `queued` and no
+  enqueue step, so a routed-and-approved execution would be stranded;
+- there is no pre-dispatch drift re-check at worker claim time;
+- segregation of duties is **conditional on the caller-populated snapshot**:
+  `_require_distinct_actor()` rejects a self-decision only when
+  `snapshot.requested_by_id` is non-null and equal to the deciding actor.
+  `RPCApprovalRequest.requested_by_id` is nullable and nothing binds it to
+  `RPCExecution.requested_by_id` or the request events, so a pending snapshot
+  with a missing or inconsistent requester would let the actual requester
+  approve their own request. Non-null requester identity binding is another
+  missing enforcement invariant.
+
+The remaining snapshot-validation and pre-dispatch drift work is tracked by
+the two-person-approval epic #163 (open items 2 and 9); the decision API,
+opt-in, capability, and lease groundwork already landed via #165–#168. See
+`AGENTS.md` § "Two-person approval workflow — foundation". Until enforcement
+lands, treat `approval_required=True` as "requester must hold the (model-level)
+approve permission", not as an enforced second-person review.
+
 Query-side helpers live in `netbox_rpc.application.queries`. Execution list,
 detail, and event endpoints read projections. The execution API is
 command-only for writes: create and cancel are explicit commands. PUT/PATCH are
