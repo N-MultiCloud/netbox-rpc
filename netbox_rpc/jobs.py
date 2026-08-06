@@ -133,7 +133,19 @@ def _call_backend(
     lease: Any = None,
 ) -> dict[str, Any]:
     url = f"{target.url.rstrip('/')}/rpc/executions/{execution.pk}/run"
-    timeout = (10, max(execution.procedure.timeout_seconds + 10, 30))
+    # #215: prefer the timeout_seconds snapshot command_handlers.create_execution()
+    # stamped into params at enqueue time over the (mutable) procedure's
+    # *current* timeout_seconds, so this HTTP read timeout and the RQ
+    # job_timeout already committed at enqueue are always derived from the
+    # same frozen value and can never diverge if an operator edited
+    # procedure.timeout_seconds while this execution sat queued. Executions
+    # created before this fix (or missing the snapshot for any other reason)
+    # fall back to the live procedure value, unchanged from prior behavior.
+    params = execution.params if isinstance(execution.params, dict) else {}
+    timeout_seconds = params.get(RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY)
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        timeout_seconds = execution.procedure.timeout_seconds
+    timeout = (10, max(timeout_seconds + 10, 30))
     # #168: when a signed dispatch lease was minted, hand it to the backend in
     # the body. Prod-safe: with no signing key configured the lease is None and
     # the body stays ``{}`` byte-for-byte, exactly as before.

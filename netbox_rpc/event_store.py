@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -57,6 +58,12 @@ _LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "content")
 _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
+# Appended by redact_event_value() to any string it truncates. A single named
+# constant so _result_schema_string_limits() (#215 round 3) can reserve
+# exactly this much room out of a schema-declared maxLength, guaranteeing a
+# persisted truncated value (content + marker) never exceeds its own schema
+# bound.
+_TRUNCATION_MARKER = "...[truncated]"
 StringLimitPath = tuple[str, ...]
 _SECRET_CONTENT_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -138,7 +145,7 @@ def redact_event_value(
         max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
         value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
         if len(value) > max_length:
-            return f"{value[:max_length]}...[truncated]"
+            return f"{value[:max_length]}{_TRUNCATION_MARKER}"
         return value
     if isinstance(value, (bool, int, float)) or value is None:
         return value
@@ -465,13 +472,58 @@ def record_execution_expired(
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
+    string_limits = _result_schema_string_limits(execution)
     result = redact_event_data(
         raw_result if isinstance(raw_result, dict) else {},
-        string_limits=_result_schema_string_limits(execution),
+        string_limits=string_limits,
     )
     error_code = str(response.get("error_code") or "")
     error_message = str(response.get("error_message") or "")
-    schema_mismatch = _backend_result_schema_mismatch(execution, raw_result) if ok else ""
+    # #215 round 3: validate the raw, untouched backend result -- not a
+    # length-clamped copy. A schema property only ends up in string_limits
+    # when its maxLength was deliberately widened above MAX_EVENT_STRING_LENGTH
+    # (see _collect_schema_string_limits) -- i.e. it was opted into holding
+    # large diagnostic content (a log tail, a config dump) specifically so it
+    # would NOT be silently truncated. Clamping the value *before* validating
+    # it (the round-2 approach) could hide a genuine pattern/enum/type
+    # violation that only appears in the truncated tail, and the persisted
+    # value (content + "...[truncated]") could itself exceed the schema's own
+    # maxLength -- a record marked ExecutionSucceeded storing a value that
+    # would fail the schema it was validated against. Instead,
+    # _backend_result_schema_mismatch() validates the complete raw value
+    # against a schema copy with maxLength removed only at these specific
+    # wide-override paths (_relax_schema_string_lengths) -- every other
+    # validator (pattern/enum/type/required/...) still runs at full fidelity
+    # against the untouched string, everywhere in the schema. The
+    # persisted/redacted `result` above is separately clamped to fit its
+    # schema bound by _result_schema_string_limits() reserving room for the
+    # truncation marker, so what is validated and what is persisted can never
+    # disagree about whether a wide field is oversized.
+    schema_mismatch = (
+        _backend_result_schema_mismatch(execution, raw_result, string_limits=string_limits)
+        if ok
+        else ""
+    )
+    if ok and not schema_mismatch:
+        # #215 round 3 follow-up (adversarial review): the raw value passing
+        # the relaxed schema does not guarantee the *persisted* value does.
+        # redact_event_value() truncates any string longer than its limit by
+        # appending "...[truncated]" -- for a field with a `pattern` (or other
+        # non-length constraint) alongside its maxLength, a raw value that
+        # satisfies `pattern` can stop satisfying it once the marker is
+        # appended (e.g. pattern "^a+$" matches "aaaa...a" but not
+        # "aaaa...a...[truncated]"). This applies to any string field that
+        # gets truncated -- both the deliberately-widened paths in
+        # string_limits AND any field truncated only by the
+        # MAX_EVENT_STRING_LENGTH default -- not just the #215 wide-override
+        # case. Re-validate the truncated/redacted `result` against the real,
+        # unrelaxed schema: `_result_schema_string_limits()` already reserved
+        # marker headroom so a truncated value never exceeds its own
+        # maxLength, so this second pass only re-checks pattern/enum/type/...
+        # against what will actually be stored. A record must never be marked
+        # ExecutionSucceeded while storing data that fails the schema it
+        # claims to satisfy.
+        schema_mismatch = _backend_result_schema_mismatch(execution, result)
     finished_at = timezone.now()
     with transaction.atomic():
         for item in response.get("events") or []:
@@ -516,7 +568,17 @@ def _result_schema_string_limits(
         return {}
     limits: dict[StringLimitPath, int] = {}
     _collect_schema_string_limits(schema, path=(), limits=limits)
-    return limits
+    # #215 round 3: reserve room for the "...[truncated]" marker
+    # redact_event_value() appends to a clamped string, so the persisted
+    # truncated value (content[:limit] + marker) never exceeds the schema's
+    # own declared maxLength -- a record marked ExecutionSucceeded must never
+    # store a value that would itself fail the schema it was validated
+    # against. Scoped to these schema-derived wide overrides only; it does
+    # not touch the MAX_EVENT_STRING_LENGTH default or any string_limits a
+    # caller builds directly (e.g. the ParametersNormalized large-content
+    # limits below).
+    marker_length = len(_TRUNCATION_MARKER)
+    return {path: max(limit - marker_length, 0) for path, limit in limits.items()}
 
 
 def _collect_schema_string_limits(
@@ -548,15 +610,79 @@ def _collect_schema_string_limits(
         )
 
 
+def _strip_max_length_at_paths(
+    schema: dict[str, Any],
+    *,
+    string_limits: dict[StringLimitPath, int],
+    path: StringLimitPath,
+) -> None:
+    """Recursively pop ``maxLength`` from ``schema`` at paths in ``string_limits``.
+
+    Mirrors ``_collect_schema_string_limits``'s own ``properties``/``items``
+    traversal so the two stay in lockstep -- every path this function can
+    reach is exactly the set of paths that function could have registered a
+    wide override for. Mutates ``schema`` in place; callers must pass a copy.
+    """
+    if path in string_limits:
+        schema.pop("maxLength", None)
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for key, child_schema in properties.items():
+            if isinstance(child_schema, dict):
+                _strip_max_length_at_paths(
+                    child_schema,
+                    string_limits=string_limits,
+                    path=(*path, str(key)),
+                )
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _strip_max_length_at_paths(
+            items,
+            string_limits=string_limits,
+            path=(*path, "*"),
+        )
+
+
+def _relax_schema_string_lengths(
+    schema: dict[str, Any],
+    *,
+    string_limits: dict[StringLimitPath, int],
+) -> dict[str, Any]:
+    """Return a deep copy of ``schema`` with ``maxLength`` removed at wide paths.
+
+    Used so a backend result's complete, untouched value can be validated
+    against every other validator (``pattern``/``enum``/``type``/``required``/
+    ...) at full fidelity, without failing purely because a field that was
+    deliberately widened above the default event-string limit (#215) is
+    longer than its own declared ``maxLength`` -- the persisted/redacted copy
+    is separately clamped to fit that same bound by
+    ``_result_schema_string_limits``. Only paths present in ``string_limits``
+    are touched; every other constraint in the schema is left byte-for-byte
+    unchanged.
+    """
+    relaxed = copy.deepcopy(schema)
+    _strip_max_length_at_paths(relaxed, string_limits=string_limits, path=())
+    return relaxed
+
+
 def _backend_result_schema_mismatch(
     execution: RPCExecution,
     raw_result: object,
+    *,
+    string_limits: dict[StringLimitPath, int] | None = None,
 ) -> str:
     schema = getattr(getattr(execution, "procedure", None), "result_schema", None)
     if not schema:
         return ""
+    validation_schema = (
+        _relax_schema_string_lengths(schema, string_limits=string_limits)
+        if string_limits
+        else schema
+    )
     try:
-        jsonschema.validate(raw_result, schema)
+        jsonschema.validate(raw_result, validation_schema)
     except (jsonschema.ValidationError, jsonschema.SchemaError) as exc:
         path = ".".join(str(part)[:64] for part in exc.absolute_path)
         location = f"result.{path}" if path else "result"

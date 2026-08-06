@@ -792,6 +792,17 @@ class RPCExecution(NetBoxModel):
     # declared parameters.
     _INTENT_PARAM_KEYS = ("_intent_name", "_intent")
 
+    # Underscore-prefixed internal key command_handlers.create_execution()
+    # stamps into ``params`` with the dispatched procedure's
+    # ``timeout_seconds`` value in effect at creation time (issue #215).
+    # jobs._call_backend() reads this frozen snapshot for its own HTTP read
+    # timeout instead of re-reading the (mutable) procedure's *current*
+    # timeout_seconds at dispatch time, so the RQ job_timeout committed at
+    # enqueue and the backend HTTP timeout used later can never diverge if an
+    # operator edits timeout_seconds on the procedure while this execution
+    # sits queued.
+    TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY = "_timeout_seconds_snapshot"
+
     @property
     def intent_reference(self) -> str | None:
         """Best-effort intent name when this run was dispatched via an intent.

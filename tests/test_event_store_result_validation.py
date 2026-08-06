@@ -162,6 +162,215 @@ def test_schema_bounded_large_config_read_content_is_not_truncated(
     assert "...[truncated]" not in stored_content
 
 
+def test_oversized_wide_field_does_not_mask_unrelated_pattern_violation(
+    event_store_module,
+) -> None:
+    """#215 round 3: relaxing ``maxLength`` at a wide-override path must not
+    weaken any other validator on the same schema. Round 2's
+    clamp-then-validate approach validated a truncated *copy* of the oversized
+    field, which happened to pass either way in this scenario -- the point of
+    this test is that round 3's relax-then-validate-raw approach still fails
+    closed on a ``pattern`` violation elsewhere in the result, proving the
+    schema relaxation is scoped to exactly the wide-override path and not a
+    blanket ``maxLength`` removal.
+    """
+    event_store, events = event_store_module
+    procedure_name = "os.linux.ubuntu.24.upgrade_26.run_upgrade"
+    schema = {
+        "type": "object",
+        "required": ["ok", "procedure", "target", "content", "mode"],
+        "additionalProperties": False,
+        "properties": {
+            "ok": {"type": "boolean"},
+            "procedure": {"type": "string"},
+            "target": {"type": "string"},
+            "content": {"type": "string", "maxLength": 1024 * 1024},
+            "mode": {"type": "string", "pattern": "^(safe|unsafe)$"},
+        },
+    }
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, result_schema=schema)
+    )
+    oversized_content = "x" * (1024 * 1024 + 2048)
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": True,
+            "result": {
+                "ok": True,
+                "procedure": procedure_name,
+                "target": "edge-01",
+                "content": oversized_content,
+                # A genuine, unrelated schema violation -- must still be
+                # caught even though `content` (in the same result) is
+                # oversized and schema-relaxed for validation.
+                "mode": "not-a-valid-mode",
+            },
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_oversized_wide_field_truncates_within_its_own_schema_max_length(
+    event_store_module,
+) -> None:
+    """#215 round 3: a persisted truncated value must never exceed the
+    schema's own declared ``maxLength`` for that field.
+    ``_result_schema_string_limits()`` reserves ``len(_TRUNCATION_MARKER)``
+    bytes of headroom out of the schema-declared limit specifically so that
+    ``content[:limit] + marker`` always fits inside the original bound --
+    a record marked ``ExecutionSucceeded`` must never store a value that
+    would itself fail the schema it was validated against.
+    """
+    event_store, events = event_store_module
+    procedure_name = "os.linux.ubuntu.24.upgrade_26.run_upgrade"
+    schema_max_length = 5000  # just above MAX_EVENT_STRING_LENGTH (4096)
+    schema = {
+        "type": "object",
+        "required": ["ok", "procedure", "target", "log_tail"],
+        "additionalProperties": False,
+        "properties": {
+            "ok": {"type": "boolean"},
+            "procedure": {"type": "string"},
+            "target": {"type": "string"},
+            "log_tail": {"type": "string", "maxLength": schema_max_length},
+        },
+    }
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, result_schema=schema)
+    )
+    oversized_tail = "y" * (schema_max_length + 1000)
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": True,
+            "result": {
+                "ok": True,
+                "procedure": procedure_name,
+                "target": "edge-01",
+                "log_tail": oversized_tail,
+            },
+        },
+    )
+
+    assert len(events) == 1
+    success = events[0]
+    assert success.event_name == "ExecutionSucceeded"
+    stored_tail = success.result["log_tail"]
+    assert stored_tail.endswith(event_store._TRUNCATION_MARKER)
+    assert len(stored_tail) <= schema_max_length
+    truncated_length = schema_max_length - len(event_store._TRUNCATION_MARKER)
+    assert stored_tail == (
+        f"{oversized_tail[:truncated_length]}{event_store._TRUNCATION_MARKER}"
+    )
+
+
+def test_truncation_introduced_pattern_violation_fails_closed(
+    event_store_module,
+) -> None:
+    """#215 round 3 follow-up (adversarial review finding 1): a raw value can
+    satisfy a ``pattern`` constraint before truncation and violate it after --
+    ``redact_event_value()`` appends ``"...[truncated]"`` to any string over
+    its limit, and that marker is not made of the pattern's allowed
+    characters. The relaxed-schema pass over the *raw* result only proves the
+    raw value is valid; it says nothing about the *persisted* (truncated)
+    value that actually gets stored and marked ``ExecutionSucceeded``. This
+    must fail closed as ``RESULT_SCHEMA_MISMATCH_CODE`` instead.
+    """
+    event_store, events = event_store_module
+    procedure_name = "os.linux.ubuntu.24.upgrade_26.run_upgrade"
+    schema_max_length = 5000  # above MAX_EVENT_STRING_LENGTH (4096)
+    schema = {
+        "type": "object",
+        "required": ["ok", "procedure", "target", "log_tail"],
+        "additionalProperties": False,
+        "properties": {
+            "ok": {"type": "boolean"},
+            "procedure": {"type": "string"},
+            "target": {"type": "string"},
+            "log_tail": {
+                "type": "string",
+                "maxLength": schema_max_length,
+                # Only ever emits the letter "a" -- the raw oversized value
+                # below satisfies this, but the persisted marker-suffixed
+                # copy cannot.
+                "pattern": "^a+$",
+            },
+        },
+    }
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, result_schema=schema)
+    )
+    # Oversized but entirely valid against the raw, relaxed-maxLength schema.
+    oversized_tail = "a" * (schema_max_length + 1000)
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": True,
+            "result": {
+                "ok": True,
+                "procedure": procedure_name,
+                "target": "edge-01",
+                "log_tail": oversized_tail,
+            },
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_relax_schema_string_lengths_only_strips_wide_override_paths(
+    event_store_module,
+) -> None:
+    """Direct unit coverage of the schema-relaxation helpers: only paths
+    present in ``string_limits`` lose their ``maxLength``, every other
+    constraint (including a sibling field's own ``maxLength``) is left
+    byte-for-byte unchanged, and the input schema is never mutated in place.
+    """
+    event_store, _ = event_store_module
+    schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "maxLength": 1024 * 1024},
+            "mode": {
+                "type": "string",
+                "maxLength": 10,
+                "pattern": "^(safe|unsafe)$",
+            },
+            "items": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 1024 * 1024},
+            },
+        },
+    }
+    string_limits = {
+        ("content",): 1024 * 1024,
+        ("items", "*"): 1024 * 1024,
+    }
+
+    relaxed = event_store._relax_schema_string_lengths(
+        schema, string_limits=string_limits
+    )
+
+    assert "maxLength" not in relaxed["properties"]["content"]
+    assert relaxed["properties"]["mode"]["maxLength"] == 10
+    assert relaxed["properties"]["mode"]["pattern"] == "^(safe|unsafe)$"
+    assert "maxLength" not in relaxed["properties"]["items"]["items"]
+    # The input schema must be a deep copy target, not mutated in place.
+    assert schema["properties"]["content"]["maxLength"] == 1024 * 1024
+    assert schema["properties"]["items"]["items"]["maxLength"] == 1024 * 1024
+
+
 def test_schema_bounded_large_config_read_redacts_secret_content(
     event_store_module,
 ) -> None:

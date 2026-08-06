@@ -164,7 +164,12 @@ def test_call_backend_wraps_request_errors_as_backend_unreachable(
         headers={"Authorization": "Token test"},
         verify_ssl=True,
     )
-    execution = SimpleNamespace(pk=123, procedure=SimpleNamespace(timeout_seconds=20))
+    # #215: _call_backend() reads execution.params for the frozen
+    # TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY snapshot before falling back to
+    # procedure.timeout_seconds; params={} exercises that fallback path.
+    execution = SimpleNamespace(
+        pk=123, procedure=SimpleNamespace(timeout_seconds=20), params={}
+    )
     post_mock = MagicMock(
         side_effect=jobs_module.requests.exceptions.ConnectionError(
             "connection refused"
@@ -237,7 +242,13 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox_rpc_models.RPCLinuxServiceAllowlist = type(
         "RPCLinuxServiceAllowlist", (), {}
     )
-    netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
+    # #215: jobs._call_backend() reads this class attribute as the params key
+    # for the frozen timeout_seconds snapshot; the stub must define it too.
+    netbox_rpc_models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 
     monkeypatch.setitem(sys.modules, "netbox", netbox)

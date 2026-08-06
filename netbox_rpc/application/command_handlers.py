@@ -31,6 +31,40 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
     }
 )
 
+# #215: RPCExecutionJob.enqueue() used to fall back to a flat 600s RQ
+# job_timeout for every procedure, regardless of the dispatched procedure's
+# own timeout_seconds. A procedure whose backend call can legitimately run
+# longer than 600s (e.g. qemu_vm_lifecycle at 3600s, or the Ubuntu 24->26
+# run_upgrade at 7200s) would have its RQ worker killed mid-run, stranding
+# the execution in RUNNING forever with no automatic reconciliation. The RQ
+# job_timeout must always exceed the _call_backend() HTTP read timeout
+# (max(timeout_seconds + 10, 30), see jobs.py) or the worker gets killed
+# before the HTTP call it is blocked on can even return cleanly.
+_RPC_JOB_TIMEOUT_HEADROOM_SECONDS = 60
+_RPC_JOB_TIMEOUT_FLOOR_SECONDS = 600
+
+
+def _execution_job_timeout(timeout_seconds: object) -> int:
+    """Derive the RQ ``job_timeout`` from a frozen ``timeout_seconds`` value.
+
+    Scales with the procedure's ``timeout_seconds`` (plus headroom over the
+    _call_backend() HTTP timeout) instead of a flat constant, while keeping
+    the historical 600s floor for short procedures so existing behavior is
+    unchanged for anything that was already comfortably within it.
+
+    Takes the raw seconds value, not a procedure object: the caller must pass
+    the SAME frozen value it also stamps into
+    ``RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY`` (see
+    create_execution()), so this RQ deadline and jobs._call_backend()'s later
+    HTTP timeout are always derived from one immutable number and can never
+    diverge if an operator edits procedure.timeout_seconds while the
+    execution sits queued.
+    """
+    return max(
+        int(timeout_seconds or 0) + _RPC_JOB_TIMEOUT_HEADROOM_SECONDS,
+        _RPC_JOB_TIMEOUT_FLOOR_SECONDS,
+    )
+
 
 def _scrub_password_param(params: dict[str, Any]) -> None:
     """Replace an in-place ``password`` param with a non-reversible fingerprint.
@@ -132,6 +166,17 @@ def create_execution(*, serializer: Any, user: object) -> object:
                 "This procedure requires approval (approve_rpcprocedure permission)."
             )
     params = serializer.validated_data.get("params") or {}
+    # #215 round 3: ``.get("params") or {}`` builds a brand-new, unlinked dict
+    # when the caller's original ``params`` was falsy (``None``/``{}`` --
+    # common for procedures with no/optional params). Re-assign it back onto
+    # ``validated_data`` immediately so every later in-place mutation of this
+    # local ``params`` (the password scrub below, the timeout-snapshot stamp
+    # further down) is guaranteed visible to ``serializer.save()`` regardless
+    # of whether the original value was falsy -- this same gap silently
+    # existed in ``_scrub_password_param()`` already, currently masked only
+    # because both password-bearing handlers require "password", so their
+    # params is never falsy in practice.
+    serializer.validated_data["params"] = params
     if procedure.params_schema:
         try:
             jsonschema.validate(params, procedure.params_schema)
@@ -154,6 +199,31 @@ def create_execution(*, serializer: Any, user: object) -> object:
     # #167: fail closed before enqueue on a backend capability mismatch.
     _verify_backend_capability(procedure)
 
+    # #215 round 3: stamp the procedure's timeout_seconds onto `params`
+    # BEFORE serializer.save(), not via a second post-save write. The
+    # original #215 fix wrote this snapshot with a *second*, unguarded
+    # `execution.save(update_fields=["params"])` call sitting outside both
+    # this transaction and the RQ-enqueue try/except below -- a failure in
+    # that second write (a DB hiccup, a signal handler, anything) orphaned an
+    # already-committed `queued` execution with no job and no failure event.
+    # Folding the stamp into the SAME `params` dict serializer.save() persists
+    # means either the whole execution + snapshot commits together in this one
+    # atomic block, or nothing does -- mirrors how _scrub_password_param()
+    # already mutates `params` in place before save. Stamped after
+    # params_schema validation above, so a schema declaring
+    # additionalProperties: false never rejects the injected key (the same
+    # reason the intent origin marker is stamped post-creation instead --
+    # execute_intent() only learns the child execution's pk after
+    # create_execution() returns it, so that marker cannot be folded in here).
+    # RPCExecutionJob.enqueue() below and jobs._call_backend() at dispatch
+    # time both read this SAME frozen value, so a later edit to
+    # procedure.timeout_seconds while this execution sits queued can never let
+    # the RQ deadline and the backend HTTP timeout diverge.
+    from ..models import RPCExecution
+
+    timeout_seconds_snapshot = procedure.timeout_seconds
+    params[RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY] = timeout_seconds_snapshot
+
     with transaction.atomic():
         # #166: a normal requester cannot select an arbitrary backend — the
         # authoritative selected backend from RPC settings always wins over any
@@ -169,6 +239,7 @@ def create_execution(*, serializer: Any, user: object) -> object:
             name=f"RPC Execution: {execution.procedure.name}",
             backend_pk=execution.backend_id,
             execution_pk=execution.pk,
+            job_timeout=_execution_job_timeout(timeout_seconds_snapshot),
         )
     except Exception:
         mark_execution_failed(

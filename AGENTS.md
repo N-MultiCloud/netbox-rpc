@@ -1045,6 +1045,65 @@ be used autonomously on destructive procedures.
 - Ubuntu 24.04 to 26.04 LTS upgrade lifecycle procedures are seeded by
   migrations `0063` (procedures) and `0064` (commands), with the ordered
   `Update Ubuntu OS from 24 LTS to 26 LTS` intent seeded by migration `0065`.
+  Migration `0066` (issue #215) patches `run_upgrade`'s `result_schema` in
+  place to give `upgrade_log_tail` an explicit `maxLength` of 65536 —
+  without it, `event_store.py`'s 4096-char default silently clamped the log
+  tail with no validation error. Round 2 of #215's adversarial review found
+  that adding the bound alone would have created a worse failure mode: a
+  backend returning even a few bytes more than 65536 chars would fail
+  `_backend_result_schema_mismatch()` against the *raw* result and land the
+  execution in `FAILED`/`RPC_RESULT_SCHEMA_MISMATCH` instead of clamping —
+  turning an otherwise successful, possibly destructive, already-completed
+  upgrade into a reported failure that could prompt an operator to re-run it
+  unnecessarily. Round 2 first closed that gap by validating a length-clamped
+  *copy* of the result, but round 3 of #215's adversarial review found that
+  clamping-before-validating could itself hide a genuine schema violation that
+  only appeared in the truncated tail, and could persist a value
+  (`content[:max_length] + marker`) longer than the schema's own `maxLength`.
+  `event_store.record_backend_response()` now instead validates the complete,
+  untouched raw result against a deep-copied schema with `maxLength` stripped
+  only at the specific paths `_collect_schema_string_limits()` already
+  registers as deliberately-widened above the 4096-char default
+  (`_relax_schema_string_lengths()` / `_strip_max_length_at_paths()`) — every
+  other validator (`pattern`/`enum`/`type`/`required`/...) still runs at full
+  fidelity everywhere else in the schema. The persisted/redacted result is
+  separately clamped to fit the schema bound by `_result_schema_string_limits()`,
+  which now reserves `len("...[truncated]")` bytes of headroom out of each
+  schema-declared `maxLength` so a truncated value can never itself exceed the
+  bound it was validated against. An oversized `upgrade_log_tail` is safely
+  truncated — with the standard `"...[truncated]"` marker on the persisted
+  result, same as any other wide-override result string — and the execution
+  still succeeds; validated-vs-persisted can never disagree about whether a
+  wide field is oversized. The `run_upgrade` backend handler (issue
+  nms-backend#623) SHOULD still cap the tail it returns well below that bound
+  (e.g. ~32KB) as a matter of efficiency, not correctness — netbox-rpc no
+  longer relies on the schema ceiling as the actual truncation point.
+  **Round 3's own adversarial review (a further, final follow-up round on
+  the same branch) found one more gap in this mechanism**: validating the
+  raw, untouched result against the relaxed schema only proves the *raw*
+  value is schema-valid — it says nothing about the *persisted* (redacted +
+  truncated) value that `redact_event_data()` actually produces and that
+  gets stored on `ExecutionSucceeded`. A field can carry both a wide
+  `maxLength` override *and* a `pattern` (or other non-length constraint);
+  a raw value can satisfy `pattern` while oversized, yet the persisted
+  `content[:limit] + "...[truncated]"` copy can violate that same `pattern`
+  because the marker's characters aren't necessarily in the pattern's
+  allowed set — recording `ExecutionSucceeded` in that case would store a
+  value that fails the schema it claims to satisfy. `record_backend_response()`
+  now runs a **second** validation pass, after the first (relaxed-schema,
+  raw-value) pass succeeds: it validates the already-redacted/truncated
+  `result` object against the real, unrelaxed schema
+  (`_backend_result_schema_mismatch(execution, result)`, no `string_limits`
+  override). Because `_result_schema_string_limits()` already reserves
+  marker headroom, this second pass never fails purely on length — it only
+  re-checks `pattern`/`enum`/`type`/`required`/... against what will
+  actually be written to the database. Not currently reachable in
+  production (no seeded `result_schema` combines a wide-override
+  `maxLength` with a `pattern` on the same field — `upgrade_log_tail` itself
+  has no `pattern`), but this is shared, general-purpose infrastructure any
+  future wide-override field could hit, so the fix is unconditional rather
+  than scoped to `run_upgrade`. Regression coverage:
+  `tests/test_event_store_result_validation.py::test_truncation_introduced_pattern_violation_fails_closed`.
   All four target `dcim.device` and `virtualization.virtualmachine`; handler IDs
   equal procedure names:
   - `os.linux.ubuntu.24.upgrade_26.analyze_preupgrade` is read-only and not
@@ -1062,7 +1121,55 @@ be used autonomously on destructive procedures.
     `do-release-upgrade`, conditional rebooting, and safety gates cannot be
     faithfully represented by one fixed argv. The normalizer, not JSON Schema
     defaults alone, makes omitted `dry_run` effectively `true` and omitted
-    `reboot_after_upgrade` effectively `false`.
+    `reboot_after_upgrade` effectively `false`. Its `timeout_seconds=7200` is
+    the motivating case for issue #215's job-timeout fix: `create_execution()`
+    now derives the RQ `job_timeout` from `procedure.timeout_seconds` (plus
+    headroom, floored at the historical 600s) via
+    `command_handlers._execution_job_timeout()`, instead of the flat
+    `RPC_JOB_TIMEOUT = 600` constant `RPCExecutionJob.enqueue()` used to fall
+    back to unconditionally. A real (non-dry-run) `run_upgrade` can now hold
+    an RQ worker for up to ~2 hours instead of being killed at 10 minutes —
+    size `netbox-rq` worker concurrency on the NetBox host accordingly if
+    Ubuntu upgrades run alongside other long procedures
+    (`qemu_vm_lifecycle`, Passbolt import/rotate). Round 2 of #215's
+    adversarial review found that `jobs._call_backend()` re-read the
+    procedure's *current* `timeout_seconds` for its own HTTP read timeout,
+    so an operator editing `timeout_seconds` while an execution sat queued
+    could desync the already-committed RQ deadline from the later HTTP
+    timeout. `create_execution()` stamps the frozen value into
+    `execution.params[RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY]`
+    strictly *after* `params_schema` validation (a `params_schema` may declare
+    `additionalProperties: false`, so the key can't be present before
+    validation) but, as of round 3, *before* `serializer.save()` — folded into
+    the same local `params` dict the password scrub already mutates in place,
+    so the stamp and the execution row commit together in the single
+    `transaction.atomic()` block, rather than via a second, unguarded
+    `execution.save(update_fields=["params"])` call outside both that
+    transaction and the RQ-enqueue `try`/`except` (round 2's approach), which
+    risked leaving an orphaned `queued` execution with no job and no failure
+    event if that second write failed. Both `_execution_job_timeout()` (takes
+    a raw seconds value, not a procedure object) and `jobs._call_backend()`
+    read that same frozen snapshot, falling back to the live
+    `procedure.timeout_seconds` only for executions created before this fix
+    shipped. **Round 3's own adversarial review** found the prior
+    `test_timeout_snapshot_keeps_rq_and_http_timeouts_consistent_after_edit`
+    coverage only asserted the final stored snapshot value — a value the
+    round-2 broken implementation (a second, unguarded post-commit
+    `execution.save(update_fields=["params"])`) would also have produced, so
+    it didn't actually distinguish the atomic fix from the shape it
+    replaced. Two follow-up tests in
+    `netbox_rpc/tests/test_ubuntu_upgrade_26_execution.py` close that gap:
+    `test_timeout_snapshot_is_visible_in_validated_data_before_serializer_save`
+    spies on `RPCExecutionSerializer.save` and asserts the snapshot is
+    already present in `self.validated_data["params"]` at the moment
+    `save()` is called (not written afterward), including with a falsy
+    (`{}`) caller-supplied `params` — the exact case the
+    `.get("params") or {}` aliasing bug affected; and
+    `test_no_standalone_params_only_save_follows_execution_creation` spies
+    on every `RPCExecution.save()` call made during `create_execution()` and
+    asserts none of them is isolated to `update_fields=["params"]` — the
+    literal signature of the round-2 second write. Both tests fail against
+    the round-2 implementation and pass only under the round-3 atomic fix.
   - `os.linux.ubuntu.24.upgrade_26.verify_postupgrade` is read-only and not
     approval-gated. Its six fixed argv rows inspect release/kernel, APT and
     dpkg health, held packages, and pending reboot state; optional
