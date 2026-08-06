@@ -72,6 +72,54 @@ the aggregate or its event stream. The [Procedure Runs
 tab](../AGENTS.md#procedure-runs-tab-query-side) then attributes the run as
 `Intent: <name>` instead of `Direct`.
 
+## Seeded intents
+
+The first migration-seeded intents are `fileserver.samba.collect_state`
+(`execution_mode="parallel"`, the read-only Samba observability family) and
+`fileserver.samba.deploy_config` (`execution_mode="sequential"`, the
+config-lifecycle write path), both seeded by
+`netbox_rpc/migrations/0057_seed_fileserver_samba_intents.py` (#160), grouping
+the pre-existing Samba read/write catalog (migrations `0049`–`0052`; see
+`AGENTS.md` → "Samba file-server read/write procedures"):
+
+- **`fileserver.samba.collect_state`** (`execution_mode="parallel"`) — the
+  read-only observability sweep: `version`, `service_status`, `config_read`,
+  `config_test`, `list_shares`, `status_report`, `user_list`, `group_list`,
+  `domain_info`. All nine grouped procedures are `effect="read"`.
+- **`fileserver.samba.deploy_config`** (`execution_mode="sequential"`) — the
+  config-lifecycle write path, in order: `config_test` → `config_deploy` →
+  `service_control` (reload) → `service_status`. Validates before writing,
+  deploys, reloads, then re-checks status — never writes `smb.conf` and
+  validates afterwards.
+
+Both intents are pure reference-data groupings — they add **no executor** and
+**no new mutation surface**; running either goes through the same
+`execute_intent()` (#130) fan-out described above, and re-applies every gate
+per child exactly as a direct create would. The nine `service.samba.1.*`
+identity procedures added alongside these intents in #160 (user/group
+create/delete/enable/disable/password/members — see `AGENTS.md`) are
+deliberately **not** grouped into either intent; they are standalone actions,
+not part of the read-sweep or the config-deploy lifecycle.
+
+A second intent, **Update Ubuntu OS from 24 LTS to 26 LTS**, is seeded by
+`netbox_rpc/migrations/0065_seed_ubuntu_upgrade_26_intent.py`. It groups these
+procedures in declared sequence order:
+
+1. `os.linux.ubuntu.24.upgrade_26.analyze_preupgrade`
+2. `os.linux.ubuntu.24.upgrade_26.save_preupgrade_state`
+3. `os.linux.ubuntu.24.upgrade_26.run_upgrade`
+4. `os.linux.ubuntu.24.upgrade_26.verify_postupgrade`
+
+This declaration is useful for discovery, but it is not a serialized upgrade
+workflow under v1 semantics. Calling `POST /intents/{id}/run/` creates children
+for all allowed steps in one synchronous loop, then RQ workers may run those
+children concurrently. Consequently, `save_preupgrade_state` is not guaranteed
+to finish before `run_upgrade` starts, and `verify_postupgrade` is not guaranteed
+to wait for the upgrade. Operators must dispatch the four procedures
+individually and gate each one on the prior result, following the
+[Ubuntu 24.04 to 26.04 upgrade runbook](ubuntu-24-to-26-upgrade-runbook.md),
+rather than relying on the intent's `run/` action for ordering.
+
 ## Running an intent
 
 ```
@@ -142,33 +190,6 @@ The response returns `procedures` as an ordered list:
   ]
 }
 ```
-
-## Seeded intents
-
-`fileserver.samba.collect_state` and `fileserver.samba.deploy_config` (#160,
-`netbox_rpc/migrations/0057_seed_fileserver_samba_intents.py`) are the first
-production intents seeded directly by this plugin, grouping the pre-existing
-Samba read/write catalog (migrations `0049`–`0052`; see `AGENTS.md` → "Samba
-file-server read/write procedures"):
-
-- **`fileserver.samba.collect_state`** (`execution_mode="parallel"`) — the
-  read-only observability sweep: `version`, `service_status`, `config_read`,
-  `config_test`, `list_shares`, `status_report`, `user_list`, `group_list`,
-  `domain_info`. All nine grouped procedures are `effect="read"`.
-- **`fileserver.samba.deploy_config`** (`execution_mode="sequential"`) — the
-  config-lifecycle write path, in order: `config_test` → `config_deploy` →
-  `service_control` (reload) → `service_status`. Validates before writing,
-  deploys, reloads, then re-checks status — never writes `smb.conf` and
-  validates afterwards.
-
-Both intents are pure reference-data groupings — they add **no executor** and
-**no new mutation surface**; running either goes through the same
-`execute_intent()` (#130) fan-out described above, and re-applies every gate
-per child exactly as a direct create would. The nine `service.samba.1.*`
-identity procedures added alongside these intents in #160 (user/group
-create/delete/enable/disable/password/members — see `AGENTS.md`) are
-deliberately **not** grouped into either intent; they are standalone actions,
-not part of the read-sweep or the config-deploy lifecycle.
 
 ## Migration
 

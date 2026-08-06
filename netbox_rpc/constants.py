@@ -309,6 +309,27 @@ OOKLA_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Ubuntu 24.04 -> 26.04 LTS in-place upgrade lifecycle. Handler IDs equal the
+# procedure names; the destructive upgrade step remains approval-gated.
+UBUNTU_UPGRADE_26_ANALYZE_PREUPGRADE = (
+    "os.linux.ubuntu.24.upgrade_26.analyze_preupgrade"
+)
+UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE = (
+    "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state"
+)
+UBUNTU_UPGRADE_26_RUN_UPGRADE = "os.linux.ubuntu.24.upgrade_26.run_upgrade"
+UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE = (
+    "os.linux.ubuntu.24.upgrade_26.verify_postupgrade"
+)
+UBUNTU_UPGRADE_26_PROCEDURE_NAMES = frozenset(
+    {
+        UBUNTU_UPGRADE_26_ANALYZE_PREUPGRADE,
+        UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
+        UBUNTU_UPGRADE_26_RUN_UPGRADE,
+        UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE,
+    }
+)
+
 # Mellanox ConnectX-3 (mlx4) InfiniBand -> Ethernet conversion on a Proxmox host.
 # Targets a netbox-proxbox ProxmoxEndpoint; SSH connection details are resolved
 # through the netbox-nms ProxmoxEndpointSSHBinding (see jobs.py normalizer).
