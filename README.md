@@ -109,6 +109,22 @@ The procedure catalog is intentionally narrow:
 - `services.passbolt.transfer_secrets`
 - `services.passbolt.import_secrets`
 - `services.passbolt.cleanup`
+- `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
+  `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
+  from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
+  `approval_required=False`, 45s timeout. The normalizer derives `target` from
+  the assigned device and rejects caller-supplied target overrides or other
+  unknown params. Optional `vrf` is validated without normalization (default
+  `""`; surrounding whitespace and control characters are rejected). The
+  immutable assigned-object identity, not its display name, selects the target;
+  credentials resolve only through that device's configured `DeviceService`,
+  and callers cannot supply a credential override. The specialized handler is
+  planned for `netbox-rpc-backend`. nms-backend's BGP work is the distinct NETCONF/fallback
+  and netbox-bgp synchronization integration; its retained `automation/rpc`
+  code is not the live procedure executor. Migration `0066` remains
+  `enabled=False` and a three-layer code gate blocks admission, advertisement,
+  and worker claim until the matching netbox-rpc-backend handler is deployed,
+  its capability contract is approved, and the coordinated rollout is authorized.
 
 Operators call named procedures, not arbitrary SSH commands.
 
@@ -789,7 +805,7 @@ migration `0012` and extended through `0017`; handler
 Client / nms UI
   -> netbox-rpc API
   -> NetBox RQ job
-  -> nms-backend /rpc/executions/{execution_id}/run
+  -> configured backend target /rpc/executions/{execution_id}/run
   -> transport driver (AsyncSSH / Scrapli / Netmiko / Paramiko / NAPALM)
   -> network device or Linux host
 ```
@@ -801,15 +817,21 @@ owns:
 - JSON request and response schemas used to validate procedure parameters;
 - execution records, normalized parameters, status, results, errors, and audit
   events;
-- NetBox job orchestration that delegates execution to `nms-backend`.
+- NetBox job orchestration that delegates execution to the configured backend.
 
-`nms-backend` owns the hard-coded handler implementations and transport
-libraries. It must execute only known handler IDs such as
+Deployments may retain the `netbox-nms` adapter that routes established
+handlers to `nms-backend`, or configure the first-class `RPCBackend` row for
+`netbox-rpc-backend`; selection is deployment configuration, never a
+caller-supplied route. When an executor publishes a capability manifest, its
+handler IDs and command-contract hashes are enforced; a missing legacy manifest
+is reported as unknown and currently follows the documented compatibility path.
+Existing `nms-backend` handlers include
 `network.huawei_olt_ma5800_r024.start_ont` and
 `network.dell_os10_s5232f_on.bootstrap_restconf` and
 `os.linux_ubuntu_24.restart_service` and
 `os.linux.dns_host.deploy_dns_stack` and
-`os.linux_proxmox.qemu_vm_lifecycle`.
+`os.linux_proxmox.qemu_vm_lifecycle`. The gated Huawei NE8000 handler is not
+dispatchable until the `netbox-rpc-backend` capability and rollout gates open.
 
 Each RPC run enqueues a NetBox core RQ job (`/core/jobs/<N>/`) linked to the
 `RPCExecution` by `job_id`. The core job page is thin — the issued command(s),

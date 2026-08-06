@@ -30,6 +30,7 @@ from ..constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     HUAWEI_MA5800_R024_START_ONT,
+    HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
     INFLUXDB_1_BOOTSTRAP,
     INFLUXDB_1_CONFIG_DEPLOY,
     INFLUXDB_1_CONFIG_ROLLBACK,
@@ -152,6 +153,7 @@ _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # future change enables the procedure before all three preconditions above
 # are met.
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
+_HUAWEI_NE8000_BGP_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -165,13 +167,26 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
     three enforcement points can never diverge.
     """
 
-    if procedure_name == "os.linux_env_file.upsert_var" and not _LINUX_ENV_FILE_UPSERT_AVAILABLE:
+    if (
+        procedure_name == "os.linux_env_file.upsert_var"
+        and not _LINUX_ENV_FILE_UPSERT_AVAILABLE
+    ):
         return (
             "os.linux_env_file.upsert_var cannot run yet: the nms-backend "
             "execution handler is not deployed, credential_pk is not "
             "object-scoped-authorization checked against the requester "
             "(issue #203), and approval decisions are not yet bound to an "
             "allowlist-policy snapshot (issue #163)."
+        )
+    if (
+        procedure_name == HUAWEI_NE8000_F1A_SHOW_BGP_PEER
+        and not _HUAWEI_NE8000_BGP_AVAILABLE
+    ):
+        return (
+            f"{HUAWEI_NE8000_F1A_SHOW_BGP_PEER} cannot run yet: the "
+            "netbox-rpc-backend execution handler and its approved capability "
+            "contract are not deployed, and the coordinated BGP rollout has "
+            "not been authorized."
         )
     return None
 
@@ -211,6 +226,11 @@ _DELL_OS10_TRUNK_VLANS_RE = re.compile(
 )
 _DELL_OS10_BREAKOUT_PORT_RE = re.compile(r"\d+/\d+/\d+")
 _DELL_OS10_BREAKOUT_MODE_RE = re.compile(r"\d+g-\d+x")
+_HUAWEI_NE8000_TARGET_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9_.:-]{0,253}[A-Za-z0-9])?"
+)
+_HUAWEI_NE8000_VRF_RE = re.compile(r"[A-Za-z0-9_.:-]{1,31}")
+_HUAWEI_NE8000_BGP_PARAM_KEYS = frozenset({"vrf"})
 _PVESH_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.\-]{1,128}$")
 _PTERODACTYL_CONTAINER_NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
 _MINECRAFT_SERVER_UUID_RE = re.compile(
@@ -645,6 +665,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
             "ont_id": normalized["ont_id"],
         }
         return normalized
+
+    if procedure_name == HUAWEI_NE8000_F1A_SHOW_BGP_PEER:
+        return _normalize_huawei_ne8000_bgp_execution(execution)
 
     if procedure_name == LINUX_INSTALL_SSH_KEY:
         return _normalize_ssh_install_key_execution(execution, target)
@@ -3683,6 +3706,114 @@ def _normalize_pipeline_fixed_execution(
     }
     _copy_optional_credential_override(params, result)
     return result
+
+
+def _normalize_huawei_ne8000_bgp_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize the assigned-device identity and optional Huawei BGP VRF.
+
+    ``target`` is an audit-only display value. Runtime host and credential
+    resolution must use the immutable ``target_object`` identity, which is
+    derived from the assigned ``dcim.device`` and cannot be overridden by a
+    caller. Credentials come only from that device's configured DeviceService.
+    """
+
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    raw_params = execution.params
+    if raw_params is None:
+        params: dict[str, Any] = {}
+    elif isinstance(raw_params, dict):
+        params = raw_params
+    else:
+        raise RPCExecutionError(
+            "Huawei NE8000 BGP params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    unknown = sorted(
+        str(key)[:64] for key in params if key not in _HUAWEI_NE8000_BGP_PARAM_KEYS
+    )
+    if unknown:
+        suffix = ", ..." if len(unknown) > 8 else ""
+        raise RPCExecutionError(
+            f"Unknown Huawei NE8000 BGP param(s): {', '.join(unknown[:8])}{suffix}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    if target_model != "dcim.device":
+        raise RPCExecutionError(
+            "Huawei NE8000 BGP requires a dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        f"{app_label}.{model}" != "dcim.device"
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Huawei NE8000 BGP requires an existing assigned dcim.device.",
+            code="RPC_TARGET_INVALID",
+        )
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": object_id,
+    }
+
+    raw_target = getattr(execution, "target_display", None)
+    if not isinstance(raw_target, str):
+        raise RPCExecutionError(
+            "Huawei NE8000 BGP target must be a device name.",
+            code="RPC_TARGET_INVALID",
+        )
+    target = raw_target.strip()
+    if not _HUAWEI_NE8000_TARGET_RE.fullmatch(target):
+        raise RPCExecutionError(
+            "Huawei NE8000 BGP target must be a 1-255 character device name "
+            "using only letters, digits, '.', '_', ':', or '-' and must start "
+            "and end with a letter or digit.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    raw_vrf = params.get("vrf", "")
+    if not isinstance(raw_vrf, str):
+        raise RPCExecutionError(
+            "vrf must be a string.",
+            code="RPC_PARAM_INVALID",
+        )
+    vrf = raw_vrf.strip()
+    if raw_vrf != vrf:
+        raise RPCExecutionError(
+            "vrf must not contain leading or trailing whitespace.",
+            code="RPC_PARAM_INVALID",
+        )
+    if vrf and not _HUAWEI_NE8000_VRF_RE.fullmatch(vrf):
+        raise RPCExecutionError(
+            "vrf must contain 1-31 letters, digits, '.', '_', ':', or '-'.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "vrf": vrf,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "target_object": target_object,
+            "vrf": vrf,
+        },
+    }
+    return normalized
 
 
 def _normalize_pvesh_json_execution(

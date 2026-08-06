@@ -444,7 +444,8 @@ be used autonomously on destructive procedures.
 ---
 
 - Procedure records map canonical names to backend `handler_id` values.
-- NetBox RQ jobs normalize params and delegate execution to `nms-backend`. Each
+- NetBox RQ jobs normalize params and delegate execution to the deployment's
+  configured backend (`netbox-nms` adapter or first-class `RPCBackend`). Each
   run's core RQ job (`/core/jobs/<N>/`) links to the `RPCExecution` by `job_id`;
   the issued command(s), their output, and per-command timing are read from
   `RPCExecution.result.steps[]` and the event ledger. See
@@ -452,8 +453,10 @@ be used autonomously on destructive procedures.
 - SSH credentials and host-key pinning live in `netbox-nms.DeviceService`.
   `RPCLinuxServiceAllowlist.ssh_credential_override` can point at a
   `netbox-nms.DeviceCredential` for per-service SSH key overrides; when set,
-  `rpc_ssh_credential_pk` in `normalized_params` tells `nms-backend` to fetch
-  that credential by PK instead of resolving credentials by target device name.
+  `rpc_ssh_credential_pk` in `normalized_params` tells the configured backend to
+  fetch that allowlist-owned credential by PK. This is not a general
+  caller-supplied override; procedures such as Huawei NE8000 BGP explicitly
+  forbid one and resolve only through their assigned device.
 - Keep procedure names in the documented canonical dotted forms:
   `os.<family>.<distro>.<version>.<action>` and
   `network.device.<manufacturer>.<device-family>.<model>.<version>.<action>`.
@@ -604,6 +607,30 @@ be used autonomously on destructive procedures.
   `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
   advertisement, procedure forced `enabled=True`) alongside the existing
   `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
+- `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
+  `network.huawei_ne8000_f1a.show_bgp_peer`, migration `0066`,
+  `tests/test_huawei_ne8000_bgp_procedure.py`, and
+  `tests/test_jobs_huawei_ne8000_bgp_normalization.py`) is a read-only BGP peer
+  status fetch targeting `dcim.device`. `effect="read"`,
+  `approval_required=False`, 45s timeout. Its strict normalizer derives
+  `target` only from the assigned device (callers cannot override it), trims
+  and validates optional `vrf` (default `""`; 1-31 safe characters when set;
+  surrounding whitespace and control characters are rejected),
+  rejects unknown params, and fingerprints the immutable `dcim.device` content
+  type/object ID rather than treating its display name as authority. Credentials
+  resolve only through that assigned device's `DeviceService`; caller-supplied
+  credential overrides are forbidden. The matching specialized handler is
+  planned for **`netbox-rpc-backend`**; `nms-backend automation/rpc` is
+  retained reference/test code and is not the live executor. The separate
+  nms-backend BGP feature owns NETCONF collection, SSH fallback orchestration,
+  and netbox-bgp synchronization, not this procedure's RPC handler boundary.
+  The migration remains deliberately **`enabled=False`**, with the same
+  fail-closed code gate enforced at admission, advertisement, and worker claim,
+  until the matching netbox-rpc-backend handler is deployed, its capability
+  contract is approved, and the coordinated rollout is authorized. The dynamic
+  multi-command workflow has one representative `device_cli` command row and a
+  documented `EXEMPT_HANDLER_RATIONALE` entry. Do not enable the catalog row
+  merely because the normalizer or retained nms-backend implementation exists.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.

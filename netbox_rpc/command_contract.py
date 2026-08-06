@@ -63,6 +63,11 @@ COMMAND_RUNTIME_KEYS = frozenset(
 # representative RPCProcedureCommand row so the object view and API expose the
 # fact that backend-owned orchestration exists.
 EXEMPT_HANDLER_RATIONALE = {
+    "network.huawei_ne8000_f1a.show_bgp_peer": (
+        "Runs a backend-orchestrated, read-only Huawei BGP workflow: peer summary, "
+        "per-peer verbose detail, and IPv4/IPv6 TCP correlation vary by VRF and "
+        "observed peers, so they cannot be represented faithfully as fixed rows."
+    ),
     "network.dell_os10_s5232f_on.bootstrap_restconf": (
         "Includes backend-decrypted RESTCONF username/password material and a "
         "variable cipher-suite join that must stay backend-orchestrated."
