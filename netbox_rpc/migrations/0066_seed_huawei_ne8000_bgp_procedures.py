@@ -1,11 +1,9 @@
 from django.db import migrations
+from django.db.models.deletion import ProtectedError
 
 
-_CREDENTIAL_REF = {
-    "type": "integer",
-    "minimum": 1,
-    "description": "DeviceCredential primary key; nms-backend decrypts it at execution time.",
-}
+_PROCEDURE_NAME = "network.device.huawei.router.ne8000.f1a.show_bgp_peer"
+_HANDLER_ID = "network.huawei_ne8000_f1a.show_bgp_peer"
 
 _RESULT_SCHEMA = {
     "type": "object",
@@ -20,54 +18,78 @@ _RESULT_SCHEMA = {
 
 HUAWEI_NE8000_BGP_PROCEDURES = [
     {
-        "name": "Show BGP Peer (Huawei NE8000-F1A)",
-        "handler_id": "network.huawei_ne8000_f1a.show_bgp_peer",
+        "name": _PROCEDURE_NAME,
+        "handler_id": _HANDLER_ID,
         "target_models": ["dcim.device"],
         "effect": "read",
         "timeout_seconds": 45,
         "approval_required": False,
-        # Seeded disabled: neither the netbox-rpc-side normalizer branch (see
-        # AGENTS.md "Adding New Procedures") nor the paired nms-backend
-        # execution handler exist yet as of this migration. Without a
-        # normalizer branch in _dispatch_normalize_execution_params(), any
-        # dispatch of this procedure fails at runtime with
-        # RPC_PROCEDURE_NOT_NORMALIZABLE (mirrors the os.linux_env_file.
-        # upsert_var precedent, migration 0060). The credential-resolution
-        # shape (explicit rpc_ssh_credential_pk override vs. implicit
-        # resolution from the target device's own DeviceService binding, cf.
-        # HUAWEI_MA5800_R024_START_ONT) is intentionally deferred to that
-        # normalizer fast-follow rather than guessed here, so it can be
-        # written against the nms-backend handler's actual, landed contract
-        # (nms-backend#620) instead of an assumption. Flip to enabled=True in
-        # the same commit that adds the normalizer branch.
+        # Seeded disabled even though the netbox-rpc normalizer is present.
+        # Live /rpc/* execution belongs to netbox-rpc-backend; retained
+        # nms-backend automation/rpc code is not a deployable handler for this
+        # procedure. Enable only after the matching netbox-rpc-backend handler
+        # is deployed, its capability contract is approved, and the coordinated
+        # BGP rollout is authorized. The normalizer derives target from the
+        # assigned dcim.device, defaults vrf to "", and resolves credentials
+        # only through that device's configured DeviceService.
         "enabled": False,
         "description": "Fetch BGP peer status from a Huawei NE8000-F1A device.",
         "params_schema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "vrf": {"type": "string", "default": ""},
-                "rpc_ssh_credential_pk": _CREDENTIAL_REF,
+                "vrf": {
+                    "type": "string",
+                    "default": "",
+                    "maxLength": 31,
+                    "pattern": "^[A-Za-z0-9_.:-]{0,31}(?![\\s\\S])",
+                },
             },
         },
         "result_schema": _RESULT_SCHEMA,
     },
 ]
 
+_REPRESENTATIVE_COMMAND = {
+    "step_type": "device_cli",
+    "device_cli_mode": "exec",
+    "argv": ["display", "bgp", "peer"],
+    "description": (
+        "Representative read-only command; the backend also performs dynamic "
+        "VRF, per-peer verbose, and TCP-correlation reads."
+    ),
+    "condition_param": "",
+    "condition_negate": False,
+    "for_each_param": "",
+    "continue_on_error": False,
+}
+
 
 def seed_huawei_ne8000_bgp_procedures(apps, schema_editor):
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
+    RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
     for item in HUAWEI_NE8000_BGP_PROCEDURES:
         name = item["name"]
         defaults = {key: value for key, value in item.items() if key != "name"}
-        RPCProcedure.objects.update_or_create(name=name, defaults=defaults)
+        procedure, _created = RPCProcedure.objects.update_or_create(
+            name=name, defaults=defaults
+        )
+        RPCProcedureCommand.objects.update_or_create(
+            procedure=procedure,
+            sequence=1,
+            defaults=_REPRESENTATIVE_COMMAND,
+        )
 
 
 def unseed_huawei_ne8000_bgp_procedures(apps, schema_editor):
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    RPCProcedure.objects.filter(
+    procedures = RPCProcedure.objects.filter(
         name__in=[item["name"] for item in HUAWEI_NE8000_BGP_PROCEDURES]
-    ).delete()
+    )
+    try:
+        procedures.delete()
+    except ProtectedError:
+        pass
 
 
 class Migration(migrations.Migration):

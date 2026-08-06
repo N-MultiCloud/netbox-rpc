@@ -1,5 +1,9 @@
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
+HUAWEI_NE8000_F1A_SHOW_BGP_PEER = (
+    "network.device.huawei.router.ne8000.f1a.show_bgp_peer"
+)
+HUAWEI_NE8000_F1A_SHOW_BGP_PEER_HANDLER = "network.huawei_ne8000_f1a.show_bgp_peer"
 
 DELL_OS10_S5232F_BOOTSTRAP_RESTCONF = (
     "network.device.dell_os10.s5232f_on.bootstrap_restconf"

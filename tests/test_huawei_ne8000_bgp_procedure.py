@@ -6,12 +6,10 @@ import types
 from types import SimpleNamespace
 
 import pytest
-from jsonschema import Draft202012Validator, validate
+from jsonschema import Draft202012Validator, ValidationError, validate
 
-MIGRATION_MODULE = (
-    "netbox_rpc.migrations.0066_seed_huawei_ne8000_bgp_procedures"
-)
-PROCEDURE_NAME = "Show BGP Peer (Huawei NE8000-F1A)"
+MIGRATION_MODULE = "netbox_rpc.migrations.0066_seed_huawei_ne8000_bgp_procedures"
+PROCEDURE_NAME = "network.device.huawei.router.ne8000.f1a.show_bgp_peer"
 HANDLER_ID = "network.huawei_ne8000_f1a.show_bgp_peer"
 
 
@@ -33,39 +31,50 @@ def test_huawei_ne8000_bgp_procedure_contract(migration) -> None:
     assert procedure["effect"] == "read"
     assert procedure["approval_required"] is False
     assert procedure["timeout_seconds"] == 45
-    # Seeded disabled until the paired netbox-rpc normalizer branch and the
-    # nms-backend execution handler both land (see the migration's inline
-    # comment and AGENTS.md "Adding New Procedures"); dispatching an
-    # unnormalizable procedure fails at runtime with
-    # RPC_PROCEDURE_NOT_NORMALIZABLE. RPCProcedure.enabled defaults to True,
-    # so this must be set explicitly, not merely omitted.
+    # The normalizer is present, but the live netbox-rpc-backend handler and
+    # coordinated rollout approval are still prerequisites. RPCProcedure.enabled
+    # defaults to True, so this gate must be explicit rather than merely omitted.
     assert procedure["enabled"] is False
     assert procedure["params_schema"]["additionalProperties"] is False
-    assert procedure["params_schema"]["properties"]["vrf"] == {
-        "type": "string",
-        "default": "",
+    assert procedure["params_schema"]["properties"] == {
+        "vrf": {
+            "type": "string",
+            "default": "",
+            "maxLength": 31,
+            "pattern": "^[A-Za-z0-9_.:-]{0,31}(?![\\s\\S])",
+        }
     }
-    assert procedure["params_schema"]["properties"][
-        "rpc_ssh_credential_pk"
-    ] == migration._CREDENTIAL_REF
     assert procedure["result_schema"] == migration._RESULT_SCHEMA
 
     Draft202012Validator.check_schema(procedure["params_schema"])
     Draft202012Validator.check_schema(procedure["result_schema"])
     validate({}, procedure["params_schema"])
     validate(
-        {"vrf": "customer-a", "rpc_ssh_credential_pk": 7},
+        {"vrf": "customer-a"},
         procedure["params_schema"],
     )
+    for invalid in (
+        {"vrf": "customer vrf"},
+        {"vrf": " customer-a"},
+        {"vrf": "customer-a "},
+        {"vrf": "customer-a\n"},
+        {"vrf": "customer-a\x00"},
+        {"vrf": "x" * 32},
+    ):
+        with pytest.raises(ValidationError):
+            validate(invalid, procedure["params_schema"])
 
 
 def test_huawei_ne8000_bgp_migration_seeds_and_unseeds(migration) -> None:
     manager = _FakeProcedureManager()
+    command_manager = _FakeCommandManager()
     _FakeRPCProcedure.objects = manager
+    _FakeRPCProcedureCommand.objects = command_manager
     apps = SimpleNamespace(
-        get_model=lambda app_label, model_name: _FakeRPCProcedure
-        if (app_label, model_name) == ("netbox_rpc", "RPCProcedure")
-        else None
+        get_model=lambda app_label, model_name: {
+            ("netbox_rpc", "RPCProcedure"): _FakeRPCProcedure,
+            ("netbox_rpc", "RPCProcedureCommand"): _FakeRPCProcedureCommand,
+        }.get((app_label, model_name))
     )
 
     migration.seed_huawei_ne8000_bgp_procedures(apps, None)
@@ -76,6 +85,9 @@ def test_huawei_ne8000_bgp_migration_seeds_and_unseeds(migration) -> None:
             for key, value in migration.HUAWEI_NE8000_BGP_PROCEDURES[0].items()
             if key != "name"
         }
+    }
+    assert command_manager.rows == {
+        (PROCEDURE_NAME, 1): migration._REPRESENTATIVE_COMMAND
     }
 
     migration.unseed_huawei_ne8000_bgp_procedures(apps, None)
@@ -115,6 +127,19 @@ class _FakeRPCProcedure:
     objects: _FakeProcedureManager
 
 
+class _FakeCommandManager:
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, int], dict[str, object]] = {}
+
+    def update_or_create(self, *, procedure, sequence: int, defaults):
+        self.rows[(procedure.name, sequence)] = dict(defaults)
+        return SimpleNamespace(procedure=procedure, sequence=sequence), True
+
+
+class _FakeRPCProcedureCommand:
+    objects: _FakeCommandManager
+
+
 def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox = types.ModuleType("netbox")
     netbox_plugins = types.ModuleType("netbox.plugins")
@@ -126,14 +151,21 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
+    django_db_models = types.ModuleType("django.db.models")
+    django_db_deletion = types.ModuleType("django.db.models.deletion")
+    django_db_deletion.ProtectedError = type("ProtectedError", (Exception,), {})
     django_migrations = types.ModuleType("django.db.migrations")
     django_migrations.Migration = type("Migration", (), {})
     django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
     django_db.migrations = django_migrations
+    django_db.models = django_db_models
+    django_db_models.deletion = django_db_deletion
     django.db = django_db
 
     monkeypatch.setitem(sys.modules, "netbox", netbox)
     monkeypatch.setitem(sys.modules, "netbox.plugins", netbox_plugins)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
+    monkeypatch.setitem(sys.modules, "django.db.models", django_db_models)
+    monkeypatch.setitem(sys.modules, "django.db.models.deletion", django_db_deletion)
     monkeypatch.setitem(sys.modules, "django.db.migrations", django_migrations)
