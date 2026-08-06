@@ -47,7 +47,10 @@ def test_run_upgrade_preserves_explicit_false_dry_run(jobs_module) -> None:
     assert normalized["reboot_after_upgrade"] is False
 
 
-@pytest.mark.parametrize("backup_dir", ["relative/path", "/tmp/bad path", "/tmp/x;id"])
+@pytest.mark.parametrize(
+    "backup_dir",
+    ["relative/path", "/tmp/bad path", "/tmp/x;id", "/" + ("a" * 256)],
+)
 def test_save_preupgrade_state_rejects_invalid_backup_dir(
     jobs_module,
     backup_dir: str,
@@ -72,6 +75,16 @@ def test_save_preupgrade_state_passes_valid_backup_dir(jobs_module) -> None:
     )
 
 
+def test_save_preupgrade_state_passes_boundary_length_backup_dir(jobs_module) -> None:
+    value = "/" + ("a" * 255)
+    normalized = jobs_module.normalize_execution_params(
+        _execution(SAVE, {"backup_dir": value})
+    )
+
+    assert normalized["backup_dir"] == value
+    assert normalized["command_fingerprint"]["backup_dir"] == value
+
+
 def test_verify_postupgrade_passes_expected_version_id(jobs_module) -> None:
     normalized = jobs_module.normalize_execution_params(
         _execution(VERIFY, {"expected_version_id": "26.04"})
@@ -79,6 +92,20 @@ def test_verify_postupgrade_passes_expected_version_id(jobs_module) -> None:
 
     assert normalized["expected_version_id"] == "26.04"
     assert normalized["command_fingerprint"]["expected_version_id"] == "26.04"
+
+
+@pytest.mark.parametrize("length", [1, 32])
+def test_verify_postupgrade_passes_boundary_length_expected_version_id(
+    jobs_module,
+    length: int,
+) -> None:
+    value = "x" * length
+    normalized = jobs_module.normalize_execution_params(
+        _execution(VERIFY, {"expected_version_id": value})
+    )
+
+    assert normalized["expected_version_id"] == value
+    assert normalized["command_fingerprint"]["expected_version_id"] == value
 
 
 @pytest.mark.parametrize("expected_version_id", ["", 26, "x" * 33])
@@ -92,6 +119,24 @@ def test_verify_postupgrade_rejects_malformed_expected_version_id(
         )
 
     assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_analyze_preupgrade_normalizes_to_only_target_and_fingerprint(
+    jobs_module,
+) -> None:
+    normalized = jobs_module.normalize_execution_params(_execution(ANALYZE, {}))
+
+    assert normalized == {
+        "target": "ubuntu-upgrade-01",
+        "command_fingerprint": {
+            "handler_id": ANALYZE,
+            "procedure": ANALYZE,
+        },
+    }
+    assert "backup_dir" not in normalized
+    assert "dry_run" not in normalized
+    assert "reboot_after_upgrade" not in normalized
+    assert "expected_version_id" not in normalized
 
 
 @pytest.mark.parametrize("procedure_name", PROCEDURES)

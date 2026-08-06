@@ -157,3 +157,28 @@ class UbuntuUpgrade26ExecutionGateTests(TestCase):
         assert not RPCExecution.objects.filter(procedure__name=UPGRADE).exists()
         assert not RPCExecution.objects.filter(procedure__name=VERIFY).exists()
         assert enqueue.call_count == 2
+
+
+class UbuntuUpgrade26IntentSeedTests(TestCase):
+    """DB proof that migration 0065 seeds the Ubuntu upgrade RPCIntent with the
+    documented membership, ordering, and execution mode.
+
+    Executing the intent is covered separately by
+    test_seeded_intent_fails_fast_at_upgrade_without_approval above; this only
+    proves the migration's declarative reference data landed correctly.
+    """
+
+    def test_intent_is_sequential_with_the_four_procedures_in_order(self):
+        intent = RPCIntent.objects.get(name=INTENT_NAME)
+        assert intent.execution_mode == RPCIntent.MODE_SEQUENTIAL
+        assert intent.enabled is True
+
+        ordered_names = [
+            ip.procedure.name for ip in intent.ordered_intent_procedures
+        ]
+        assert ordered_names == [ANALYZE, SAVE, UPGRADE, VERIFY]
+
+        ordered_sequences = [
+            ip.sequence for ip in intent.ordered_intent_procedures
+        ]
+        assert ordered_sequences == [1, 2, 3, 4]
