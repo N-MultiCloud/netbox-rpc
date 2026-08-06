@@ -189,6 +189,10 @@ under the `_intent`-prefixed keys so this attribution stays correct.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
+- A truthy backend response must validate its raw inner `result` against the
+  procedure's `result_schema` before `ExecutionSucceeded` is appended. Schema
+  mismatch fails closed as `RPC_RESULT_SCHEMA_MISMATCH` with a bounded,
+  value-free diagnostic.
 - `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
   (with its `RPCIntentProcedure` through model) are intentional
   reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
@@ -451,6 +455,37 @@ be used autonomously on destructive procedures.
   `os.linux.ubuntu.24.stop_service`, `os.linux.ubuntu.24.reload_service`,
   `os.linux.ubuntu.24.enable_service`, `os.linux.ubuntu.24.disable_service`,
   and `os.linux.ubuntu.24.daemon_reload`.
+- InfluxDB guest management uses the typed `service.influxdb.1.*` catalog seeded
+  by migration `0055`, targeting `dcim.device` and
+  `virtualization.virtualmachine`. It distinguishes `oss2` from `core3` and
+  covers installation inspection, redacted/bounded config and file reads,
+  confined file inventory, service state, health, journal reads, atomic config
+  deployment/rollback, confined managed/plugin file writes/deletes, and
+  enum-constrained service control. Every mutation requires approval;
+  rollback/delete are destructive. Content travels outside argv and only its
+  sha256/byte count enters the command fingerprint. Literal secret-shaped
+  content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
+  rejected before persistence. The older generic allowlist row remains useful
+  for compatibility, but new InfluxDB workflows must use this typed family.
+- Akvorado service management uses the typed `service.akvorado.1.*` catalog
+  seeded by migration `0057`, targeting `dcim.device` and
+  `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
+  approval, 30s) and `status_stack` (read, no approval, 60s) are queries;
+  `config_deploy` (write, approval required, 120s) and `restart_stack` (write,
+  approval required, 120s) are mutations. `config_deploy` accepts
+  `config_content` as a structured `input_data` string payload (never
+  argv-interpolated); only its sha256/byte count enters the command fingerprint.
+  NUL/unsafe controls, inline secret material, credential URLs, and private keys
+  are rejected before persistence/dispatch. The caller cannot provide a target
+  host: every run requires an existing assigned NetBox device/VM and derives
+  the backend target exclusively from that object. All four handler IDs are listed
+  in `command_contract.EXEMPT_HANDLER_RATIONALE` (seeded with one
+  `backend-orchestrated` representative command row each) because Akvorado
+  config deployment is backend-orchestrated content handling, not fixed argv.
+  This catalog is the *only* sanctioned way to read or change Akvorado config or
+  stack lifecycle state — `netbox-observability`'s
+  `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
+  metadata only and never perform config/lifecycle actions directly.
 - InfluxDB service management is provided by the generic Ubuntu 24 systemd
   procedures through the seeded `RPCLinuxServiceAllowlist` row
   `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting

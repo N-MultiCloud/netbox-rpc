@@ -9,11 +9,13 @@ from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 
 from ..backends import resolve_backend
+from ..constants import AKVORADO_1_PROCEDURE_NAMES
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
     RPCExecutionError,
     code_gate_unavailable_reason,
     normalize_execution_params,
+    validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
 
@@ -136,6 +138,12 @@ def create_execution(*, serializer: Any, user: object) -> object:
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
+    _require_akvorado_assigned_object(serializer.validated_data, procedure, user)
+    try:
+        validate_akvorado_content_params(procedure.name, params)
+    except RPCExecutionError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+
     # #160: scrub a raw password to a fingerprint AFTER schema validation (so
     # the caller-visible validation error still names "password") and BEFORE
     # anything is persisted, so the plaintext value is never written to the
@@ -175,6 +183,44 @@ def create_execution(*, serializer: Any, user: object) -> object:
     return execution
 
 
+def _require_akvorado_assigned_object(
+    validated_data: dict[str, Any],
+    procedure: object,
+    user: object,
+) -> None:
+    """Fail creation when an Akvorado target is absent or not viewable.
+
+    RPCExecution stores a GenericForeignKey, so a syntactically valid content
+    type + object ID can otherwise point at no object. Akvorado SSH targeting is
+    derived exclusively from that object and must never bypass NetBox object
+    restrictions or fall back to a dangling display value.
+    """
+
+    if getattr(procedure, "name", "") not in AKVORADO_1_PROCEDURE_NAMES:
+        return
+    content_type = validated_data.get("assigned_object_type")
+    object_id = validated_data.get("assigned_object_id")
+    if content_type is None or object_id is None:
+        raise drf_serializers.ValidationError(
+            {"assigned_object_id": "An assigned NetBox object is required."},
+            code="required",
+        )
+    try:
+        model_class = content_type.model_class()
+        assigned_object = (
+            model_class.objects.restrict(user, "view")
+            .filter(pk=object_id)
+            .first()
+        )
+    except (AttributeError, TypeError, ValueError):
+        assigned_object = None
+    if assigned_object is None:
+        raise drf_serializers.ValidationError(
+            {"assigned_object_id": "The assigned NetBox object does not exist."},
+            code="does_not_exist",
+        )
+
+
 def _transition_locked(execution: object, transition) -> object:
     """Run a status-guarded transition while holding a row lock on the execution.
 
@@ -195,6 +241,32 @@ def _transition_locked(execution: object, transition) -> object:
         return locked
 
 
+def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
+    """Atomically claim queued work only while its procedure remains enabled."""
+
+    from ..models import RPCExecution, RPCProcedure
+
+    execution = agg.execution
+    if agg.status != RPCExecution.STATUS_QUEUED:
+        raise RPCExecutionAggregateError(
+            "Only a queued execution can be claimed by a worker."
+        )
+    procedure_enabled = (
+        RPCProcedure.objects.select_for_update()
+        .filter(pk=execution.procedure_id)
+        .values_list("enabled", flat=True)
+        .get()
+    )
+    if not procedure_enabled:
+        agg.fail(
+            "The RPC procedure for this execution has been disabled; "
+            "execution not dispatched.",
+            "RPC_PROCEDURE_DISABLED",
+        )
+        return
+    agg.start()
+
+
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
     # #166: the opt-in is authoritative at the worker claim too — a claim on a
     # disabled integration must fail closed rather than dispatch.
@@ -211,9 +283,12 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         return
 
     try:
-        execution = _transition_locked(execution, lambda agg: agg.start())
+        execution = _transition_locked(execution, _claim_if_procedure_enabled)
     except RPCExecutionAggregateError:
         # Lost the race to a cancel (or already terminal): nothing to run.
+        return
+    if execution.status != execution.STATUS_RUNNING:
+        # The locked claim failed closed because the procedure was disabled.
         return
     aggregate = RPCExecutionAggregate(execution)
 

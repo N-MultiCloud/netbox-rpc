@@ -161,6 +161,69 @@ EXEMPT_HANDLER_RATIONALE = {
         "Removes one safe share definition from Samba config through backend-owned "
         "parse/edit/validate/snapshot/reload orchestration."
     ),
+    "service.influxdb_1.inspect": (
+        "Detects two product families with independent binaries, units, and config paths."
+    ),
+    "service.influxdb_1.config_read": (
+        "Reads, hashes, bounds, and redacts a family-selected config file."
+    ),
+    "service.influxdb_1.files_list": (
+        "Confined recursive file and snapshot discovery requires backend-owned loops."
+    ),
+    "service.influxdb_1.file_read": (
+        "Resolves an allowlisted family/scope root, refuses symlinks, and redacts content."
+    ),
+    "service.influxdb_1.service_status": (
+        "Maps the selected product family to its fixed unit and parses systemd state."
+    ),
+    "service.influxdb_1.health": (
+        "Maps the family to a loopback health endpoint and normalizes product-specific JSON."
+    ),
+    "service.influxdb_1.journal": (
+        "Reads bounded journal output for a family-selected unit and redacts secret-shaped text."
+    ),
+    "service.influxdb_1.config_deploy": (
+        "Parses TOML, stages content via stdin, snapshots, atomically activates, restarts, "
+        "health-checks, and restores on any post-snapshot failure."
+    ),
+    "service.influxdb_1.config_rollback": (
+        "Restores a selected backend snapshot with validation, restart, health check, and "
+        "pre-rollback recovery semantics."
+    ),
+    "service.influxdb_1.file_write": (
+        "Writes stdin content beneath a confined family/scope root with symlink and secret guards."
+    ),
+    "service.influxdb_1.file_delete": (
+        "Snapshots and removes one confined file with symlink and secret guards."
+    ),
+    "service.influxdb_1.service_control": (
+        "Maps enum-constrained family/action parameters to a fixed unit and reads final state."
+    ),
+    "service.influxdb_1.bootstrap": (
+        "Generates credentials in backend memory, stores them through the netbox-nms secret "
+        "bridge, and performs the family-specific loopback bootstrap without exposing plaintext."
+    ),
+    "service.influxdb_1.database_create": (
+        "Resolves an nms-secret reference backend-side and creates an OSS bucket or Core database "
+        "through the family-specific loopback API."
+    ),
+    "service.influxdb_1.token_create": (
+        "Resolves an administrative nms-secret reference, creates a family-supported token, and "
+        "stores the one-time plaintext through the netbox-nms secret bridge before returning metadata."
+    ),
+    "service.akvorado.1.config_read": (
+        "Reads the backend-owned Akvorado config path and returns bounded file content."
+    ),
+    "service.akvorado.1.config_deploy": (
+        "Receives akvorado.yaml through structured input_data, validates it, and activates it "
+        "without placing caller-provided content in argv."
+    ),
+    "service.akvorado.1.status_stack": (
+        "Reads and normalizes the backend-owned Akvorado Compose project status."
+    ),
+    "service.akvorado.1.restart_stack": (
+        "Restarts the backend-owned Akvorado Compose project and normalizes its final status."
+    ),
     "service.samba_1.user_create": (
         "Creates a Samba/AD user with a caller-supplied password delivered to "
         "samba-tool over stdin. The password is scrubbed to a sha256+byte-count "

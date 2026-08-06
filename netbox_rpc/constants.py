@@ -203,6 +203,69 @@ SAMBA_1_PROCEDURE_NAMES = frozenset(
     }
 )
 
+INFLUXDB_1_INSPECT = "service.influxdb.1.inspect"
+INFLUXDB_1_INSPECT_HANDLER = "service.influxdb_1.inspect"
+INFLUXDB_1_CONFIG_READ = "service.influxdb.1.config_read"
+INFLUXDB_1_CONFIG_READ_HANDLER = "service.influxdb_1.config_read"
+INFLUXDB_1_FILES_LIST = "service.influxdb.1.files_list"
+INFLUXDB_1_FILES_LIST_HANDLER = "service.influxdb_1.files_list"
+INFLUXDB_1_FILE_READ = "service.influxdb.1.file_read"
+INFLUXDB_1_FILE_READ_HANDLER = "service.influxdb_1.file_read"
+INFLUXDB_1_SERVICE_STATUS = "service.influxdb.1.service_status"
+INFLUXDB_1_SERVICE_STATUS_HANDLER = "service.influxdb_1.service_status"
+INFLUXDB_1_HEALTH = "service.influxdb.1.health"
+INFLUXDB_1_HEALTH_HANDLER = "service.influxdb_1.health"
+INFLUXDB_1_JOURNAL = "service.influxdb.1.journal"
+INFLUXDB_1_JOURNAL_HANDLER = "service.influxdb_1.journal"
+INFLUXDB_1_CONFIG_DEPLOY = "service.influxdb.1.config_deploy"
+INFLUXDB_1_CONFIG_DEPLOY_HANDLER = "service.influxdb_1.config_deploy"
+INFLUXDB_1_CONFIG_ROLLBACK = "service.influxdb.1.config_rollback"
+INFLUXDB_1_CONFIG_ROLLBACK_HANDLER = "service.influxdb_1.config_rollback"
+INFLUXDB_1_FILE_WRITE = "service.influxdb.1.file_write"
+INFLUXDB_1_FILE_WRITE_HANDLER = "service.influxdb_1.file_write"
+INFLUXDB_1_FILE_DELETE = "service.influxdb.1.file_delete"
+INFLUXDB_1_FILE_DELETE_HANDLER = "service.influxdb_1.file_delete"
+INFLUXDB_1_SERVICE_CONTROL = "service.influxdb.1.service_control"
+INFLUXDB_1_SERVICE_CONTROL_HANDLER = "service.influxdb_1.service_control"
+INFLUXDB_1_BOOTSTRAP = "service.influxdb.1.bootstrap"
+INFLUXDB_1_BOOTSTRAP_HANDLER = "service.influxdb_1.bootstrap"
+INFLUXDB_1_DATABASE_CREATE = "service.influxdb.1.database_create"
+INFLUXDB_1_DATABASE_CREATE_HANDLER = "service.influxdb_1.database_create"
+INFLUXDB_1_TOKEN_CREATE = "service.influxdb.1.token_create"
+INFLUXDB_1_TOKEN_CREATE_HANDLER = "service.influxdb_1.token_create"
+INFLUXDB_1_PROCEDURE_NAMES = frozenset(
+    {
+        INFLUXDB_1_INSPECT,
+        INFLUXDB_1_CONFIG_READ,
+        INFLUXDB_1_FILES_LIST,
+        INFLUXDB_1_FILE_READ,
+        INFLUXDB_1_SERVICE_STATUS,
+        INFLUXDB_1_HEALTH,
+        INFLUXDB_1_JOURNAL,
+        INFLUXDB_1_CONFIG_DEPLOY,
+        INFLUXDB_1_CONFIG_ROLLBACK,
+        INFLUXDB_1_FILE_WRITE,
+        INFLUXDB_1_FILE_DELETE,
+        INFLUXDB_1_SERVICE_CONTROL,
+        INFLUXDB_1_BOOTSTRAP,
+        INFLUXDB_1_DATABASE_CREATE,
+        INFLUXDB_1_TOKEN_CREATE,
+    }
+)
+
+AKVORADO_1_CONFIG_READ = "service.akvorado.1.config_read"
+AKVORADO_1_CONFIG_DEPLOY = "service.akvorado.1.config_deploy"
+AKVORADO_1_STATUS_STACK = "service.akvorado.1.status_stack"
+AKVORADO_1_RESTART_STACK = "service.akvorado.1.restart_stack"
+AKVORADO_1_PROCEDURE_NAMES = frozenset(
+    {
+        AKVORADO_1_CONFIG_READ,
+        AKVORADO_1_CONFIG_DEPLOY,
+        AKVORADO_1_STATUS_STACK,
+        AKVORADO_1_RESTART_STACK,
+    }
+)
+
 # Declarative fileserver.samba intents (issue #160) — reference-data grouping
 # names only; no live import elsewhere (seed migration inlines the strings).
 FILESERVER_SAMBA_COLLECT_STATE = "fileserver.samba.collect_state"

@@ -90,7 +90,14 @@ class UserCreatePasswordRedactionTests(_SambaIdentityExecutionTestCase):
         "netbox_rpc.jobs._call_backend",
         return_value={
             "ok": True,
-            "result": {"stdout": "ok", "username": "alice", "created": True},
+            "result": {
+                "ok": True,
+                "procedure": "service.samba.1.user_create",
+                "target": "rpc-test-device",
+                "stdout": "ok",
+                "username": "alice",
+                "created": True,
+            },
         },
     )
     def test_normalized_params_and_events_never_contain_plaintext_password(

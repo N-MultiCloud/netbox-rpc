@@ -82,7 +82,9 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
   the RQ job, and emits `JobEnqueued` or `ExecutionEnqueueFailed`;
 - `run_execution(execution)` starts the aggregate, resolves the backend,
   normalizes params, records normalization, calls the backend, and records the
-  backend response;
+  backend response. A truthy response can append `ExecutionSucceeded` only
+  after its raw inner result validates against `RPCProcedure.result_schema`;
+  mismatch appends `ExecutionFailed` with `RPC_RESULT_SCHEMA_MISMATCH`;
 - `cancel_execution(execution, user)` is a queued-only command that emits
   `ExecutionCancelled`.
 
