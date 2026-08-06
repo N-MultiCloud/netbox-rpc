@@ -604,6 +604,28 @@ be used autonomously on destructive procedures.
   `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
   advertisement, procedure forced `enabled=True`) alongside the existing
   `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
+- `network.huawei_ne8000_f1a.show_bgp_peer` (migration `0066`,
+  `tests/test_huawei_ne8000_bgp_procedure.py`) is a read-only BGP peer status
+  fetch targeting `dcim.device`. `effect="read"`, `approval_required=False`,
+  45s timeout. `params_schema` accepts `vrf` (optional) and
+  `rpc_ssh_credential_pk` (optional `DeviceCredential` reference). Seeded
+  **`enabled=False`**: unlike `os.linux_env_file.upsert_var` above, this is
+  the simpler "not implemented yet" case (only the `enabled` flag gates
+  it — no separate code-level gate, since there is no tracked security gap
+  specific to this procedure beyond the generic caller-authorization one
+  every `*credential_pk` param already shares, #203), not a discovered
+  security hole. Neither the normalizer branch in
+  `_dispatch_normalize_execution_params()` nor the paired nms-backend
+  `automation/rpc/bgp_peer.py` handler (nms-backend#620) exist yet at this
+  migration; dispatching without a normalizer fails at runtime with
+  `RPC_PROCEDURE_NOT_NORMALIZABLE`. **Deliberately deferred, not decided
+  here:** whether `rpc_ssh_credential_pk` resolves as an explicit override
+  (the Packer-template / DNS-host pattern) or falls back to the target
+  device's own `DeviceService` binding when omitted (the
+  `HUAWEI_MA5800_R024_START_ONT` pattern) — write the normalizer against
+  nms-backend#620's actual landed handler contract, not a guess made before
+  it exists. Flip to `enabled=True` in the same commit that adds the
+  normalizer branch and the constants.py name constant.
 - SSH key management: `os.linux.ubuntu.24.install_ssh_key` (write, no approval
   required). Appends a user's SSH public key to the target device's
   `authorized_keys` using the DeviceService SSH credential.

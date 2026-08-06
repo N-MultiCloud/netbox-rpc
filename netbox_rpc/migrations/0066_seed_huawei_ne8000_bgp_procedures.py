@@ -26,6 +26,21 @@ HUAWEI_NE8000_BGP_PROCEDURES = [
         "effect": "read",
         "timeout_seconds": 45,
         "approval_required": False,
+        # Seeded disabled: neither the netbox-rpc-side normalizer branch (see
+        # AGENTS.md "Adding New Procedures") nor the paired nms-backend
+        # execution handler exist yet as of this migration. Without a
+        # normalizer branch in _dispatch_normalize_execution_params(), any
+        # dispatch of this procedure fails at runtime with
+        # RPC_PROCEDURE_NOT_NORMALIZABLE (mirrors the os.linux_env_file.
+        # upsert_var precedent, migration 0060). The credential-resolution
+        # shape (explicit rpc_ssh_credential_pk override vs. implicit
+        # resolution from the target device's own DeviceService binding, cf.
+        # HUAWEI_MA5800_R024_START_ONT) is intentionally deferred to that
+        # normalizer fast-follow rather than guessed here, so it can be
+        # written against the nms-backend handler's actual, landed contract
+        # (nms-backend#620) instead of an assumption. Flip to enabled=True in
+        # the same commit that adds the normalizer branch.
+        "enabled": False,
         "description": "Fetch BGP peer status from a Huawei NE8000-F1A device.",
         "params_schema": {
             "type": "object",

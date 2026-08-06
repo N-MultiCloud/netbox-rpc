@@ -109,6 +109,22 @@ The procedure catalog is intentionally narrow:
 - `services.passbolt.transfer_secrets`
 - `services.passbolt.import_secrets`
 - `services.passbolt.cleanup`
+- `network.huawei_ne8000_f1a.show_bgp_peer` — read-only BGP peer status fetch
+  from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
+  `approval_required=False`, 45s timeout. Params: `vrf` (optional) and
+  `rpc_ssh_credential_pk` (optional `DeviceCredential` reference; nms-backend
+  resolves and decrypts it at execution time — no raw secret is ever
+  accepted as a param). Seeded `enabled=False` in migration `0066`: neither
+  the netbox-rpc normalizer branch nor the paired nms-backend execution
+  handler exist yet, so dispatch would fail at runtime with
+  `RPC_PROCEDURE_NOT_NORMALIZABLE` (see "Adding New Procedures" in
+  AGENTS.md). Whether the credential resolves from an explicit
+  `rpc_ssh_credential_pk` override or implicitly from the target device's
+  own `DeviceService` binding (cf. `network.device.huawei.olt.ma5800.r024.
+  start_ont`, which uses the latter) is intentionally decided in the
+  normalizer fast-follow, against the nms-backend handler's actual landed
+  contract (nms-backend#620), rather than guessed ahead of it. Flip to
+  `enabled=True` in the same commit that adds the normalizer branch.
 
 Operators call named procedures, not arbitrary SSH commands.
 

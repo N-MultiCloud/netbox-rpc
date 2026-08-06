@@ -33,6 +33,13 @@ def test_huawei_ne8000_bgp_procedure_contract(migration) -> None:
     assert procedure["effect"] == "read"
     assert procedure["approval_required"] is False
     assert procedure["timeout_seconds"] == 45
+    # Seeded disabled until the paired netbox-rpc normalizer branch and the
+    # nms-backend execution handler both land (see the migration's inline
+    # comment and AGENTS.md "Adding New Procedures"); dispatching an
+    # unnormalizable procedure fails at runtime with
+    # RPC_PROCEDURE_NOT_NORMALIZABLE. RPCProcedure.enabled defaults to True,
+    # so this must be set explicitly, not merely omitted.
+    assert procedure["enabled"] is False
     assert procedure["params_schema"]["additionalProperties"] is False
     assert procedure["params_schema"]["properties"]["vrf"] == {
         "type": "string",
