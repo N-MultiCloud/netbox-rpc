@@ -12,10 +12,10 @@ from jsonschema import Draft202012Validator, validate
 
 ROOT = Path(__file__).resolve().parents[1]
 PROCEDURE_MIGRATION = (
-    "netbox_rpc.migrations.0058_seed_ubuntu_upgrade_26_procedures"
+    "netbox_rpc.migrations.0063_seed_ubuntu_upgrade_26_procedures"
 )
-COMMAND_MIGRATION = "netbox_rpc.migrations.0059_seed_ubuntu_upgrade_26_commands"
-INTENT_MIGRATION = "netbox_rpc.migrations.0060_seed_ubuntu_upgrade_26_intent"
+COMMAND_MIGRATION = "netbox_rpc.migrations.0064_seed_ubuntu_upgrade_26_commands"
+INTENT_MIGRATION = "netbox_rpc.migrations.0065_seed_ubuntu_upgrade_26_intent"
 PROCEDURE_NAMES = (
     "os.linux.ubuntu.24.upgrade_26.analyze_preupgrade",
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state",
@@ -156,18 +156,18 @@ def test_migrations_are_inline_and_ordered(migrations) -> None:
     procedure_migration, command_migration, intent_migration = migrations
 
     assert procedure_migration.Migration.dependencies == [
-        ("netbox_rpc", "0057_seed_akvorado_procedures")
+        ("netbox_rpc", "0062_merge_akvorado_and_linux_env_file")
     ]
     assert command_migration.Migration.dependencies == [
-        ("netbox_rpc", "0058_seed_ubuntu_upgrade_26_procedures")
+        ("netbox_rpc", "0063_seed_ubuntu_upgrade_26_procedures")
     ]
     assert intent_migration.Migration.dependencies == [
-        ("netbox_rpc", "0059_seed_ubuntu_upgrade_26_commands")
+        ("netbox_rpc", "0064_seed_ubuntu_upgrade_26_commands")
     ]
     for filename in (
-        "0058_seed_ubuntu_upgrade_26_procedures.py",
-        "0059_seed_ubuntu_upgrade_26_commands.py",
-        "0060_seed_ubuntu_upgrade_26_intent.py",
+        "0063_seed_ubuntu_upgrade_26_procedures.py",
+        "0064_seed_ubuntu_upgrade_26_commands.py",
+        "0065_seed_ubuntu_upgrade_26_intent.py",
     ):
         source = (ROOT / "netbox_rpc/migrations" / filename).read_text(encoding="utf-8")
         assert "from netbox_rpc" not in source

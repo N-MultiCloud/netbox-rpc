@@ -1016,8 +1016,8 @@ be used autonomously on destructive procedures.
   `config_path` (absolute-path charset) and `ports` (int list, ≤16) hints. It
   must never accept arbitrary SSH command text.
 - Ubuntu 24.04 to 26.04 LTS upgrade lifecycle procedures are seeded by
-  migrations `0058` (procedures) and `0059` (commands), with the ordered
-  `Update Ubuntu OS from 24 LTS to 26 LTS` intent seeded by migration `0060`.
+  migrations `0063` (procedures) and `0064` (commands), with the ordered
+  `Update Ubuntu OS from 24 LTS to 26 LTS` intent seeded by migration `0065`.
   All four target `dcim.device` and `virtualization.virtualmachine`; handler IDs
   equal procedure names:
   - `os.linux.ubuntu.24.upgrade_26.analyze_preupgrade` is read-only and not

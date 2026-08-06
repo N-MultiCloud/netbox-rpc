@@ -50,7 +50,7 @@ def _remove_ubuntu_upgrade_26_intent(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0059_seed_ubuntu_upgrade_26_commands"),
+        ("netbox_rpc", "0064_seed_ubuntu_upgrade_26_commands"),
     ]
 
     operations = [

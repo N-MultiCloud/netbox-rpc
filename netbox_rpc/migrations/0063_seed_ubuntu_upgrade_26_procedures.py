@@ -220,7 +220,7 @@ def _remove_ubuntu_upgrade_26_procedures(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0057_seed_akvorado_procedures"),
+        ("netbox_rpc", "0062_merge_akvorado_and_linux_env_file"),
     ]
 
     operations = [
