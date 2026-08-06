@@ -44,6 +44,17 @@ COMMAND_RUNTIME_KEYS = frozenset(
         "rpc_ssh_strict_host_key_checking",
         "target",
         "item",
+        # Normalizer-derived (never caller-supplied) substitution values. Like
+        # ``target``/``item`` these are produced at normalization time, not
+        # declared in ``params_schema``, so they must be allowed here for
+        # ``RPCProcedureCommand.clean()``/``full_clean()`` to accept a seeded
+        # argv that references them. ``members_csv`` is the comma-joined form of
+        # the Samba identity ``members`` list param (safe-charset-validated
+        # per-entry by ``_normalize_samba_member_list`` before the join), used by
+        # ``service.samba_1.group_add_members``/``group_remove_members``. It is
+        # deliberately NOT a ``params_schema`` property: declaring it there would
+        # let a caller pass a pre-joined string and bypass per-member validation.
+        "members_csv",
     }
 )
 
@@ -67,6 +78,11 @@ EXEMPT_HANDLER_RATIONALE = {
     "os.linux_ubuntu_24.install_zabbix_agent2": (
         "Runs a multi-line install/configuration script through sudo bash -s with "
         "repository setup and config-file edits."
+    ),
+    "os.linux_env_file.upsert_var": (
+        "Resolves a DeviceCredential reference at execution time and delivers the "
+        "secret value to a fixed environment-file upsert script over stdin; the "
+        "plaintext value must never be represented as argv or persisted."
     ),
     "os.linux_proxmox.convert_mellanox_nic_to_ethernet": (
         "Destructive Proxmox host workflow with discovery, interface-file rewrite, "
@@ -207,6 +223,18 @@ EXEMPT_HANDLER_RATIONALE = {
     ),
     "service.akvorado.1.restart_stack": (
         "Restarts the backend-owned Akvorado Compose project and normalizes its final status."
+    ),
+    "service.samba_1.user_create": (
+        "Creates a Samba/AD user with a caller-supplied password delivered to "
+        "samba-tool over stdin. The password is scrubbed to a sha256+byte-count "
+        "fingerprint at execution-creation time and is never persisted or "
+        "represented as an argv token."
+    ),
+    "service.samba_1.user_set_password": (
+        "Resets a Samba/AD user password delivered to samba-tool over stdin. The "
+        "password is scrubbed to a sha256+byte-count fingerprint at "
+        "execution-creation time and is never persisted or represented as an "
+        "argv token."
     ),
     "services.minecraft.plugin.install_url": (
         "URL-download installer with destination-safe temp file handling under the "

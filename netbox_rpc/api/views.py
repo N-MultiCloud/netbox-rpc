@@ -10,7 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from .. import models
+from .. import filtersets, models
 from ..application.command_handlers import (
     approve_execution,
     cancel_execution,
@@ -19,6 +19,7 @@ from ..application.command_handlers import (
     reject_execution,
 )
 from ..application.queries import execution_events
+from ..domain.normalization import code_gate_unavailable_reason
 from .serializers import (
     RPCBackendSerializer,
     RPCIntentRunSerializer,
@@ -53,11 +54,13 @@ class RpcPluginSettingsViewSet(NetBoxModelViewSet):
 class RPCBackendViewSet(NetBoxModelViewSet):
     queryset = models.RPCBackend.objects.prefetch_related("tags")
     serializer_class = RPCBackendSerializer
+    filterset_class = filtersets.RPCBackendFilterSet
 
 
 class RPCProcedureViewSet(NetBoxModelViewSet):
     queryset = models.RPCProcedure.objects.prefetch_related("commands", "tags")
     serializer_class = RPCProcedureSerializer
+    filterset_class = filtersets.RPCProcedureFilterSet
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"], url_path="available")
@@ -74,6 +77,18 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
             qs = qs.filter(
                 Q(target_models=[]) | Q(target_models__contains=[target_type])
             )
+
+        # A procedure held shut by a hard-coded code-level gate (see
+        # code_gate_unavailable_reason) is not "available" even when
+        # enabled=True — that mutable flag is not sufficient proof of
+        # safety on its own. Same check enforced at admission time in
+        # create_execution() and, as defense in depth, at worker-claim
+        # time in normalize_execution_params().
+        qs = [
+            procedure
+            for procedure in qs
+            if code_gate_unavailable_reason(procedure.name) is None
+        ]
 
         # #167: when the selected backend advertises a capability manifest, a
         # procedure the backend cannot serve compatibly is not "available".
@@ -140,6 +155,7 @@ class RPCProcedureCommandViewSet(NetBoxModelViewSet):
         "procedure"
     ).prefetch_related("tags")
     serializer_class = RPCProcedureCommandSerializer
+    filterset_class = filtersets.RPCProcedureCommandFilterSet
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -154,6 +170,7 @@ class RPCIntentViewSet(NetBoxModelViewSet):
         "tags", "intent_procedures__procedure"
     )
     serializer_class = RPCIntentSerializer
+    filterset_class = filtersets.RPCIntentFilterSet
 
     @extend_schema(
         request=RPCIntentRunSerializer,
@@ -186,6 +203,7 @@ class RPCIntentViewSet(NetBoxModelViewSet):
 class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
     queryset = models.RPCLinuxServiceAllowlist.objects.prefetch_related("tags")
     serializer_class = RPCLinuxServiceAllowlistSerializer
+    filterset_class = filtersets.RPCLinuxServiceAllowlistFilterSet
 
 
 class RPCExecutionViewSet(NetBoxModelViewSet):
@@ -202,6 +220,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "requested_by",
     ).prefetch_related("procedure__commands", "tags")
     serializer_class = RPCExecutionSerializer
+    filterset_class = filtersets.RPCExecutionFilterSet
 
     def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         serializer = self.get_serializer(data=request.data)
@@ -261,3 +280,4 @@ class RPCExecutionEventViewSet(NetBoxReadOnlyModelViewSet):
         "execution"
     ).prefetch_related("tags")
     serializer_class = RPCExecutionEventSerializer
+    filterset_class = filtersets.RPCExecutionEventFilterSet

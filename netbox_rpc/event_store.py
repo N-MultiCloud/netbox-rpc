@@ -40,6 +40,12 @@ SAFE_REFERENCE_KEYS = {
     "guest_credential_pk",
     "key_id",
     "key_version",
+    # Samba identity creation scrubs the raw password before persistence and
+    # deliberately retains only this non-plaintext audit fingerprint.  Keep
+    # these two fields reconstructable when the live projection is folded from
+    # the redacted event ledger; a bare ``password`` key remains sensitive.
+    "password_bytes",
+    "password_sha256",
     "restconf_credential_pk",
     "rpc_ssh_credential_pk",
 }

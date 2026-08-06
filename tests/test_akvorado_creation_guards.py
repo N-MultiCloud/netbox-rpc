@@ -14,7 +14,10 @@ import pytest
 @pytest.fixture()
 def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     class ValidationError(Exception):
-        pass
+        def __init__(self, detail, *, code=None):
+            super().__init__(detail)
+            self.detail = detail
+            self.code = code
 
     class PermissionDenied(Exception):
         pass
@@ -55,6 +58,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
+    normalization.code_gate_unavailable_reason = lambda procedure_name: None
     event_store = types.ModuleType("netbox_rpc.event_store")
     event_store.mark_execution_failed = lambda *args, **kwargs: None
 
@@ -152,6 +156,7 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
             object(),
         )
 
+    assert exc_info.value.code == "does_not_exist"
     assert "does not exist" in str(exc_info.value)
 
 

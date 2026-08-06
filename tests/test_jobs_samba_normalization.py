@@ -18,6 +18,13 @@ if str(ROOT) not in sys.path:
 READ_MIGRATION_MODULE = "netbox_rpc.migrations.0049_seed_samba_read_procedures"
 WRITE_MIGRATION_MODULE = "netbox_rpc.migrations.0051_seed_samba_write_procedures"
 WRITE_COMMAND_MIGRATION_MODULE = "netbox_rpc.migrations.0052_seed_samba_write_commands"
+IDENTITY_MIGRATION_MODULE = (
+    "netbox_rpc.migrations.0055_seed_samba_identity_procedures"
+)
+IDENTITY_COMMAND_MIGRATION_MODULE = (
+    "netbox_rpc.migrations.0056_seed_samba_identity_commands"
+)
+INTENT_MIGRATION_MODULE = "netbox_rpc.migrations.0057_seed_fileserver_samba_intents"
 # Mirrors _STATUS_REPORT_OUTPUT_SCHEMA in 0049. Per Samba's
 # source3/utils/status.c, `smbstatus --json` emits each section via
 # add_section_to_json() -> json_new_object(), so sections are objects keyed by
@@ -156,6 +163,83 @@ SAMBA_BODY_PROCEDURES = (
     ),
 )
 
+# A fake-but-well-formed sha256 fingerprint. Simulates the value
+# command_handlers._scrub_password_param() computes and persists BEFORE an
+# RPCExecution row is ever saved (#160): by the time normalize_execution_params()
+# runs, a raw "password" key must never be present -- only this fingerprint
+# shape. These pure-domain cases construct that already-scrubbed state directly
+# (they never touch command_handlers) to prove the normalizer forwards it
+# without ever expecting or reading plaintext.
+_FAKE_PASSWORD_SHA256 = "a" * 64
+_FAKE_PASSWORD_BYTES = 12
+
+SAMBA_IDENTITY_CASES = (
+    (
+        "service.samba.1.user_create",
+        "service.samba_1.user_create",
+        {
+            "username": "alice",
+            "password_sha256": _FAKE_PASSWORD_SHA256,
+            "password_bytes": _FAKE_PASSWORD_BYTES,
+            "full_name": "Alice Example",
+            "disabled": False,
+        },
+        {"username": "alice"},
+    ),
+    (
+        "service.samba.1.user_delete",
+        "service.samba_1.user_delete",
+        {"username": "alice"},
+        {"username": "alice"},
+    ),
+    (
+        "service.samba.1.user_set_password",
+        "service.samba_1.user_set_password",
+        {
+            "username": "alice",
+            "password_sha256": _FAKE_PASSWORD_SHA256,
+            "password_bytes": _FAKE_PASSWORD_BYTES,
+        },
+        {"username": "alice"},
+    ),
+    (
+        "service.samba.1.user_enable",
+        "service.samba_1.user_enable",
+        {"username": "alice"},
+        {"username": "alice"},
+    ),
+    (
+        "service.samba.1.user_disable",
+        "service.samba_1.user_disable",
+        {"username": "alice"},
+        {"username": "alice"},
+    ),
+    (
+        "service.samba.1.group_create",
+        "service.samba_1.group_create",
+        {"group_name": "engineering"},
+        {"group_name": "engineering"},
+    ),
+    (
+        "service.samba.1.group_delete",
+        "service.samba_1.group_delete",
+        {"group_name": "engineering"},
+        {"group_name": "engineering"},
+    ),
+    (
+        "service.samba.1.group_add_members",
+        "service.samba_1.group_add_members",
+        {"group_name": "engineering", "members": ["alice", "bob"]},
+        {"group_name": "engineering", "members": ["alice", "bob"]},
+    ),
+    (
+        "service.samba.1.group_remove_members",
+        "service.samba_1.group_remove_members",
+        {"group_name": "engineering", "members": ["alice"]},
+        {"group_name": "engineering", "members": ["alice"]},
+    ),
+)
+
 
 @pytest.fixture()
 def jobs_module(monkeypatch: pytest.MonkeyPatch):
@@ -240,6 +324,198 @@ def test_samba_write_procedure_normalizes(
         assert "content" not in fp
         assert "content_sha256" in fp
         assert fp["content_bytes"] == len(str(content).encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "procedure_name,handler_id,params,expected_extra",
+    SAMBA_IDENTITY_CASES,
+)
+def test_samba_identity_procedure_normalizes(
+    jobs_module,
+    procedure_name: str,
+    handler_id: str,
+    params: dict[str, object],
+    expected_extra: dict[str, object],
+) -> None:
+    normalized = jobs_module.normalize_execution_params(
+        _execution(procedure_name, handler_id, params)
+    )
+
+    assert normalized["target"] == "fileserver01"
+    assert normalized["command_fingerprint"]["handler_id"] == handler_id
+    assert normalized["command_fingerprint"]["procedure"] == procedure_name
+    assert "command" not in normalized
+    assert "commands" not in normalized
+    # #160 hard invariant: no identity procedure -- password-bearing or not --
+    # may ever surface a raw "password" key in the normalized payload or its
+    # fingerprint.
+    assert "password" not in normalized
+    assert "password" not in normalized["command_fingerprint"]
+    for key, value in expected_extra.items():
+        assert normalized[key] == value
+        assert normalized["command_fingerprint"][key] == value
+
+    if procedure_name in {
+        "service.samba.1.group_add_members",
+        "service.samba.1.group_remove_members",
+    }:
+        assert normalized["members_csv"] == ",".join(params["members"])
+        # members_csv is a command-templating convenience, not part of the
+        # audit fingerprint (members already covers it).
+        assert "members_csv" not in normalized["command_fingerprint"]
+
+    if procedure_name in {
+        "service.samba.1.user_create",
+        "service.samba.1.user_set_password",
+    }:
+        assert normalized["password_sha256"] == _FAKE_PASSWORD_SHA256
+        assert normalized["password_bytes"] == _FAKE_PASSWORD_BYTES
+        fp = normalized["command_fingerprint"]
+        assert fp["password_sha256"] == _FAKE_PASSWORD_SHA256
+        assert fp["password_bytes"] == _FAKE_PASSWORD_BYTES
+
+    if procedure_name == "service.samba.1.user_create":
+        assert normalized["full_name"] == "Alice Example"
+        fp = normalized["command_fingerprint"]
+        assert "full_name" not in fp
+        assert "full_name_sha256" in fp
+        assert normalized["disabled"] is False
+        assert fp["disabled"] is False
+
+
+def test_samba_identity_password_normalizer_rejects_without_precomputed_fingerprint(
+    jobs_module,
+) -> None:
+    """Defense in depth for the #160 stdin-secret flow.
+
+    ``_extract_samba_password_fingerprint`` only ever reads
+    ``password_sha256``/``password_bytes`` -- fields that
+    ``command_handlers._scrub_password_param()`` computes and substitutes for a
+    raw ``password`` *before* the RPCExecution row is ever persisted. This
+    normalizer must never accept a raw ``password`` key on its own (i.e. if a
+    future bug ever bypassed the creation-time scrub, the run must fail closed
+    here rather than silently proceed with -- or leak -- plaintext).
+    """
+    bad_params_cases = (
+        {"username": "alice", "password": "hunter2-should-never-be-read"},
+        {
+            "username": "alice",
+            "password": "hunter2-should-never-be-read",
+            "password_bytes": 7,
+        },
+        {"username": "alice", "password_sha256": "not-hex-at-all", "password_bytes": 7},
+        {
+            "username": "alice",
+            "password_sha256": _FAKE_PASSWORD_SHA256,
+            "password_bytes": 0,
+        },
+        {"username": "alice", "password_sha256": _FAKE_PASSWORD_SHA256},
+    )
+    for bad_params in bad_params_cases:
+        with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+            jobs_module.normalize_execution_params(
+                _execution(
+                    "service.samba.1.user_create",
+                    "service.samba_1.user_create",
+                    bad_params,
+                )
+            )
+        assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_samba_identity_password_never_leaks_even_if_present_in_params(
+    jobs_module,
+) -> None:
+    """Adversarial/buggy-caller simulation: a leftover raw ``password`` key is
+    present in ``params`` *alongside* a valid pre-scrubbed fingerprint (the
+    shape command_handlers.create_execution() guarantees today). Proves the
+    normalized output can never leak the plaintext even in that case -- the
+    single most security-critical assertion in this module.
+    """
+    secret = "hunter2-should-never-appear-anywhere"
+    execution = _execution(
+        "service.samba.1.user_create",
+        "service.samba_1.user_create",
+        {
+            "username": "alice",
+            "password": secret,
+            "password_sha256": _FAKE_PASSWORD_SHA256,
+            "password_bytes": _FAKE_PASSWORD_BYTES,
+        },
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert "password" not in normalized
+    assert "password" not in normalized["command_fingerprint"]
+    serialized = json.dumps(normalized)
+    assert secret not in serialized
+
+
+@pytest.mark.parametrize(
+    "procedure_name,handler_id,params,message_snippet",
+    [
+        (
+            "service.samba.1.user_delete",
+            "service.samba_1.user_delete",
+            {"username": "-bad"},
+            "identifier",
+        ),
+        (
+            "service.samba.1.user_delete",
+            "service.samba_1.user_delete",
+            {"username": "bad;name"},
+            "identifier",
+        ),
+        (
+            "service.samba.1.group_delete",
+            "service.samba_1.group_delete",
+            {"group_name": "bad name"},
+            "identifier",
+        ),
+        (
+            "service.samba.1.group_add_members",
+            "service.samba_1.group_add_members",
+            {"group_name": "engineering", "members": []},
+            "at least one",
+        ),
+        (
+            "service.samba.1.group_add_members",
+            "service.samba_1.group_add_members",
+            {"group_name": "engineering", "members": ["alice", "alice"]},
+            "unique",
+        ),
+        (
+            "service.samba.1.group_add_members",
+            "service.samba_1.group_add_members",
+            {"group_name": "engineering", "members": ["bad;name"]},
+            "identifier",
+        ),
+        (
+            "service.samba.1.group_add_members",
+            "service.samba_1.group_add_members",
+            {
+                "group_name": "engineering",
+                "members": [f"user{i}" for i in range(200)],
+            },
+            "at most",
+        ),
+    ],
+)
+def test_samba_identity_normalizer_rejects_unsafe_or_malformed_values(
+    jobs_module,
+    procedure_name: str,
+    handler_id: str,
+    params: dict[str, object],
+    message_snippet: str,
+) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(
+            _execution(procedure_name, handler_id, params)
+        )
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+    assert message_snippet in str(exc_info.value).lower()
 
 
 @pytest.mark.parametrize(
@@ -555,12 +831,13 @@ def test_every_seeded_samba_procedure_has_normalizer_branch(
 ) -> None:
     read_migration = _load_seed_migration(monkeypatch, READ_MIGRATION_MODULE)
     write_migration = _load_seed_migration(monkeypatch, WRITE_MIGRATION_MODULE)
+    identity_migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
     seeded_names = {
         procedure["name"]
-        for migration in (read_migration, write_migration)
+        for migration in (read_migration, write_migration, identity_migration)
         for procedure in migration._PROCEDURES
     }
-    all_cases = SAMBA_CASES + SAMBA_WRITE_CASES
+    all_cases = SAMBA_CASES + SAMBA_WRITE_CASES + SAMBA_IDENTITY_CASES
 
     assert seeded_names == {case[0] for case in all_cases}
     for name, handler_id, params, _expected in all_cases:
@@ -774,6 +1051,302 @@ def test_samba_write_command_rows_match_exemption_contract(
         "--",
         "{unit}.service",
     ]
+
+
+def test_samba_identity_seed_schema_and_approval_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
+    procedures = {procedure["name"]: procedure for procedure in migration._PROCEDURES}
+
+    assert set(procedures) == {case[0] for case in SAMBA_IDENTITY_CASES}
+    for procedure in procedures.values():
+        assert procedure["target_models"] == [
+            "netbox_fileserver.sambadomain",
+            "virtualization.virtualmachine",
+            "dcim.device",
+        ]
+
+    destructive = {
+        name
+        for name, procedure in procedures.items()
+        if procedure["effect"] == "destructive"
+    }
+    assert destructive == {
+        "service.samba.1.user_delete",
+        "service.samba.1.group_delete",
+    }
+    for name in destructive:
+        assert procedures[name]["approval_required"] is True
+    for name, procedure in procedures.items():
+        if name not in destructive:
+            assert procedure["approval_required"] is False
+            assert procedure["effect"] == "write"
+
+
+def test_samba_identity_password_fields_never_appear_in_result_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No identity procedure's *result* may ever carry a password value/hash.
+
+    ``user_create``/``user_set_password`` legitimately accept ``password`` as
+    *input* (delivered to samba-tool over stdin, scrubbed before persistence --
+    see command_handlers._scrub_password_param()); their result_schema must
+    still never round-trip the value or a hash of it. ``user_set_password``'s
+    result legitimately reports a ``password_set`` *boolean flag* -- that is
+    not a secret and is explicitly allowed. Every other procedure's
+    params_schema must not mention "password" at all.
+    """
+    migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
+    procedures = {procedure["name"]: procedure for procedure in migration._PROCEDURES}
+
+    allowed_boolean_flags = {"password_set"}
+    for name, procedure in procedures.items():
+        for prop_name, prop_schema in procedure["result_schema"]["properties"].items():
+            lowered = prop_name.lower()
+            assert "hash" not in lowered, (name, prop_name)
+            if "password" not in lowered:
+                continue
+            assert prop_name in allowed_boolean_flags, (name, prop_name)
+            assert prop_schema["type"] == "boolean", (name, prop_name)
+
+    password_bearing = {
+        "service.samba.1.user_create",
+        "service.samba.1.user_set_password",
+    }
+    for name in password_bearing:
+        params_schema = procedures[name]["params_schema"]
+        assert "password" in params_schema["required"]
+        assert params_schema["properties"]["password"]["type"] == "string"
+
+    for name, procedure in procedures.items():
+        if name in password_bearing:
+            continue
+        params_schema_text = json.dumps(
+            procedure["params_schema"], sort_keys=True
+        ).lower()
+        assert "password" not in params_schema_text, name
+
+
+def test_samba_identity_seed_schema_rejects_invalid_structured_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
+    procedures = {procedure["name"]: procedure for procedure in migration._PROCEDURES}
+    jsonschema = pytest.importorskip("jsonschema")
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"username": "bad;name", "password": "hunter2"},
+            procedures["service.samba.1.user_create"]["params_schema"],
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"username": "alice"},
+            procedures["service.samba.1.user_create"]["params_schema"],
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"username": "alice", "password": "hunter2", "extra": "nope"},
+            procedures["service.samba.1.user_create"]["params_schema"],
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"group_name": "engineering", "members": []},
+            procedures["service.samba.1.group_add_members"]["params_schema"],
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"group_name": "engineering", "members": ["alice"] * 200},
+            procedures["service.samba.1.group_add_members"]["params_schema"],
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {"group_name": "bad name"},
+            procedures["service.samba.1.group_delete"]["params_schema"],
+        )
+
+    jsonschema.validate(
+        {"username": "alice", "password": "hunter2"},
+        procedures["service.samba.1.user_create"]["params_schema"],
+    )
+    jsonschema.validate(
+        {"group_name": "engineering", "members": ["alice", "bob"]},
+        procedures["service.samba.1.group_add_members"]["params_schema"],
+    )
+
+
+def test_samba_identity_seed_schema_rejects_trailing_newline_under_search_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors the read/write seed test: ``jsonschema`` enforces ``pattern``
+    with ``re.search``, so a bare ``$`` anchor would accept a trailing
+    newline. The identity seed patterns anchor with ``(?![\\s\\S])`` instead.
+    """
+    migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
+    procedures = {procedure["name"]: procedure for procedure in migration._PROCEDURES}
+
+    username_pattern = procedures["service.samba.1.user_delete"]["params_schema"][
+        "properties"
+    ]["username"]["pattern"]
+    assert re.search(username_pattern, "alice")
+    assert not re.search(username_pattern, "alice\n")
+
+    password_pattern = procedures["service.samba.1.user_create"]["params_schema"][
+        "properties"
+    ]["password"]["pattern"]
+    assert re.search(password_pattern, "hunter2")
+    assert not re.search(password_pattern, "hunter2\n")
+
+    group_pattern = procedures["service.samba.1.group_delete"]["params_schema"][
+        "properties"
+    ]["group_name"]["pattern"]
+    assert re.search(group_pattern, "engineering")
+    assert not re.search(group_pattern, "engineering\n")
+
+
+def test_samba_identity_command_rows_match_exemption_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_migration = _load_seed_migration(
+        monkeypatch,
+        IDENTITY_COMMAND_MIGRATION_MODULE,
+    )
+    commands = command_migration._COMMAND_STEPS_BY_HANDLER_ID
+    exempt_handlers = {
+        "service.samba_1.user_create",
+        "service.samba_1.user_set_password",
+    }
+
+    spec = importlib.util.spec_from_file_location(
+        "command_contract",
+        ROOT / "netbox_rpc/command_contract.py",
+    )
+    assert spec and spec.loader
+    command_contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(command_contract)
+
+    for handler_id in exempt_handlers:
+        assert handler_id in command_contract.EXEMPT_HANDLER_IDS
+        assert commands[handler_id][0]["argv"][0] == "backend-orchestrated"
+
+    non_exempt_argv = {
+        "service.samba_1.user_delete": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "user",
+            "delete",
+            "{username}",
+        ],
+        "service.samba_1.user_enable": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "user",
+            "enable",
+            "{username}",
+        ],
+        "service.samba_1.user_disable": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "user",
+            "disable",
+            "{username}",
+        ],
+        "service.samba_1.group_create": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "group",
+            "add",
+            "{group_name}",
+        ],
+        "service.samba_1.group_delete": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "group",
+            "delete",
+            "{group_name}",
+        ],
+        "service.samba_1.group_add_members": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "group",
+            "addmembers",
+            "{group_name}",
+            "{members_csv}",
+        ],
+        "service.samba_1.group_remove_members": [
+            "sudo",
+            "/usr/bin/samba-tool",
+            "group",
+            "removemembers",
+            "{group_name}",
+            "{members_csv}",
+        ],
+    }
+    for handler_id, expected_argv in non_exempt_argv.items():
+        assert handler_id not in command_contract.EXEMPT_HANDLER_IDS
+        assert commands[handler_id][0]["argv"] == expected_argv
+
+
+def test_fileserver_samba_intents_seed_membership_and_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pure-domain check of the #160 RPCIntent seed data shape.
+
+    The intent *executor* (execute_intent(), #130) is DB-backed and out of
+    scope here; this only proves the migration's inline ``_INTENTS`` data --
+    membership, per-intent ``sequence`` ordering, and ``execution_mode`` --
+    matches the issue's documented contract.
+    """
+    migration = _load_seed_migration(monkeypatch, INTENT_MIGRATION_MODULE)
+    intents = {intent["name"]: intent for intent in migration._INTENTS}
+
+    assert set(intents) == {
+        "fileserver.samba.collect_state",
+        "fileserver.samba.deploy_config",
+    }
+
+    collect_state = intents["fileserver.samba.collect_state"]
+    assert collect_state["execution_mode"] == "parallel"
+    assert collect_state["procedure_names"] == (
+        "service.samba.1.version",
+        "service.samba.1.service_status",
+        "service.samba.1.config_read",
+        "service.samba.1.config_test",
+        "service.samba.1.list_shares",
+        "service.samba.1.status_report",
+        "service.samba.1.user_list",
+        "service.samba.1.group_list",
+        "service.samba.1.domain_info",
+    )
+
+    deploy_config = intents["fileserver.samba.deploy_config"]
+    assert deploy_config["execution_mode"] == "sequential"
+    assert deploy_config["procedure_names"] == (
+        "service.samba.1.config_test",
+        "service.samba.1.config_deploy",
+        "service.samba.1.service_control",
+        "service.samba.1.service_status",
+    )
+
+    # No intent procedure name may be invented -- every one must resolve to a
+    # procedure actually seeded across the read/write/identity migrations.
+    read_migration = _load_seed_migration(monkeypatch, READ_MIGRATION_MODULE)
+    write_migration = _load_seed_migration(monkeypatch, WRITE_MIGRATION_MODULE)
+    identity_migration = _load_seed_migration(monkeypatch, IDENTITY_MIGRATION_MODULE)
+    all_seeded_names = {
+        procedure["name"]
+        for migration in (read_migration, write_migration, identity_migration)
+        for procedure in migration._PROCEDURES
+    }
+    for intent in intents.values():
+        for procedure_name in intent["procedure_names"]:
+            assert procedure_name in all_seeded_names, procedure_name
 
 
 def test_status_report_output_schema_matches_real_smbstatus_json(

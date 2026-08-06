@@ -115,7 +115,10 @@ class ExecutionApiTests(TestCase):
         )
 
         assert resp.status_code == 400, resp.content
-        assert "does not exist" in str(resp.data["assigned_object_id"])
+        # NetBox may reject the dangling GenericForeignKey during serializer
+        # model validation before the command handler's defense-in-depth check.
+        # The error wording/code differs by validation layer and NetBox version.
+        assert "assigned_object_id" in resp.data, resp.data
         assert not RPCExecution.objects.filter(procedure=procedure).exists()
 
     def test_put_and_patch_are_method_not_allowed(self):

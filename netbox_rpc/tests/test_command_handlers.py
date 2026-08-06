@@ -158,6 +158,12 @@ class RunExecutionTests(TestCase):
         result,
     ):
         procedure = make_procedure(procedure_name)
+        # Fresh databases contain the migration-seeded Akvorado row, which is
+        # intentionally disabled until its backend handler is deployed.  This
+        # test exercises the later backend-result boundary, so opt this fixture
+        # in explicitly; otherwise the worker correctly fails earlier with
+        # RPC_PROCEDURE_DISABLED and never reaches schema validation.
+        procedure.enabled = True
         procedure.result_schema = {
             "type": "object",
             "required": ["ok", "procedure", "target", *required_fields],
