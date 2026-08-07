@@ -9,6 +9,9 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError, validate
 
 MIGRATION_MODULE = "netbox_rpc.migrations.0066_seed_huawei_ne8000_bgp_procedures"
+MERGE_MIGRATION_MODULE = (
+    "netbox_rpc.migrations.0067_merge_huawei_bgp_and_upgrade_result_limits"
+)
 PROCEDURE_NAME = "network.device.huawei.router.ne8000.f1a.show_bgp_peer"
 HANDLER_ID = "network.huawei_ne8000_f1a.show_bgp_peer"
 
@@ -99,6 +102,22 @@ def test_huawei_ne8000_bgp_migration_depends_on_current_leaf(migration) -> None:
     assert migration.Migration.dependencies == [
         ("netbox_rpc", "0065_seed_ubuntu_upgrade_26_intent")
     ]
+
+
+def test_huawei_ne8000_bgp_and_upgrade_migration_leaves_are_merged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_migration_import_stubs(monkeypatch)
+    sys.modules.pop(MERGE_MIGRATION_MODULE, None)
+    merge_migration = importlib.import_module(MERGE_MIGRATION_MODULE)
+
+    assert merge_migration.Migration.dependencies == [
+        ("netbox_rpc", "0066_fix_ubuntu_upgrade_26_result_schema_limits"),
+        ("netbox_rpc", "0066_seed_huawei_ne8000_bgp_procedures"),
+    ]
+    assert merge_migration.Migration.operations == []
+
+    sys.modules.pop(MERGE_MIGRATION_MODULE, None)
 
 
 class _FakeQuerySet:
