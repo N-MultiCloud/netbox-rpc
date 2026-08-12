@@ -594,8 +594,10 @@ class StagingBackendTokenRotationApprovalTests(TestCase):
 
         key_patch, _ = _configure_signing_key("44" * 32)
         with key_patch:
-            command_handlers.run_execution(approved)
+            with self.assertRaises(RPCExecutionError) as exc_info:
+                command_handlers.run_execution(approved)
 
+        assert exc_info.exception.code == "RPC_APPROVAL_INVALIDATED"
         call_backend.assert_not_called()
         approved.refresh_from_db()
         assert approved.status == RPCExecution.STATUS_FAILED
