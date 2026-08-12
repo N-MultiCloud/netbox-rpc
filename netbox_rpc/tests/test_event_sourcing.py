@@ -90,7 +90,7 @@ class EventStoreProjectionTests(TestCase):
         )
 
         ex.refresh_from_db()
-        progress = ex.events.get(event="BackendProgress")
+        progress = ex.events.get(event="Backend::BackendProgress")
         failure = ex.events.get(event="ExecutionFailed")
         assert progress.message == "[REDACTED]"
         assert progress.data["detail"] == "[REDACTED]"
@@ -107,6 +107,24 @@ class EventStoreProjectionTests(TestCase):
                 "data": failure.data,
             }
         )
+
+    def test_event_message_is_independently_hard_capped(self):
+        ex = make_execution()
+        message = "Authorization: Bearer opaque-secret\n" + (
+            "x" * (event_store.MAX_EVENT_STRING_LENGTH * 2)
+        )
+
+        record = event_store.append_execution_event(
+            ex,
+            "warning",
+            "BoundedMessageProbe",
+            message,
+            {},
+        )
+
+        assert "opaque-secret" not in record.message
+        assert len(record.message) <= event_store.MAX_EVENT_STRING_LENGTH
+        assert record.message.endswith(event_store._TRUNCATION_MARKER)
 
     def test_dispatch_lease_key_lineage_is_preserved_and_reconstructable(self):
         ex = make_execution()

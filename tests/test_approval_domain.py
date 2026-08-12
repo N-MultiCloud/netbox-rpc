@@ -92,7 +92,9 @@ def test_fold_request_then_pending_then_approved() -> None:
             approved_by_id=9, snapshot_hash="deadbeef", decided_at=DECIDED_AT
         ),
     ]
-    assert rebuild(events).status == ExecutionStatus.APPROVED.value
+    state = rebuild(events)
+    assert state.status == ExecutionStatus.APPROVED.value
+    assert state.approved_by_id == 9
 
 
 def test_fold_rejected_is_terminal_with_finished_at() -> None:

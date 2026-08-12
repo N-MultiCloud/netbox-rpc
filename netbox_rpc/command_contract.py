@@ -89,6 +89,11 @@ EXEMPT_HANDLER_RATIONALE = {
         "secret value to a fixed environment-file upsert script over stdin; the "
         "plaintext value must never be represented as argv or persisted."
     ),
+    "service.netbox.staging.rotate_backend_token": (
+        "Invokes a fixed root-owned provisioner that generates and "
+        "installs the staging NetBox service token without accepting or returning "
+        "the token value through the RPC contract."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

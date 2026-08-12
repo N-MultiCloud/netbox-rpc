@@ -47,6 +47,9 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "service.akvorado.1.config_read",
         "service.akvorado.1.config_deploy",
     }
+    constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
+        "service.netbox.staging.rotate_backend_token"
+    )
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
     aggregate.RPCExecutionAggregateError = type(
@@ -142,9 +145,7 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
 ) -> None:
     command_handlers, ValidationError, _ = command_handlers_module
     manager = _RestrictedManager(None)
-    content_type = SimpleNamespace(
-        model_class=lambda: SimpleNamespace(objects=manager)
-    )
+    content_type = SimpleNamespace(model_class=lambda: SimpleNamespace(objects=manager))
 
     with pytest.raises(ValidationError) as exc_info:
         command_handlers._require_akvorado_assigned_object(
@@ -158,6 +159,133 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
 
     assert exc_info.value.code == "does_not_exist"
     assert "does not exist" in str(exc_info.value)
+
+
+def test_staging_rotation_target_is_exact_and_user_viewable(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    user = object()
+    target = SimpleNamespace(name="nms-front-door")
+    manager = _RestrictedManager(target)
+    model = SimpleNamespace(objects=manager)
+    content_type = SimpleNamespace(
+        app_label="dcim",
+        model="device",
+        model_class=lambda: model,
+    )
+    procedure = SimpleNamespace(name="service.netbox.staging.rotate_backend_token")
+
+    command_handlers._require_staging_rotation_assigned_object(
+        {
+            "assigned_object_type": content_type,
+            "assigned_object_id": 32,
+        },
+        procedure,
+        user,
+    )
+
+    assert manager.restricted_user is user
+    assert manager.restricted_action == "view"
+    assert manager.queryset.filtered_pk == 32
+
+    manager.queryset.result = SimpleNamespace(name="different-device")
+    with pytest.raises(ValidationError) as exc_info:
+        command_handlers._require_staging_rotation_assigned_object(
+            {
+                "assigned_object_type": content_type,
+                "assigned_object_id": 33,
+            },
+            procedure,
+            user,
+        )
+    assert exc_info.value.code == "does_not_exist"
+
+
+def test_staging_rotation_rejects_wrong_or_dangling_target_type(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = SimpleNamespace(name="service.netbox.staging.rotate_backend_token")
+
+    for content_type in (
+        None,
+        SimpleNamespace(app_label="virtualization", model="virtualmachine"),
+    ):
+        with pytest.raises(ValidationError) as exc_info:
+            command_handlers._require_staging_rotation_assigned_object(
+                {
+                    "assigned_object_type": content_type,
+                    "assigned_object_id": 32,
+                },
+                procedure,
+                object(),
+            )
+        assert exc_info.value.code == "required"
+
+
+def test_staging_rotation_runtime_policy_rejects_every_mutable_drift(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    contract = command_handlers.staging_contract
+    canonical = {
+        **contract.PROCEDURE_POLICY,
+        "params_schema": contract.PARAMS_SCHEMA,
+        "result_schema": contract.RESULT_SCHEMA,
+    }
+
+    class Commands:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self
+
+        def order_by(self, _field):
+            return self.rows
+
+    def procedure(policy, command_contract=None):
+        rows = command_contract or contract.COMMAND_CONTRACT
+        return SimpleNamespace(
+            **policy,
+            commands=Commands([SimpleNamespace(**row) for row in rows]),
+        )
+
+    command_handlers._require_staging_rotation_procedure_policy(
+        procedure(canonical)
+    )
+
+    drifted_values = {
+        "name": "service.netbox.staging.different",
+        "handler_id": "service.netbox.staging.different",
+        "version": 2,
+        "enabled": False,
+        "target_models": ["virtualization.virtualmachine"],
+        "effect": "write",
+        "timeout_seconds": 1799,
+        "approval_required": False,
+        "transport_driver": "paramiko",
+        "transport_driver_chain": ["paramiko"],
+        "output_parser": "json",
+        "output_schema": {"type": "object"},
+        "params_schema": {"type": "object"},
+        "result_schema": {"type": "object"},
+    }
+    for field, value in drifted_values.items():
+        policy = dict(canonical)
+        policy[field] = value
+        with pytest.raises(ValidationError):
+            command_handlers._require_staging_rotation_procedure_policy(
+                procedure(policy)
+            )
+
+    changed_command = [dict(contract.COMMAND_CONTRACT[0])]
+    changed_command[0]["argv"] = ["backend-orchestrated", "different-operation"]
+    with pytest.raises(ValidationError):
+        command_handlers._require_staging_rotation_procedure_policy(
+            procedure(canonical, changed_command)
+        )
 
 
 def test_unsafe_config_content_is_rejected_before_serializer_save(

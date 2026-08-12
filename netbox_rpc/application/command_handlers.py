@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 import jsonschema
@@ -9,7 +10,10 @@ from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 
 from ..backends import resolve_backend
-from ..constants import AKVORADO_1_PROCEDURE_NAMES
+from ..constants import (
+    AKVORADO_1_PROCEDURE_NAMES,
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+)
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
     RPCExecutionError,
@@ -18,6 +22,7 @@ from ..domain.normalization import (
     validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
+from .. import staging_rotation_contract as staging_contract
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
 # service.samba.1.user_create / user_set_password). The raw password must
@@ -42,6 +47,16 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
 # before the HTTP call it is blocked on can even return cleanly.
 _RPC_JOB_TIMEOUT_HEADROOM_SECONDS = 60
 _RPC_JOB_TIMEOUT_FLOOR_SECONDS = 600
+
+_STAGING_ROTATION_CREATE_FIELDS = frozenset(
+    {"procedure_id", "assigned_object_type", "assigned_object_id", "params"}
+)
+_STAGING_ROTATION_APPROVAL_REASON = (
+    "Approved audited staging backend token rotation."
+)
+_STAGING_ROTATION_REJECTION_REASON = (
+    "Rejected audited staging backend token rotation."
+)
 
 
 def _execution_job_timeout(timeout_seconds: object) -> int:
@@ -111,6 +126,32 @@ def _require_enabled_and_authoritative_backend(user: object) -> object | None:
     return settings_row.backend_id
 
 
+def _require_concrete_staging_backend_id(backend_id: object) -> int:
+    """Require one immutable backend row for approval and worker dispatch."""
+
+    try:
+        concrete_backend_id = int(backend_id)
+    except (TypeError, ValueError) as exc:
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    "Staging token rotation requires an explicitly selected "
+                    "authoritative RPC backend."
+                )
+            }
+        ) from exc
+    if concrete_backend_id <= 0:
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    "Staging token rotation requires an explicitly selected "
+                    "authoritative RPC backend."
+                )
+            }
+        )
+    return concrete_backend_id
+
+
 def _verify_backend_capability(procedure: object) -> None:
     """Fail closed before enqueue on a backend capability mismatch (issue #167).
 
@@ -160,7 +201,14 @@ def create_execution(*, serializer: Any, user: object) -> object:
     gate_reason = code_gate_unavailable_reason(procedure.name)
     if gate_reason is not None:
         raise drf_serializers.ValidationError({"procedure_id": gate_reason})
-    if procedure.approval_required:
+    if procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        authoritative_backend_id = _require_concrete_staging_backend_id(
+            authoritative_backend_id
+        )
+        _require_staging_rotation_procedure_policy(procedure)
+        _require_staging_rotation_procedure_scope(procedure, user, "execute")
+        _require_staging_rotation_creation_shape(serializer)
+    elif procedure.approval_required:
         if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
             raise PermissionDenied(
                 "This procedure requires approval (approve_rpcprocedure permission)."
@@ -184,6 +232,11 @@ def create_execution(*, serializer: Any, user: object) -> object:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
     _require_akvorado_assigned_object(serializer.validated_data, procedure, user)
+    _require_staging_rotation_assigned_object(
+        serializer.validated_data,
+        procedure,
+        user,
+    )
     try:
         validate_akvorado_content_params(procedure.name, params)
     except RPCExecutionError as exc:
@@ -229,7 +282,39 @@ def create_execution(*, serializer: Any, user: object) -> object:
         # authoritative selected backend from RPC settings always wins over any
         # client-supplied ``backend_id``.
         execution = serializer.save(requested_by=user, backend=authoritative_backend_id)
-        RPCExecutionAggregate(execution).queue()
+        aggregate = RPCExecutionAggregate(execution)
+        if procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+            try:
+                normalized = normalize_execution_params(execution)
+            except RPCExecutionError as exc:
+                raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+            aggregate.request(requested_by_id=user.pk)
+            approval_request = _create_approval_request(execution, normalized)
+            aggregate.request_approval(
+                snapshot_hash=approval_request.payload_hash,
+                requested_by_id=user.pk,
+            )
+        else:
+            aggregate.queue()
+
+    if procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        return execution
+
+    _enqueue_execution_job(
+        execution,
+        user=user,
+        timeout_seconds_snapshot=timeout_seconds_snapshot,
+    )
+    return execution
+
+
+def _enqueue_execution_job(
+    execution: object,
+    *,
+    user: object,
+    timeout_seconds_snapshot: object,
+) -> None:
+    """Enqueue one already-queued execution and audit the resulting job id."""
 
     try:
         from ..jobs import RPCExecutionJob
@@ -251,7 +336,75 @@ def create_execution(*, serializer: Any, user: object) -> object:
         raise
 
     RPCExecutionAggregate(execution).enqueue(job.pk)
-    return execution
+
+
+def _hash_approval_value(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _approval_protected_payload(
+    execution: object,
+    normalized: dict[str, Any],
+    *,
+    backend_target: object | None = None,
+) -> dict[str, object]:
+    """Build the immutable, non-secret staging approval decision surface."""
+    procedure = execution.procedure
+    fingerprint = normalized.get("command_fingerprint")
+    target_snapshot = {
+        "target_type_id": execution.assigned_object_type_id,
+        "target_id": execution.assigned_object_id,
+        "target_model_label": execution.target_model_label,
+        "target_display": execution.target_display,
+    }
+    return {
+        "procedure_id": procedure.pk,
+        "procedure_version": str(procedure.version),
+        "procedure_policy_sha256": staging_contract.canonical_sha256(
+            _staging_rotation_procedure_policy(procedure)
+        ),
+        "params_schema_sha256": staging_contract.canonical_sha256(
+            procedure.params_schema
+        ),
+        "result_schema_sha256": staging_contract.canonical_sha256(
+            procedure.result_schema
+        ),
+        "effect": procedure.effect,
+        "target_type_id": execution.assigned_object_type_id,
+        "target_id": execution.assigned_object_id,
+        "target_snapshot_hash": _hash_approval_value(target_snapshot),
+        "normalized_params": normalized,
+        "command_fingerprint": (
+            dict(fingerprint) if isinstance(fingerprint, dict) else {}
+        ),
+        "backend_id": execution.backend_id,
+        "backend_target_sha256": _staging_backend_target_sha256(
+            execution.backend_id,
+            backend_target=backend_target,
+        ),
+        "credential_policy_ref": _credential_policy_reference(normalized, execution),
+        "requested_by_id": execution.requested_by_id,
+    }
+
+
+def _create_approval_request(
+    execution: object,
+    normalized: dict[str, Any],
+) -> object:
+    """Persist the staging request snapshot after ExecutionRequested is recorded."""
+    from ..models import RPCApprovalRequest
+
+    return RPCApprovalRequest.objects.create(
+        execution=execution,
+        stream_version=_current_stream_version(execution),
+        **_approval_protected_payload(execution, normalized),
+    )
 
 
 def _require_akvorado_assigned_object(
@@ -279,9 +432,7 @@ def _require_akvorado_assigned_object(
     try:
         model_class = content_type.model_class()
         assigned_object = (
-            model_class.objects.restrict(user, "view")
-            .filter(pk=object_id)
-            .first()
+            model_class.objects.restrict(user, "view").filter(pk=object_id).first()
         )
     except (AttributeError, TypeError, ValueError):
         assigned_object = None
@@ -289,6 +440,161 @@ def _require_akvorado_assigned_object(
         raise drf_serializers.ValidationError(
             {"assigned_object_id": "The assigned NetBox object does not exist."},
             code="does_not_exist",
+        )
+
+
+def _require_staging_rotation_assigned_object(
+    validated_data: dict[str, Any],
+    procedure: object,
+    user: object,
+) -> None:
+    """Pin token rotation to the existing, viewable nms-front-door device."""
+    if getattr(procedure, "name", "") != NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        return
+    content_type = validated_data.get("assigned_object_type")
+    object_id = validated_data.get("assigned_object_id")
+    if (
+        content_type is None
+        or object_id is None
+        or getattr(content_type, "app_label", "") != "dcim"
+        or getattr(content_type, "model", "") != "device"
+    ):
+        raise drf_serializers.ValidationError(
+            {"assigned_object_id": "The nms-front-door device is required."},
+            code="required",
+        )
+    try:
+        model_class = content_type.model_class()
+        assigned_object = (
+            model_class.objects.restrict(user, "view").filter(pk=object_id).first()
+        )
+    except (AttributeError, TypeError, ValueError):
+        assigned_object = None
+    if (
+        assigned_object is None
+        or getattr(assigned_object, "name", "") != "nms-front-door"
+    ):
+        raise drf_serializers.ValidationError(
+            {"assigned_object_id": "The nms-front-door device does not exist."},
+            code="does_not_exist",
+        )
+
+
+def _require_staging_rotation_procedure_policy(procedure: object) -> None:
+    """Fail closed if mutable catalog policy weakens staging rotation."""
+    actual_policy = _staging_rotation_procedure_policy(procedure)
+    if (
+        actual_policy != staging_contract.PROCEDURE_POLICY
+        or getattr(procedure, "params_schema", None)
+        != staging_contract.PARAMS_SCHEMA
+        or getattr(procedure, "result_schema", None)
+        != staging_contract.RESULT_SCHEMA
+    ):
+        raise drf_serializers.ValidationError(
+            {
+                "procedure_id": (
+                    "Staging token rotation catalog policy does not match the "
+                    "immutable reviewed contract."
+                )
+            }
+        )
+
+
+def _staging_rotation_procedure_policy(procedure: object) -> dict[str, object]:
+    command_contract = []
+    commands = getattr(procedure, "commands", None)
+    if commands is not None:
+        command_contract = [
+            {
+                "sequence": command.sequence,
+                "step_type": command.step_type,
+                "device_cli_mode": command.device_cli_mode,
+                "argv": command.argv,
+                "description": command.description,
+                "condition_param": command.condition_param,
+                "condition_negate": command.condition_negate,
+                "for_each_param": command.for_each_param,
+                "continue_on_error": command.continue_on_error,
+                "render_mode": command.render_mode,
+                "produces_var": command.produces_var,
+                "capture_kind": command.capture_kind,
+                "capture_expression": command.capture_expression,
+            }
+            for command in commands.all().order_by("sequence")
+        ]
+    return {
+        "name": getattr(procedure, "name", None),
+        "handler_id": getattr(procedure, "handler_id", None),
+        "version": getattr(procedure, "version", None),
+        "enabled": getattr(procedure, "enabled", None),
+        "target_models": getattr(procedure, "target_models", None),
+        "effect": getattr(procedure, "effect", None),
+        "timeout_seconds": getattr(procedure, "timeout_seconds", None),
+        "approval_required": getattr(procedure, "approval_required", None),
+        "transport_driver": getattr(procedure, "transport_driver", None),
+        "transport_driver_chain": getattr(
+            procedure, "transport_driver_chain", None
+        ),
+        "output_parser": getattr(procedure, "output_parser", None),
+        "output_schema": getattr(procedure, "output_schema", None),
+        "command_contract_sha256": staging_contract.canonical_sha256(
+            command_contract
+        ),
+    }
+
+
+def _staging_backend_target_sha256(
+    backend_id: object,
+    *,
+    backend_target: object | None = None,
+) -> str:
+    concrete_backend_id = _require_concrete_staging_backend_id(backend_id)
+    target = backend_target or resolve_backend(concrete_backend_id)
+    if target is None:
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    "Staging token rotation authoritative backend is unavailable."
+                )
+            }
+        )
+    return staging_contract.canonical_sha256(
+        {
+            "backend_id": concrete_backend_id,
+            "url": str(getattr(target, "url", "") or ""),
+            "verify_ssl": bool(getattr(target, "verify_ssl", False)),
+        }
+    )
+
+
+def _require_staging_rotation_creation_shape(serializer: object) -> None:
+    """Reject all caller metadata outside the exact secret-silent request."""
+    initial_data = getattr(serializer, "initial_data", {})
+    supplied_fields = set(initial_data.keys()) if hasattr(initial_data, "keys") else set()
+    unexpected = sorted(supplied_fields - _STAGING_ROTATION_CREATE_FIELDS)
+    if unexpected:
+        raise drf_serializers.ValidationError(
+            {
+                "non_field_errors": (
+                    "Staging token rotation accepts only procedure_id, assigned "
+                    "object, and empty params; request metadata is forbidden."
+                )
+            }
+        )
+
+
+def _require_staging_rotation_procedure_scope(
+    procedure: object,
+    user: object,
+    action: str,
+) -> None:
+    """Preserve concrete-procedure constraints for this destructive command."""
+    from ..models import RPCProcedure
+
+    if not RPCProcedure.objects.restrict(user, action).filter(pk=procedure.pk).exists():
+        raise PermissionDenied(
+            f"Object-scoped {action}_rpcprocedure permission is required for "
+            "staging token rotation."
         )
 
 
@@ -322,19 +628,36 @@ def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
         raise RPCExecutionAggregateError(
             "Only a queued execution can be claimed by a worker."
         )
-    procedure_enabled = (
-        RPCProcedure.objects.select_for_update()
-        .filter(pk=execution.procedure_id)
-        .values_list("enabled", flat=True)
-        .get()
-    )
-    if not procedure_enabled:
+    procedure = RPCProcedure.objects.select_for_update().get(pk=execution.procedure_id)
+    if not procedure.enabled:
         agg.fail(
             "The RPC procedure for this execution has been disabled; "
             "execution not dispatched.",
             "RPC_PROCEDURE_DISABLED",
         )
         return
+    if procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        try:
+            _require_staging_rotation_procedure_policy(procedure)
+        except drf_serializers.ValidationError:
+            agg.fail(
+                "Staging token rotation catalog policy changed after approval.",
+                "RPC_APPROVAL_INVALIDATED",
+            )
+            return
+        requested_by_id = getattr(execution, "requested_by_id", None)
+        approved_by_id = getattr(execution, "approved_by_id", None)
+        if (
+            requested_by_id is None
+            or approved_by_id is None
+            or str(requested_by_id) == str(approved_by_id)
+        ):
+            agg.fail(
+                "Staging token rotation requires a destructive, approval-required "
+                "procedure and distinct requester/approver identities.",
+                "RPC_APPROVAL_REQUIRED",
+            )
+            return
     agg.start()
 
 
@@ -363,9 +686,32 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         return
     aggregate = RPCExecutionAggregate(execution)
 
-    target = resolve_backend(
-        backend_pk if backend_pk is not None else execution.backend_id
-    )
+    if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        try:
+            bound_backend_id = _require_concrete_staging_backend_id(
+                execution.backend_id
+            )
+            if (
+                backend_pk is not None
+                and int(backend_pk) != bound_backend_id
+            ):
+                raise ValueError("worker backend does not match approval binding")
+        except (TypeError, ValueError, drf_serializers.ValidationError) as exc:
+            aggregate.fail(
+                "Staging token rotation backend binding is invalid.",
+                "RPC_BACKEND_BINDING_INVALID",
+            )
+            raise RPCExecutionError(
+                "Staging token rotation backend binding is invalid.",
+                code="RPC_BACKEND_BINDING_INVALID",
+            ) from exc
+        backend_selector: object = bound_backend_id
+    else:
+        backend_selector = (
+            backend_pk if backend_pk is not None else execution.backend_id
+        )
+
+    target = resolve_backend(backend_selector)
     if target is None:
         aggregate.fail(
             "No NMSBackend configured for RPC execution.",
@@ -380,6 +726,12 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         from .. import jobs
 
         normalized = normalize_execution_params(execution)
+        if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+            _require_current_staging_approval(
+                execution,
+                normalized,
+                backend_target=target,
+            )
         aggregate.normalize(
             normalized,
             jobs._hash_json(normalized.get("command_fingerprint")),
@@ -389,6 +741,14 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         # execution + current stream version. Graceful: ``None`` when no signing
         # key is configured, so dispatch stays ID-only (byte-for-byte as before).
         lease = _issue_dispatch_lease(execution, aggregate, normalized)
+        if (
+            execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
+            and lease is None
+        ):
+            raise RPCExecutionError(
+                "Staging token rotation requires a signed one-time dispatch lease.",
+                code="RPC_DISPATCH_LEASE_REQUIRED",
+            )
 
         response = jobs._call_backend(target, execution, lease=lease)
         aggregate.record_backend_response(response)
@@ -399,6 +759,46 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         except RPCExecutionAggregateError:
             pass
         raise
+
+
+def _require_current_staging_approval(
+    execution: object,
+    normalized: dict[str, Any],
+    *,
+    backend_target: object,
+) -> None:
+    """Revalidate the approved snapshot immediately before lease issuance."""
+    try:
+        _require_staging_rotation_procedure_policy(execution.procedure)
+    except drf_serializers.ValidationError as exc:
+        raise RPCExecutionError(
+            "Staging token rotation procedure policy changed after approval.",
+            code="RPC_APPROVAL_INVALIDATED",
+        ) from exc
+
+    requested_by_id = getattr(execution, "requested_by_id", None)
+    approved_by_id = getattr(execution, "approved_by_id", None)
+    if (
+        requested_by_id is None
+        or approved_by_id is None
+        or str(requested_by_id) == str(approved_by_id)
+    ):
+        raise RPCExecutionError(
+            "Staging token rotation requires distinct requester and approver identities.",
+            code="RPC_APPROVAL_REQUIRED",
+        )
+
+    snapshot = getattr(execution, "approval_request", None)
+    current = _approval_protected_payload(
+        execution,
+        normalized,
+        backend_target=backend_target,
+    )
+    if snapshot is None or not snapshot.matches_current(current):
+        raise RPCExecutionError(
+            "Staging token rotation approval no longer matches the execution.",
+            code="RPC_APPROVAL_INVALIDATED",
+        )
 
 
 def _current_stream_version(execution: object) -> int:
@@ -503,6 +903,13 @@ def approve_execution(execution: object, user: object, *, reason: str = "") -> o
     (``select_for_update`` + status recheck).
     """
     _require_approval_authorization(execution, user)
+    if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        if reason:
+            raise drf_serializers.ValidationError(
+                {"reason": "Staging token rotation does not accept operator notes."}
+            )
+        _require_staging_rotation_procedure_scope(execution.procedure, user, "approve")
+        return _approve_staging_rotation(execution, user)
     try:
         RPCExecutionAggregate(execution).approve(approver_id=user.pk, reason=reason)
     except RPCExecutionAggregateError as exc:
@@ -511,9 +918,62 @@ def approve_execution(execution: object, user: object, *, reason: str = "") -> o
     return execution
 
 
+def _approve_staging_rotation(
+    execution: object,
+    user: object,
+) -> object:
+    """Approve, queue, and enqueue staging rotation after snapshot validation."""
+    from ..models import RPCExecution
+
+    try:
+        with transaction.atomic():
+            locked = (
+                RPCExecution.objects.select_for_update()
+                .select_related(
+                    "procedure",
+                    "assigned_object_type",
+                    "requested_by",
+                    "approved_by",
+                )
+                .get(pk=execution.pk)
+            )
+            _require_staging_rotation_procedure_policy(locked.procedure)
+            normalized = normalize_execution_params(locked)
+            current_protected = _approval_protected_payload(locked, normalized)
+            RPCExecutionAggregate(locked).approve(
+                approver_id=user.pk,
+                current_protected=current_protected,
+                reason=_STAGING_ROTATION_APPROVAL_REASON,
+                queue_after_approval=True,
+            )
+    except RPCExecutionError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+    except RPCExecutionAggregateError as exc:
+        raise drf_serializers.ValidationError({"status": str(exc)}) from exc
+
+    timeout_seconds_snapshot = (locked.params or {}).get(
+        RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY,
+        locked.procedure.timeout_seconds,
+    )
+    _enqueue_execution_job(
+        locked,
+        user=user,
+        timeout_seconds_snapshot=timeout_seconds_snapshot,
+    )
+    locked.refresh_from_db()
+    return locked
+
+
 def reject_execution(execution: object, user: object, *, reason: str = "") -> object:
     """Terminal rejection command (POST) by a distinct second actor."""
     _require_approval_authorization(execution, user)
+    if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        if reason:
+            raise drf_serializers.ValidationError(
+                {"reason": "Staging token rotation does not accept operator notes."}
+            )
+        _require_staging_rotation_procedure_scope(execution.procedure, user, "approve")
+        reason = _STAGING_ROTATION_REJECTION_REASON
     try:
         RPCExecutionAggregate(execution).reject(rejecter_id=user.pk, reason=reason)
     except RPCExecutionAggregateError as exc:
@@ -537,10 +997,11 @@ def execute_intent(
     here duplicates, weakens, or short-circuits any of that path's gates: each
     child independently re-runs the ``execute_rpcprocedure`` permission check,
     the #166 authoritative opt-in + selected-backend enforcement,
-    ``procedure.enabled``, the ``approval_required`` gate (raises
-    ``PermissionDenied`` for a caller lacking ``approve_rpcprocedure`` —
-    *exactly* as a direct create would), ``params_schema`` validation, and the
-    #167 backend capability check.
+    ``procedure.enabled``, the procedure's approval policy, ``params_schema``
+    validation, and the #167 backend capability check. Most legacy
+    ``approval_required`` procedures retain the requester permission gate;
+    staging token rotation instead creates a pending request that only a
+    distinct approver may queue — exactly as a direct create would.
 
     This function never bypasses approval/destructive gating: it does not
     catch or suppress any exception raised by ``create_execution()``. The
@@ -604,9 +1065,7 @@ def execute_intent(
     # re-encoded to that string form before being fed back into a fresh
     # serializer's `data=` -- passing the instance through directly would break
     # `.split('.')` inside to_internal_value().
-    target_type_label = (
-        f"{assigned_object_type.app_label}.{assigned_object_type.model}"
-    )
+    target_type_label = f"{assigned_object_type.app_label}.{assigned_object_type.model}"
 
     base_params = dict(params or {})
     children: list[object] = []

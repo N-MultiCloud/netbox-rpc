@@ -109,6 +109,41 @@ The procedure catalog is intentionally narrow:
 - `services.passbolt.transfer_secrets`
 - `services.passbolt.import_secrets`
 - `services.passbolt.cleanup`
+- `service.netbox.staging.rotate_backend_token` — destructive,
+  approval-required rotation of the staging backend's NetBox service token.
+  It targets only the existing `nms-front-door` `dcim.device` and accepts no
+  caller parameters. The backend resolves that device's enabled SSH service,
+  credential reference, port, and strict pinned known-host policy, then invokes
+  the fixed root-owned provisioner. Callers cannot supply routing, a token,
+  path, command, or arbitrary payload. Results are closed to
+  `ok`, the constant `procedure` ID, constant `target="nms-front-door"`,
+  nullable `rotated`, and the `execute`/`complete`/`indeterminate` stage. The
+  exact tuples distinguish success, pre-commit failure, committed-but-failed
+  recovery, and post-dispatch transport/timeout uncertainty
+  (`false/null/indeterminate`), so automation cannot mistake uncertainty for a
+  safe-to-retry `rotated=false`. A schema-valid closed failure or indeterminate
+  tuple remains in the failed execution's `result`; malformed nested results
+  fail as `RPC_RESULT_SCHEMA_MISMATCH` and are not persisted. The outer and
+  nested `ok` values must be strict booleans and agree, and this procedure
+  accepts no backend progress events. Token material
+  and upstream command output cannot enter the audit record. Creation accepts
+  only `procedure_id`, the exact assigned object, and empty `params`; backend,
+  request/trace IDs, comments, tags, custom fields, and every other metadata
+  field are rejected even when empty. Approval/rejection bodies accept no
+  operator note and audit a fixed bounded reason. Creation returns `pending_approval`
+  without enqueueing; execute and approve permissions must each be scoped to
+  this exact procedure. A distinct approver records immutable requester/approver
+  identities, queues the run, and those identities are bound into its one-time
+  signed dispatch lease. This procedure has no ID-only compatibility fallback:
+  absent signing keys fail with `RPC_DISPATCH_LEASE_REQUIRED` before any
+  backend request. Admission, approval, worker claim, and pre-lease checks pin
+  the exact enabled name/handler/version/target/effect/1800-second timeout,
+  approval bit, transport driver/chain, output parser/schema, representative
+  command contract, and params/result schemas. The concrete backend ID plus a
+  non-secret URL/TLS identity fingerprint and canonical policy/schema hashes
+  are part of the immutable approval snapshot. Migration reversal deletes the seed
+  when it has no executions; if execution history protects it, reversal keeps
+  the row and command history but forces `enabled=False`.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -345,10 +380,14 @@ per-execution sequence cannot be allocated, the command state transition raises
 instead of silently dropping audit history. The execution-event API is read-only,
 model saves reject normal update/delete, and the migration installs PostgreSQL
 triggers so the event ledger remains append-only below the ORM.
-Before a truthy backend response can append `ExecutionSucceeded`, the raw inner
-`result` is validated against the procedure's `result_schema`. A mismatch emits
-`ExecutionFailed` with `RPC_RESULT_SCHEMA_MISMATCH` and a bounded, value-free
-diagnostic instead of projecting malformed output as success.
+Every present backend `result` is validated against the procedure's
+`result_schema`, including false outer envelopes. A truthy envelope can append
+`ExecutionSucceeded` only after validation. A false envelope remains failed but
+projects its valid closed nested tuple so committed/indeterminate outcomes are
+not discarded. A mismatch emits `ExecutionFailed` with
+`RPC_RESULT_SCHEMA_MISMATCH`, no malformed result, and a bounded, value-free
+diagnostic. Event messages are independently redacted and hard-capped at 4096
+characters.
 
 `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
 (with its `RPCIntentProcedure` through model) are deliberate
@@ -929,8 +968,11 @@ clients must not submit arbitrary SSH command text.
 guards before an execution record is created and the RQ job is enqueued:
 
 1. **Enabled** — disabled procedures are rejected (HTTP 400).
-2. **Approval** — procedures with `approval_required=True` require the caller
-   to hold `netbox_rpc.approve_rpcprocedure`.
+2. **Approval** — legacy procedures with `approval_required=True` require the
+   caller to hold `netbox_rpc.approve_rpcprocedure`. Staging backend-token
+   rotation instead records `requested → pending_approval` without enqueueing;
+   only a distinct actor with that permission may record
+   `approved → queued` and enqueue it.
 3. **Params schema** — when a procedure defines `params_schema`, submitted
    `params` are validated against the JSON Schema before proceeding.
 
@@ -938,10 +980,15 @@ These guards run at the API layer, not the model layer, because the serializer
 receives the procedure as a foreign-key ID and the schema/enabled/approval
 checks require the resolved object.
 
-The command emits `ExecutionQueued` before enqueueing. If RQ/Redis enqueue
-fails, it emits `ExecutionEnqueueFailed` and projects
+Ordinary commands emit `ExecutionQueued` before enqueueing. Staging token
+rotation emits `ExecutionRequested` and `ApprovalRequested` at creation, then
+`ExecutionApproved` and `ExecutionQueued` only after a distinct decision. If
+RQ/Redis enqueue fails, either flow emits `ExecutionEnqueueFailed` and projects
 `error_code="RPC_ENQUEUE_FAILED"` instead of leaving a permanent queued record
 with no job. Successful enqueue emits `JobEnqueued` and projects `job_id`.
+Backend-supplied audit events for ordinary procedures are capped at 50 and
+stored under the `Backend::` namespace, preventing a remote event name from
+colliding with an internal domain transition during replay.
 
 RPC execution jobs are queued without using NetBox's attached-object job fields.
 NetBox 4.6 validates attached job object types against the `jobs` feature, and

@@ -55,6 +55,7 @@ from ..constants import (
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
@@ -718,6 +719,12 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name in PASSBOLT_PROCEDURE_NAMES:
         return _normalize_passbolt_migration_execution(execution, target)
 
+    if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        return _normalize_staging_backend_token_rotation_execution(
+            execution,
+            target,
+        )
+
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
 
@@ -1260,7 +1267,10 @@ def _normalize_influxdb_1_execution(
                 normalized[key] = value
                 normalized["command_fingerprint"][key] = value
             _copy_influxdb_retention(params, normalized)
-        elif any(params.get(key) not in (None, "") for key in ("username", "organization", "database", "retention_seconds")):
+        elif any(
+            params.get(key) not in (None, "")
+            for key in ("username", "organization", "database", "retention_seconds")
+        ):
             raise RPCExecutionError(
                 "Core 3 bootstrap accepts only family, secret_name_prefix, and optional tenant_id.",
                 code="RPC_PARAM_INVALID",
@@ -1320,7 +1330,10 @@ def _normalize_influxdb_1_execution(
                     code="RPC_PARAM_INVALID",
                 )
         else:
-            if any(params.get(key) not in (None, "") for key in ("organization", "database")):
+            if any(
+                params.get(key) not in (None, "")
+                for key in ("organization", "database")
+            ):
                 raise RPCExecutionError(
                     "Core 3 named admin tokens are server-wide and do not accept organization/database.",
                     code="RPC_PARAM_INVALID",
@@ -1503,7 +1516,9 @@ def _normalize_influxdb_named_value(
     return value
 
 
-def _copy_influxdb_admin_ref(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_admin_ref(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     secret_ref = str(params.get("admin_secret_ref") or "").strip()
     if not _INFLUXDB_SECRET_REF_RE.fullmatch(secret_ref):
         raise RPCExecutionError(
@@ -1514,14 +1529,18 @@ def _copy_influxdb_admin_ref(params: dict[str, Any], normalized: dict[str, Any])
     normalized["command_fingerprint"]["admin_secret_ref"] = secret_ref
 
 
-def _copy_influxdb_tenant_id(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_tenant_id(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     tenant_id = _optional_int_range(params, "tenant_id", 1, None)
     if tenant_id is not None:
         normalized["tenant_id"] = tenant_id
         normalized["command_fingerprint"]["tenant_id"] = tenant_id
 
 
-def _copy_influxdb_retention(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_retention(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     retention = _optional_int_range(params, "retention_seconds", 3600, 315360000)
     if retention is not None:
         normalized["retention_seconds"] = retention
@@ -2049,8 +2068,7 @@ def _normalize_samba_username(raw_username: object) -> str:
     username = str(raw_username or "").strip()
     if not username or not _SAMBA_IDENTIFIER_RE.fullmatch(username):
         raise RPCExecutionError(
-            "username must be a safe Samba/AD identifier without shell "
-            "metacharacters.",
+            "username must be a safe Samba/AD identifier without shell metacharacters.",
             code="RPC_PARAM_INVALID",
         )
     return username
@@ -2114,8 +2132,7 @@ def _extract_samba_password_fingerprint(params: dict[str, Any]) -> dict[str, Any
     password_bytes = params.get("password_bytes")
     if not isinstance(password_bytes, int) or isinstance(password_bytes, bool):
         raise RPCExecutionError(
-            "password_bytes must be an integer byte count computed by the "
-            "server.",
+            "password_bytes must be an integer byte count computed by the server.",
             code="RPC_PARAM_INVALID",
         )
     if password_bytes < 1 or password_bytes > 4096:
@@ -3061,9 +3078,7 @@ def _normalize_ubuntu_upgrade_26_execution(
         normalized["dry_run"] = dry_run
         normalized["reboot_after_upgrade"] = reboot_after_upgrade
         normalized["command_fingerprint"]["dry_run"] = dry_run
-        normalized["command_fingerprint"]["reboot_after_upgrade"] = (
-            reboot_after_upgrade
-        )
+        normalized["command_fingerprint"]["reboot_after_upgrade"] = reboot_after_upgrade
 
     if procedure_name == UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE:
         if "expected_version_id" in params:
@@ -3923,6 +3938,90 @@ def _copy_optional_credential_override(
     if credential_pk is not None:
         normalized["rpc_ssh_credential_pk"] = credential_pk
         normalized["command_fingerprint"]["rpc_ssh_credential_pk"] = credential_pk
+
+
+_STAGING_BACKEND_TOKEN_ROTATION_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+
+def _normalize_staging_backend_token_rotation_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize only SSH routing metadata for secret-silent token rotation."""
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the nms-front-door device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    if not isinstance(target, str):
+        raise RPCExecutionError(
+            "The staging backend token rotation target must be a string.",
+            code="RPC_TARGET_INVALID",
+        )
+    target = target.strip()
+    if target != "nms-front-door" or any(
+        ord(character) < 32 or ord(character) == 127 for character in target
+    ):
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the nms-front-door target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+        or getattr(assigned_object, "name", None) != target
+    ):
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the existing nms-front-door device.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "Staging backend token rotation params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params) - _STAGING_BACKEND_TOKEN_ROTATION_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            "Staging backend token rotation accepts no caller parameters; "
+            f"unexpected field(s): {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "target": target,
+            "assigned_object_id": assigned_object_id,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+    return normalized
 
 
 def _copy_optional_ssh_overrides(

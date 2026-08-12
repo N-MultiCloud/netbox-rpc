@@ -11,6 +11,7 @@ import jsonschema
 from django.db import IntegrityError
 from django.utils import timezone
 
+from .constants import NETBOX_STAGING_ROTATE_BACKEND_TOKEN
 from .domain import events as domain_events
 from .domain.projection import ProjectionState, apply, rebuild
 from .models import RPCExecution, RPCExecutionEvent
@@ -53,6 +54,8 @@ SAFE_REFERENCE_KEYS = {
 MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
+MAX_BACKEND_EVENTS = 50
+_BACKEND_EVENT_PREFIX = "Backend::"
 # Keep in sync with the Akvorado and InfluxDB normalization-layer content limits.
 _LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "content")
 _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
@@ -161,6 +164,15 @@ def redact_event_data(
     return redacted if isinstance(redacted, dict) else {}
 
 
+def _bounded_event_message(message: object) -> str:
+    """Redact and hard-cap an event message independently of event data."""
+    redacted = _SECRET_CONTENT_RE.sub("[REDACTED]", str(message or ""))
+    if len(redacted) <= MAX_EVENT_STRING_LENGTH:
+        return redacted
+    content_limit = max(MAX_EVENT_STRING_LENGTH - len(_TRUNCATION_MARKER), 0)
+    return f"{redacted[:content_limit]}{_TRUNCATION_MARKER}"
+
+
 def _next_event_sequence(execution: RPCExecution) -> int:
     latest = (
         execution.events.order_by("-sequence")
@@ -182,7 +194,7 @@ def append_execution_event(
     """Append one durable execution event with per-execution sequence ordering."""
     sequence = _next_event_sequence(execution)
     event_data = redact_event_data(data, string_limits=string_limits)
-    redacted_message = _SECRET_CONTENT_RE.sub("[REDACTED]", message)
+    redacted_message = _bounded_event_message(message)
     payload_hash = _stable_hash(
         {
             "level": level,
@@ -216,7 +228,10 @@ def _append_and_project(
     event: domain_events.DomainEvent,
 ) -> RPCExecutionEvent:
     string_limits = None
-    if isinstance(event, domain_events.ExecutionSucceeded):
+    if isinstance(
+        event,
+        (domain_events.ExecutionSucceeded, domain_events.ExecutionFailed),
+    ):
         string_limits = {
             ("result", *path): limit
             for path, limit in _result_schema_string_limits(execution).items()
@@ -470,6 +485,10 @@ def record_execution_expired(
 
 
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
+    procedure_name = str(
+        getattr(getattr(execution, "procedure", None), "name", "") or ""
+    )
+    is_staging_rotation = procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
     string_limits = _result_schema_string_limits(execution)
@@ -499,12 +518,19 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     # schema bound by _result_schema_string_limits() reserving room for the
     # truncation marker, so what is validated and what is persisted can never
     # disagree about whether a wide field is oversized.
-    schema_mismatch = (
-        _backend_result_schema_mismatch(execution, raw_result, string_limits=string_limits)
-        if ok
-        else ""
-    )
-    if ok and not schema_mismatch:
+    has_nested_result = isinstance(raw_result, dict)
+    result_is_present = "result" in response
+    should_validate_result = ok or result_is_present or is_staging_rotation
+    schema_mismatch = ""
+    if is_staging_rotation:
+        schema_mismatch = _staging_backend_response_mismatch(response, raw_result)
+    if should_validate_result and not schema_mismatch:
+        schema_mismatch = _backend_result_schema_mismatch(
+            execution,
+            raw_result,
+            string_limits=string_limits,
+        )
+    if should_validate_result and not schema_mismatch:
         # #215 round 3 follow-up (adversarial review): the raw value passing
         # the relaxed schema does not guarantee the *persisted* value does.
         # redact_event_value() truncates any string longer than its limit by
@@ -526,18 +552,40 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         schema_mismatch = _backend_result_schema_mismatch(execution, result)
     finished_at = timezone.now()
     with transaction.atomic():
-        for item in response.get("events") or []:
-            _append_and_project(
-                execution,
-                domain_events.BackendEventRecorded(
-                    event_level=str(item.get("level") or "info"),
-                    backend_event=str(item.get("event") or "BackendEventRecorded"),
-                    event_message=str(item.get("message") or ""),
-                    backend_data=item.get("data")
-                    if isinstance(item.get("data"), dict)
-                    else {},
-                ),
+        # The privileged staging rotation contract permits no backend events.
+        # Its entire durable result surface is the closed five-field tuple;
+        # accepting arbitrary progress events would create an unnecessary
+        # secret-leak and database-amplification channel before the response
+        # itself is accepted. Other procedures retain their existing event
+        # behavior.
+        if not is_staging_rotation:
+            raw_backend_events = response.get("events") or []
+            backend_events = (
+                raw_backend_events[:MAX_BACKEND_EVENTS]
+                if isinstance(raw_backend_events, list)
+                else []
             )
+            for item in backend_events:
+                if not isinstance(item, dict):
+                    continue
+                raw_backend_name = str(
+                    item.get("event") or "BackendEventRecorded"
+                )
+                backend_name = (
+                    _BACKEND_EVENT_PREFIX
+                    + raw_backend_name[: 100 - len(_BACKEND_EVENT_PREFIX)]
+                )
+                _append_and_project(
+                    execution,
+                    domain_events.BackendEventRecorded(
+                        event_level=str(item.get("level") or "info"),
+                        backend_event=backend_name,
+                        event_message=str(item.get("message") or ""),
+                        backend_data=item.get("data")
+                        if isinstance(item.get("data"), dict)
+                        else {},
+                    ),
+                )
         if ok and not schema_mismatch:
             _append_and_project(
                 execution,
@@ -556,8 +604,30 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                     error_message=error_message or "RPC execution failed.",
                     code=error_code or "RPC_EXECUTION_FAILED",
                     finished_at=finished_at,
+                    result=(result if has_nested_result and not schema_mismatch else {}),
                 ),
             )
+
+
+def _staging_backend_response_mismatch(
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    """Validate the closed staging envelope before persisting any content."""
+
+    if type(response.get("ok")) is not bool:
+        return "Backend result schema mismatch at response.ok: boolean required."
+    if "result" not in response:
+        return "Backend result schema mismatch at result: required validation failed."
+    if not isinstance(raw_result, dict):
+        return "Backend result schema mismatch at result: object validation failed."
+    nested_ok = raw_result.get("ok")
+    if type(nested_ok) is not bool or nested_ok is not response["ok"]:
+        return "Backend result schema mismatch at result.ok: envelope state mismatch."
+    backend_events = response.get("events")
+    if backend_events not in (None, []):
+        return "Backend result schema mismatch at events: staging events are forbidden."
+    return ""
 
 
 def _result_schema_string_limits(

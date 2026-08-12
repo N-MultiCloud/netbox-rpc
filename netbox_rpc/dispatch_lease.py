@@ -24,10 +24,12 @@ Trust boundary / non-goals:
   transition: a cancelled / terminal / expired / unclaimed stream never reaches
   issuance.
 * **Prod-safe graceful degradation:** when no signing key is configured (the
-  current production state), ``issue_dispatch_lease`` returns ``None`` and the
-  worker dispatches ID-only exactly as before. Leases become active only once an
-  operator configures a key *and* the paired backend advertises verification —
-  mirroring the capability-handshake (#167) rollout posture.
+  current production state), ``issue_dispatch_lease`` returns ``None`` and
+  ordinary procedures dispatch ID-only exactly as before. Staging backend-token
+  rotation is the explicit fail-closed exception in the application handler and
+  does not contact the backend without a signed lease. Leases become active once
+  an operator configures a key *and* the paired backend advertises verification
+  — mirroring the capability-handshake (#167) rollout posture.
 
 Key rotation: keys are identified by ``(key_id, key_version)``. Several keys may
 be configured for overlap during rotation, but exactly one is ``active`` and
@@ -42,7 +44,10 @@ import base64
 import binascii
 import hashlib
 import json
+import os
+import re
 import secrets
+import stat
 from enum import StrEnum
 from typing import Any
 
@@ -68,6 +73,14 @@ _PLUGIN_NAME = "netbox_rpc"
 _SIGNING_KEYS_SETTING = "dispatch_lease_signing_keys"
 _AUDIENCE_SETTING = "dispatch_lease_audience"
 _TTL_SETTING = "dispatch_lease_ttl_seconds"
+_SIGNING_KEY_FILE_ENV = "NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_FILE"
+_SIGNING_KEY_ID_ENV = "NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_ID"
+_SIGNING_KEY_VERSION_ENV = "NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_VERSION"
+_MAX_SIGNING_KEY_FILE_BYTES = 16 * 1024
+_MAX_SIGNING_KEY_PATH_BYTES = 4096
+_MAX_ENV_KEY_VERSION = 2_147_483_647
+_ENV_KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,254}\Z")
+_SETTING_ABSENT = object()
 
 # Bounds — every field is length-capped so a hostile/oversized value can neither
 # bloat the ledger nor the signed body.
@@ -160,6 +173,9 @@ class _SigningKey:
     def sign(self, message: bytes) -> str:
         return base64.b64encode(self._private_key.sign(message)).decode("ascii")
 
+    def public_key(self) -> Any:
+        return self._private_key.public_key()
+
 
 def _load_ed25519_private_key(pem: str) -> Any | None:
     try:
@@ -203,16 +219,211 @@ def _plugin_setting(name: str, default: Any = None) -> Any:
         return default
 
 
+def _metadata_is_trusted_directory(metadata: os.stat_result) -> bool:
+    """Accept only root/current-euid owned, non-writable path components."""
+    if not stat.S_ISDIR(metadata.st_mode):
+        return False
+    if metadata.st_uid not in {0, os.geteuid()}:
+        return False
+    writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+    root_sticky = metadata.st_uid == 0 and bool(metadata.st_mode & stat.S_ISVTX)
+    return not writable_by_others or root_sticky
+
+
+def _metadata_is_trusted_key_file(metadata: os.stat_result) -> bool:
+    """Validate a small root/current-euid owned, non-shareable regular file."""
+    mode = stat.S_IMODE(metadata.st_mode)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid in {0, os.geteuid()}
+        and metadata.st_nlink == 1
+        and bool(mode & 0o440)
+        and not bool(mode & ~0o640)
+        and 0 < metadata.st_size <= _MAX_SIGNING_KEY_FILE_BYTES
+    )
+
+
+def _secure_read_signing_key_file(path: str) -> str | None:
+    """Read one PEM without symlink/special-file/race or unbounded-read hazards."""
+    required_flags = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    required_functions = (
+        "close",
+        "fstat",
+        "fsencode",
+        "geteuid",
+        "open",
+        "read",
+        "stat",
+    )
+    if any(not hasattr(os, flag) for flag in required_flags) or any(
+        not callable(getattr(os, name, None)) for name in required_functions
+    ):
+        return None
+    supports_dir_fd = getattr(os, "supports_dir_fd", ())
+    supports_follow_symlinks = getattr(os, "supports_follow_symlinks", ())
+    if (
+        os.open not in supports_dir_fd
+        or os.stat not in supports_dir_fd
+        or os.stat not in supports_follow_symlinks
+    ):
+        return None
+    if not isinstance(path, str) or not path.startswith("/"):
+        return None
+    try:
+        encoded_path = os.fsencode(path)
+    except (UnicodeError, ValueError, TypeError):
+        return None
+    if len(encoded_path) > _MAX_SIGNING_KEY_PATH_BYTES or any(
+        ord(character) < 32 or ord(character) == 127 for character in path
+    ):
+        return None
+    components = path.split("/")[1:]
+    if not components or any(component in {"", ".", ".."} for component in components):
+        return None
+
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    directory_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        directory_fd = os.open("/", directory_flags)
+        if not _metadata_is_trusted_directory(os.fstat(directory_fd)):
+            return None
+        for component in components[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            try:
+                next_metadata = os.fstat(next_fd)
+            except Exception:
+                os.close(next_fd)
+                raise
+            if not _metadata_is_trusted_directory(next_metadata):
+                os.close(next_fd)
+                return None
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        filename = components[-1]
+        before = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        if not _metadata_is_trusted_key_file(before):
+            return None
+        file_fd = os.open(filename, file_flags, dir_fd=directory_fd)
+        opened = os.fstat(file_fd)
+        if not _metadata_is_trusted_key_file(opened) or (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            opened.st_mode,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_uid,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ):
+            return None
+
+        chunks: list[bytes] = []
+        remaining = _MAX_SIGNING_KEY_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(file_fd, min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        material = b"".join(chunks)
+        after = os.fstat(file_fd)
+        if (
+            len(material) > _MAX_SIGNING_KEY_FILE_BYTES
+            or len(material) != opened.st_size
+            or not _metadata_is_trusted_key_file(after)
+            or (
+                after.st_dev,
+                after.st_ino,
+                after.st_uid,
+                after.st_mode,
+                after.st_nlink,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_uid,
+                opened.st_mode,
+                opened.st_nlink,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            )
+        ):
+            return None
+        return material.decode("utf-8")
+    except (OSError, UnicodeError, ValueError, TypeError, NotImplementedError):
+        return None
+    finally:
+        if file_fd is not None:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
+def _load_environment_signing_key() -> _SigningKey | None:
+    """Load the opt-in file fallback; partial/malformed environment fails closed."""
+    path = os.environ.get(_SIGNING_KEY_FILE_ENV)
+    key_id = os.environ.get(_SIGNING_KEY_ID_ENV)
+    raw_version = os.environ.get(_SIGNING_KEY_VERSION_ENV)
+    if not path and not key_id and not raw_version:
+        return None
+    if (
+        not path
+        or not key_id
+        or not raw_version
+        or not _ENV_KEY_ID_RE.fullmatch(key_id)
+    ):
+        return None
+    try:
+        key_version = int(raw_version)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= key_version <= _MAX_ENV_KEY_VERSION:
+        return None
+    pem = _secure_read_signing_key_file(path)
+    if pem is None:
+        return None
+    private_key = _load_ed25519_private_key(pem)
+    if private_key is None:
+        return None
+    return _SigningKey(key_id, key_version, private_key)
+
+
 def load_active_signing_key() -> _SigningKey | None:
     """Return the single active signing key, or ``None`` (graceful ID-only).
 
     Config shape (``PLUGINS_CONFIG['netbox_rpc']['dispatch_lease_signing_keys']``)
     is a list of ``{key_id, key_version, private_key_pem, active}`` dicts. Exactly
     one entry should be ``active``; the first active, well-formed ed25519 key
-    wins. Any malformed entry is skipped rather than raising — a broken key
-    configuration degrades to ID-only dispatch, never a traceback in the worker.
+    wins. When that setting is absent (not merely empty or malformed), the
+    three ``NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_*`` environment variables may
+    select a strictly validated private-key file and bounded lineage. Any
+    malformed source degrades to no lease, never a traceback in the worker.
     """
-    entries = _plugin_setting(_SIGNING_KEYS_SETTING)
+    entries = _plugin_setting(_SIGNING_KEYS_SETTING, _SETTING_ABSENT)
+    if entries is _SETTING_ABSENT:
+        return _load_environment_signing_key()
     if not isinstance(entries, (list, tuple)):
         return None
     for entry in entries:
@@ -240,8 +451,15 @@ def load_verifier_public_keys() -> dict[tuple[str, int], Any]:
     verification. Public material may be a ``public_key_pem`` / ``public_key_b64``
     field or derived from a configured ``private_key_pem``. Unknown lineage is
     simply absent from the map, so the verifier rejects it (never a wildcard)."""
-    entries = _plugin_setting(_SIGNING_KEYS_SETTING)
+    entries = _plugin_setting(_SIGNING_KEYS_SETTING, _SETTING_ABSENT)
     out: dict[tuple[str, int], Any] = {}
+    if entries is _SETTING_ABSENT:
+        signing_key = _load_environment_signing_key()
+        if signing_key is not None:
+            out[(signing_key.key_id, signing_key.key_version)] = (
+                signing_key.public_key()
+            )
+        return out
     if not isinstance(entries, (list, tuple)):
         return out
     for entry in entries:
