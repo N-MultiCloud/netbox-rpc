@@ -928,7 +928,7 @@ def _approve_staging_rotation(
     try:
         with transaction.atomic():
             locked = (
-                RPCExecution.objects.select_for_update()
+                RPCExecution.objects.select_for_update(of=("self", "procedure"))
                 .select_related(
                     "procedure",
                     "assigned_object_type",
