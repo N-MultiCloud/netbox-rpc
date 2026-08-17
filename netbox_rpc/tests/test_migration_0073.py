@@ -1,4 +1,4 @@
-"""Historical-app irreversibility coverage for migration 0071."""
+"""Historical-app irreversibility coverage for migration 0073."""
 
 from __future__ import annotations
 
@@ -12,8 +12,11 @@ from django.test import TransactionTestCase
 
 
 class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
-    migration = ("netbox_rpc", "0071_seed_gitea_production_upgrade_1271")
-    previous_migration = ("netbox_rpc", "0070_rpcapprovalrequest_policy_hashes")
+    migration = ("netbox_rpc", "0073_seed_gitea_production_upgrade_1271")
+    previous_migration = (
+        "netbox_rpc",
+        "0072_seed_influxdb3_debian13_install_procedures",
+    )
     procedure_name = "service.gitea.production.upgrade_1_27_1"
 
     @classmethod
@@ -32,7 +35,7 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
     @staticmethod
     def _migration_module():
         return importlib.import_module(
-            "netbox_rpc.migrations.0071_seed_gitea_production_upgrade_1271"
+            "netbox_rpc.migrations.0073_seed_gitea_production_upgrade_1271"
         )
 
     def _historical_apps(self):
@@ -226,8 +229,8 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
             model="rpcprocedurecommand",
         )
         tag = Tag.objects.create(
-            name="Gitea 0071 irreversible",
-            slug="gitea-0071-irreversible",
+            name="Gitea 0073 irreversible",
+            slug="gitea-0073-irreversible",
         )
         tagged = TaggedItem.objects.create(
             tag_id=tag.pk,

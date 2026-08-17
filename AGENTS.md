@@ -574,7 +574,7 @@ envelope, discards backend `error_code`/`error_message`, and derives bounded
 durable diagnostics only from the validated result tuple; remote diagnostic
 text must never enter the event ledger or execution projection.
 
-Migration `0071` seeds `enabled=False`. Ordered activation is backend gate and
+Migration `0073` seeds `enabled=False`. Ordered activation is backend gate and
 exact capability first, then an explicit operator enables the catalog row.
 For this procedure, an absent, unreachable, or malformed capability manifest is
 not graceful: admission and the uncached worker pre-dispatch check both require
@@ -1142,7 +1142,7 @@ pending approval or distinct-actor check.
   executions; malformed nested results are rejected and not projected. Reverse
   migration deletes an unreferenced seed, or preserves referenced history with
   the procedure forced disabled when `RPCExecution.procedure` protects it.
-- Production Gitea binary upgrade is seeded disabled by migration `0071` as
+- Production Gitea binary upgrade is seeded disabled by migration `0073` as
   `service.gitea.production.upgrade_1_27_1` (destructive, 1800s, approval
   required), targeting only `virtualization.virtualmachine` PK 170 (`Gitea`).
   Its exact empty params, six-state closed result, immutable VM/topology/version/
@@ -1152,7 +1152,7 @@ pending approval or distinct-actor check.
   [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md).
   The representative command is backend-orchestrated because download,
   checksum, backup, service lifecycle, health, and rollback are one fixed
-  transaction rather than one faithful argv. Migration `0071` is intentionally
+  transaction rather than one faithful argv. Migration `0073` is intentionally
   irreversible: its reverse raises before any catalog inspection or mutation,
   so operator replacement, rename, or references cannot produce a falsely
   unapplied migration with deleted, surviving, or orphaned rows. Removal or
@@ -1813,7 +1813,7 @@ from `approval_required=True` to `False` unless the user has
   populated integer columns and indexes.
 - A reverse data migration must not pass a historical model instance into a
   deletion collector that can see current-plugin reverse relations. Migration
-  `0071` is deliberately irreversible because it has no durable row-ownership
+  `0073` is deliberately irreversible because it has no durable row-ownership
   ledger: its reverse raises before inspection or mutation, preventing an
   operator replacement, rename, or reference from being deleted or left while
   the migration is recorded unapplied. Use a reviewed forward repair migration

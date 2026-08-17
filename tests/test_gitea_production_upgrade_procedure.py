@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator, ValidationError, validate
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION_MODULE = "netbox_rpc.migrations.0071_seed_gitea_production_upgrade_1271"
+MIGRATION_MODULE = "netbox_rpc.migrations.0073_seed_gitea_production_upgrade_1271"
 PROCEDURE_ID = "service.gitea.production.upgrade_1_27_1"
 OFFICIAL_SHA256 = "86a7ac26e7f9c9cca0f56c4fac07fff205d5fc3bca0e54af23a204f07b833bc9"
 RESULT_KEYS = {"ok", "procedure", "target", "changed", "healthy", "stage"}
@@ -118,10 +118,10 @@ def test_gitea_upgrade_migration_is_inline_owned_and_explicitly_irreversible(
     migration,
 ) -> None:
     assert migration.Migration.dependencies == [
-        ("netbox_rpc", "0070_rpcapprovalrequest_policy_hashes")
+        ("netbox_rpc", "0072_seed_influxdb3_debian13_install_procedures")
     ]
     source = (
-        ROOT / "netbox_rpc/migrations/0071_seed_gitea_production_upgrade_1271.py"
+        ROOT / "netbox_rpc/migrations/0073_seed_gitea_production_upgrade_1271.py"
     ).read_text(encoding="utf-8")
     assert "from netbox_rpc" not in source
     assert OFFICIAL_SHA256 in source

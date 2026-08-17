@@ -1,6 +1,6 @@
 """Immutable runtime contract for the production Gitea 1.27.1 upgrade.
 
-Migration 0071 keeps an inline copy so historical migration behavior remains
+Migration 0073 keeps an inline copy so historical migration behavior remains
 deterministic. Tests require the migration seed and this runtime policy to stay
 exactly aligned.
 """
@@ -14,7 +14,7 @@ from typing import Any
 PROCEDURE_NAME = "service.gitea.production.upgrade_1_27_1"
 HANDLER_ID = PROCEDURE_NAME
 VERSION = 1
-# The reviewed *active* runtime policy requires enabled=True. Migration 0071
+# The reviewed *active* runtime policy requires enabled=True. Migration 0073
 # deliberately seeds the row disabled; ordered activation is backend gate +
 # capability first, then an operator enables this catalog row. This distinction
 # keeps activation possible without weakening the exact policy enforced at run

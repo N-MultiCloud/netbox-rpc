@@ -1,7 +1,7 @@
 # Production Gitea 1.27.1 upgrade
 
 `service.gitea.production.upgrade_1_27_1` is the only audited RPC contract for
-upgrading the production Gitea VM from 1.26.2 to 1.27.1. Migration `0071`
+upgrading the production Gitea VM from 1.26.2 to 1.27.1. Migration `0073`
 deliberately seeds it disabled. Do not enable or dispatch it until the paired
 backend gate and capability, VM-owned SSH service, pinned host key, signed
 dispatch-lease verifier, backup location, and health-check topology are proven
@@ -129,14 +129,14 @@ mutation, rollback, or invocation bytes therefore changes capability
 compatibility. Its compact
 canonical JSON and digest fixture must match the paired backend byte-for-byte;
 legacy handler hashes do not gain this extension.
-Migration `0071` takes ownership only by creating an absent canonical name; if
+Migration `0073` takes ownership only by creating an absent canonical name; if
 an operator-owned procedure already uses that name, forward migration aborts
-before modifying the procedure or any command. Migration `0071` is intentionally
+before modifying the procedure or any command. Migration `0073` is intentionally
 irreversible because it has no durable row-ownership ledger. Its reverse always
 raises before inspecting or mutating catalog data, so an operator replacement,
 rename, execution history, approval state, or generic NetBox metadata cannot be
 deleted or left behind while Django records the migration unapplied. Operators
-must keep `0071` applied; removal or repair requires a reviewed forward migration
+must keep `0073` applied; removal or repair requires a reviewed forward migration
 with explicit ownership evidence.
 
 The backend must verify the official digest before stopping Gitea, create and

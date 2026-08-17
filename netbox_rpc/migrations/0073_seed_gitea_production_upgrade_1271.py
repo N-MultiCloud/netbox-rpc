@@ -139,7 +139,7 @@ def seed_gitea_production_upgrade(apps, schema_editor):
     # migration before either the procedure or its commands are touched.
     if RPCProcedure.objects.filter(name=_PROCEDURE_NAME).exists():
         raise RuntimeError(
-            "Migration 0071 cannot seed the production Gitea upgrade because "
+            "Migration 0073 cannot seed the production Gitea upgrade because "
             "an RPC procedure with the canonical name already exists; preserve "
             "and reconcile the operator-owned row before retrying."
         )
@@ -161,12 +161,12 @@ def unseed_gitea_production_upgrade(apps, schema_editor):
     primary keys, commands, and policy fields are all operator-mutable after the
     forward migration, so reverse-time comparison cannot prove that a matching
     row is still the seed rather than a replacement (or locate a renamed seed).
-    Explicit irreversibility keeps 0071 applied and preserves every procedure,
+    Explicit irreversibility keeps 0073 applied and preserves every procedure,
     command, history row, and generic annotation for a reviewed forward repair.
     """
 
     raise IrreversibleError(
-        "Migration 0071 is intentionally irreversible because production Gitea "
+        "Migration 0073 is intentionally irreversible because production Gitea "
         "procedure ownership cannot be proven after operator mutation; keep the "
         "migration applied and use a reviewed forward repair migration."
     )
@@ -174,7 +174,7 @@ def unseed_gitea_production_upgrade(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0070_rpcapprovalrequest_policy_hashes"),
+        ("netbox_rpc", "0072_seed_influxdb3_debian13_install_procedures"),
     ]
 
     operations = [

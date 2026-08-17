@@ -179,7 +179,7 @@ The procedure catalog is intentionally narrow:
   are forbidden. Capability and dispatch HTTP redirects are never followed.
   The exact five-key backend wrapper is reduced to `ok/result`; catalog-owned
   static diagnostics are selected only from the validated six-state tuple, so
-  backend diagnostic strings never enter persistence. Migration `0071` is
+  backend diagnostic strings never enter persistence. Migration `0073` is
   intentionally irreversible and its reverse raises before inspecting or
   mutating catalog data. This prevents an operator replacement, rename, or
   referenced seed from being deleted or left behind while Django records the
