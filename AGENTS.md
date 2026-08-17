@@ -1510,6 +1510,29 @@ approval or distinct-actor check.
 
 ## CI / Testing
 
+> **The pure-domain tier is blind to every database constraint.** Seed-migration tests
+> here drive fake managers (plain dicts), so they enforce no column width, no NOT NULL,
+> no uniqueness, and no FK integrity. A seeded value that violates one passes locally
+> and fails only when a real database applies the migration — which means CI at best,
+> and the production deploy at worst, since the plugin auto-deploys on merge to `main`
+> and runs migrations via `ExecStartPre`. This is not theoretical: a 291-character
+> seeded `description` shipped through a green pure-domain suite and failed the
+> DB-backed compatibility job with
+> `DataError: value too long for type character varying(255)`. When adding a seed,
+> assert field lengths against the model explicitly (see
+> `tests/test_influxdb3_debian13_procedures.py::test_seeded_descriptions_fit_the_model_column`,
+> which reads `max_length` out of `models.py`).
+>
+> **Never delete through a historical model in a data migration.** `Model.delete()` and
+> `QuerySet.delete()` both run Django's deletion collector, which walks related models —
+> and a related model whose app has no migrations is rendered from the *real* app
+> registry rather than from the migration state. The collector then filters that real
+> model by a historical instance and Django raises
+> `ValueError: Cannot query "<Model> object (N)": Must be "<Model>" instance`. This
+> failed the NetBox 4.5.8 compatibility job, which migrates backwards past a seed with
+> its rows present. Prefer `queryset.update(enabled=False)` in a reverse: it touches one
+> table, never invokes the collector, and never destroys audited history.
+
 Two tiers (see `docs/architecture.md` → Testing):
 
 1. **Pure-domain unit tests** (`tests/`, `pytest`) — stub Django/NetBox, no
