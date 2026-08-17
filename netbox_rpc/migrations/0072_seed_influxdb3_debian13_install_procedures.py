@@ -315,12 +315,13 @@ _PROCEDURES = (
         "effect": "write",
         "timeout_seconds": 900,
         "approval_required": True,
+        # Keep this under RPCProcedure/RPCProcedureCommand.description's
+        # max_length=255; the same string is stored on both rows.
         "description": (
             "Install and configure InfluxDB 3 Core on Debian 13 from the "
-            "fingerprint-verified InfluxData repository: pinned package install, "
-            "managed configuration, systemd drop-in, restart, readiness probe, and "
-            "package hold. Creates no credential; token bootstrap stays with "
-            "service.influxdb.1.bootstrap."
+            "fingerprint-verified InfluxData repository: pinned install, managed "
+            "configuration, systemd drop-in, restart, readiness probe, and package "
+            "hold. Creates no credential."
         ),
         "params_schema": _INSTALL_PARAMS,
         "result_schema": _INSTALL_RESULT,

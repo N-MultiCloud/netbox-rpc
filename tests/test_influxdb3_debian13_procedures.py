@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -187,6 +188,37 @@ def test_seed_declares_no_credential_or_ssh_override_parameter(
             assert forbidden not in params_properties, (name, forbidden)
         # Nothing is required, so a run can be issued with no parameters at all.
         assert row["params_schema"]["required"] == []
+
+
+def test_seeded_descriptions_fit_the_model_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every seeded description must fit ``description``'s ``max_length``.
+
+    The pure-domain seed tests use fake managers with no column widths, so an
+    over-long description passes here and only fails when a real database applies
+    the migration — i.e. in CI, or worse, on a production deploy. Read the limit out
+    of ``models.py`` so widening the column updates this bound instead of silently
+    invalidating it.
+    """
+
+    models_source = (ROOT / "netbox_rpc/models.py").read_text()
+    limits = {
+        int(match)
+        for match in re.findall(
+            r"description = models\.CharField\(max_length=(\d+)", models_source
+        )
+    }
+    assert limits, "could not read description max_length from models.py"
+    limit = min(limits)
+    assert limit == 255, f"description column width changed to {limit}; update callers"
+
+    procedures, commands = _run_procedure_seed(monkeypatch)
+    for name, row in procedures.rows.items():
+        assert len(row["description"]) <= limit, (name, len(row["description"]))
+    for key, row in commands.rows.items():
+        # The command row stores the same string, so it is bounded by the same column.
+        assert len(row["description"]) <= limit, (key, len(row["description"]))
 
 
 def test_seed_patterns_are_anchored_against_the_trailing_newline_bypass(
