@@ -51,8 +51,10 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_firewall`
 - `os.linux.ubuntu.24.upgrade_26.{analyze_preupgrade,save_preupgrade_state,run_upgrade,verify_postupgrade}`
 - `os.linux.ubuntu.24.{restart,status,start,stop,reload,enable,disable}_service`
-  and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`,
-  `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`) services.
+  and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`
+  (`influxdb.service`, OSS 2), `influxdb3-core` (`influxdb3-core.service`,
+  Core 3), `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`)
+  services.
   Restarting `netbox-rq` is the audited way to sweep a NetBox RQ job stuck in
   `running` after its worker died.
 - `os.linux_env_file.upsert_var` — writes a single `KEY=VALUE` line (backend
@@ -574,6 +576,85 @@ use `netbox-nms` secret references for credentials. Onboarding accepts no
 caller-supplied plaintext. The execution backend generates or resolves secrets
 only in memory, uses fixed loopback product APIs, and returns only references
 and non-secret resource identifiers.
+
+### `os.linux.debian.13.*_influxdb3_core` — Debian 13 InfluxDB 3 Core installation
+
+The family above manages an InfluxDB instance that already exists. Migrations
+`0071` (allowlist row `influxdb3-core` -> `influxdb3-core.service`) and `0072`
+(procedures) add the audited contract for *standing one up* on a Debian 13 guest,
+so installing a fresh Core 3 host will not require an interactive SSH session.
+Both procedures target `dcim.device` and `virtualization.virtualmachine`, and both
+are **seeded disabled** until the paired execution handler ships (see the end of
+this section).
+
+| Procedure | Effect | Approval | Timeout | Purpose |
+|---|---|---|---|---|
+| `preflight_influxdb3_core` | read | no | 60s | Report release/architecture/systemd, package + hold state, managed-config marker, unit state, configured bind/node-id/data-dir, TLS readability, and a derived `ready` verdict with bounded `blockers[]` |
+| `install_influxdb3_core` | write | **yes** | 900s | Fingerprint-verified repository key, pinned package install, managed configuration, systemd drop-in, restart, readiness probe, and package hold |
+
+`preflight` is deliberately both the pre-install gate and the post-install
+verification read — the operator installer's precondition block and its
+completion report inspect the same facts — so there is no separate `verify_*`
+procedure. The installer's own completion report is its `result_schema`
+(package/binary version, unit state, bind, node id, data dir, config path,
+plugins enabled, package held, `stage`).
+
+Optional install parameters mirror the operator script's environment variables:
+`node_id`, `data_dir`, `http_bind`, `tls_cert`/`tls_key`, `enable_plugins`,
+`disable_telemetry`, `wal_flush_interval`, `log_filter`, `package_version`,
+`hold_package`, `upgrade_package`, `force_reconfigure`, and
+`allow_plaintext_remote`. Every one is re-validated in the normalizer as well as
+in `params_schema`, so a schema edit alone cannot widen what reaches the
+execution backend.
+
+**Neither procedure accepts the shared `rpc_ssh_*` connection overrides.** The
+execution backend resolves host, port, credential, and known-host policy from the
+execution's assigned NetBox object alone, as with the Huawei NE8000 BGP read; a
+caller-supplied override is rejected with `RPC_PARAM_INVALID`. A caller-selected
+`rpc_ssh_credential_pk` is not object-scoped against the requester, and a
+caller-selected `rpc_ssh_host` would move an approved installation off the
+audited target.
+
+Path parameters must be **canonical**: `.` and `..` segments are rejected and the
+value must equal its own `normpath`, so `data_dir` cannot resolve into one of the
+forbidden roots `/home`, `/root`, `/run`, `/tmp`, `/var/tmp` (the packaged systemd
+unit sandboxes those trees) via a non-canonical spelling such as
+`/var/./tmp/influxdb3`. A dot inside a segment — `/etc/influxdb3/tls/server.crt` —
+remains legal. `tls_cert`/`tls_key` are both-or-neither absolute paths, and
+unknown parameters are rejected in both layers. **A remote `http_bind` with no TLS
+is refused** unless the caller explicitly sets `allow_plaintext_remote=true`,
+reproducing the installer's refusal to expose bearer-token authentication over
+plaintext HTTP.
+
+The installer's `result_schema` is a closed envelope: a nested `ok=true` must also
+report `installed=true`, `ready=true`, and `stage="complete"`. Because the event
+store derives success from the **outer** response `ok`, `record_backend_response()`
+additionally requires the outer and nested `ok` to agree — and both to be strict
+booleans — for this family, so a response wrapping a failed or partial install
+cannot be recorded as a success. Every result string is explicitly bounded, since
+unbounded strings are silently clamped at 4096 characters when the result is
+persisted.
+
+Because the SSH target is derived exclusively from the assigned NetBox object, that
+object must exist **and** be viewable by the requester: execution creation resolves
+it through `objects.restrict(user, "view")`, and the normalizer re-validates the
+identity at worker claim and forwards the content type + object ID rather than the
+display name, so an approved installation is pinned to the object that was approved.
+
+**Both procedures are seeded `enabled=False`** and are additionally refused by a
+fail-closed code gate at admission, advertisement, and worker claim, because no
+`os.linux_debian_13.*` handler is deployed yet — an enabled row would only produce
+executions that fail on an unknown handler. Enabling them is a coordinated rollout
+step performed by an additive migration alongside the handler deployment.
+
+**Neither procedure accepts or returns a credential.** The first administrative
+token is created and vaulted only by `service.influxdb.1.bootstrap`
+(`family="core3"`), which returns an `nms-secret:` reference. The sanctioned
+sequence is `preflight` -> `install` -> `service.influxdb.1.bootstrap`. Both
+handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
+`backend-orchestrated` representative command row each. The paired
+`netbox-packer` profile `influxdb-core-3.11.0-debian-13` bakes the same
+production posture into a first-boot cloud-init template for *new* guests.
 
 ### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
 

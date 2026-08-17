@@ -431,6 +431,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
+| `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 
 ### Other Write Procedures
 
@@ -561,6 +562,165 @@ approval or distinct-actor check.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
+  (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
+  above manages an instance that already *exists*; these two stand one up, so a
+  fresh Core 3 guest no longer requires an interactive SSH session. Both target
+  `dcim.device` and `virtualization.virtualmachine`.
+  - `os.linux.debian.13.preflight_influxdb3_core`
+    (`os.linux_debian_13.preflight_influxdb3_core`, **read**, no approval, 60s)
+    reports posture: `/etc/os-release` `ID`/`VERSION_ID`, dpkg architecture,
+    systemd presence, whether `influxdb3-core` is installed/held and at which
+    version, the managed-config marker, unit load/active/enabled state, the
+    configured bind/node-id/data-dir, and TLS-material readability, plus a
+    derived `ready` verdict and bounded `blockers[]`. It is deliberately **both**
+    the pre-install gate and the post-install verification read — there is no
+    separate `verify_*` procedure, because the operator installer's precondition
+    block and its completion report read the same facts.
+  - `os.linux.debian.13.install_influxdb3_core`
+    (`os.linux_debian_13.install_influxdb3_core`, **write**,
+    **`approval_required=True`**, 900s) is the audited installer:
+    fingerprint-verified InfluxData repository key
+    (`24C975CBA61A024EE1B631787C3D57159FC2F927`), pinned `influxdb3-core`
+    install, managed `/etc/influxdb3/influxdb3-core.conf`, systemd drop-in,
+    restart, readiness probe, and `apt-mark hold`. Optional params mirror the
+    operator script's environment variables — `node_id`, `data_dir`, `http_bind`,
+    `tls_cert`/`tls_key`, `enable_plugins`, `disable_telemetry`,
+    `wal_flush_interval`, `log_filter`, `package_version`, `hold_package`,
+    `upgrade_package`, `force_reconfigure`, `allow_plaintext_remote`. Its
+    `result_schema` carries the installer's completion report (package/binary
+    version, unit state, bind, node id, data dir, config path, plugins enabled,
+    package held, `ready`, `stage`).
+
+  **Neither procedure accepts the shared `rpc_ssh_*` connection overrides — this
+  is deliberate and must not be "restored".** Unlike the agent-install, ookla, and
+  nmap procedures, these two declare no `rpc_ssh_credential_pk`, `rpc_ssh_host`,
+  `rpc_ssh_port`, `rpc_ssh_known_hosts_entry`, or
+  `rpc_ssh_strict_host_key_checking`, and the normalizer rejects them explicitly
+  (`RPC_PARAM_INVALID`, naming the offending keys) before the generic
+  unknown-parameter check. The execution backend must resolve host, port,
+  credential, and known-host policy from the execution's **assigned NetBox
+  object** alone, exactly as
+  `network.device.huawei.router.ne8000.f1a.show_bgp_peer` does. Reason: a
+  caller-supplied `rpc_ssh_credential_pk` is not object-scoped against the
+  requesting user (the open gap tracked in issue #203), so honouring one would let
+  a requester use a credential they cannot view; and a caller-supplied
+  `rpc_ssh_host` would move an approved installation off the audited target
+  entirely. Because the installer is `approval_required=True`, both would be
+  approved against one target and executed against another. Adding these params
+  back requires #203 (or equivalent object-scoped authorization) to land first.
+
+  **No credential, anywhere in this pair (hard invariant).** Neither
+  `params_schema` declares a token, password, secret reference, or
+  `generate_admin_token`-style flag, and neither `result_schema` returns one.
+  The first administrative token is created and vaulted **only** by the
+  pre-existing `service.influxdb.1.bootstrap` (`family="core3"`, migration
+  `0056`), which stores the plaintext through the netbox-nms secret bridge and
+  returns an `nms-secret:` reference. The sanctioned sequence is
+  `preflight` → `install` → `service.influxdb.1.bootstrap`. Do not add token
+  generation to the installer: one token contract per product family is the
+  point, and `tests/test_influxdb3_debian13_procedures.py` asserts the absence
+  of every secret-shaped key in params, results, and the normalized payload.
+
+  **Normalizer invariants** (`_normalize_influxdb3_debian13_execution`): every
+  value is re-validated in the pure domain, so a `params_schema` edit alone can
+  never widen what reaches the backend. Every path parameter must be
+  **canonical**: a segment equal to `.` or `..` is rejected, and the value must
+  equal its own `posixpath.normpath()`. This is load-bearing, not cosmetic —
+  `data_dir` is then compared against the forbidden roots `/home`, `/root`,
+  `/run`, `/tmp`, `/var/tmp` (the packaged unit sandboxes those trees, so the
+  service would not start), and a literal prefix comparison alone would let
+  `/var/./tmp/influxdb3` or `/var/lib/../tmp/influxdb3` through while they resolve
+  *inside* a forbidden root. Requiring canonical input rather than normalizing it
+  also means the value that is stored, fingerprinted, approved, and executed is
+  the same string the operator read. A dot **inside** a segment
+  (`/etc/influxdb3/tls/server.crt`) stays legal. `tls_cert`/`tls_key` are
+  both-or-neither absolute paths on *both* procedures. Unknown parameters are
+  rejected here as well as by
+  `additionalProperties: false`, tolerating only the platform-stamped
+  `_intent`/`_intent_name`/`_timeout_seconds_snapshot` keys. Most importantly the
+  normalizer reproduces the installer's own security gate: **a remote
+  `http_bind` with no TLS is refused** (`RPC_PARAM_INVALID`) unless the caller
+  explicitly sets `allow_plaintext_remote=true`; an omitted `http_bind` is
+  evaluated as the loopback default rather than left undefined. An
+  out-of-family procedure name reaching this normalizer fails closed with
+  `RPC_PROCEDURE_NOT_NORMALIZABLE` rather than inheriting the installer's
+  parameter set. Every seed `pattern` is anchored with `(?![\s\S])`, not `$`,
+  because `jsonschema` applies `pattern` via `re.search` and Python's `$` also
+  matches before a single trailing newline.
+
+  **Seeded `enabled=False` behind a three-point code gate.** No
+  `os.linux_debian_13.*` handler exists in `netbox-rpc-backend` yet, so an enabled
+  row would be advertised by `/procedures/available/` and every execution would
+  queue only to fail on an unknown handler. Capability discovery does **not** cover
+  this: a backend that advertises no manifest yields verification `UNKNOWN` and
+  admission proceeds. `_INFLUXDB3_DEBIAN13_AVAILABLE = False` in
+  `netbox_rpc.domain.normalization` is therefore checked through the shared
+  `code_gate_unavailable_reason()` at all three enforcement points — admission
+  (`create_execution()`), advertisement (`RPCProcedureViewSet.available()`), and
+  worker claim (inside this normalizer) — so flipping the mutable
+  `RPCProcedure.enabled` flag alone cannot make them dispatchable. Enable the gate
+  and the flag **together**, in an *additive* migration, as part of the coordinated
+  rollout that ships the handlers and their approved capability contract. Do not
+  edit `0072`'s data defaults in place (Django tracks an applied migration by name,
+  so an in-place edit silently skips databases that already ran it — the `0060`/
+  `0061` lesson).
+
+  **The assigned object is authorization-checked and pinned.** The requester
+  chooses `assigned_object_id`, and these procedures derive their SSH target
+  *exclusively* from it, so `create_execution()` resolves the exact device/VM
+  through `model.objects.restrict(user, "view")` before the row is written —
+  `_require_viewable_assigned_object()` in `command_handlers.py`, whose
+  `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` set now covers both the Akvorado family
+  and this one. (It was `_require_akvorado_assigned_object` before; the rename is
+  the whole point — any family with no `rpc_ssh_*` escape hatch belongs in it.)
+  Without that check a requester could aim an approval-gated installation at a
+  device they cannot even view. The normalizer then **re-validates** the identity at
+  worker claim and forwards `target_object = {content_type, object_id}`, with flat
+  `target_content_type`/`target_object_id` scalars in the command fingerprint, so an
+  approved run is pinned to the object that was approved. `target` remains an
+  audit-only display value and must never be used for host resolution.
+
+  **Result-schema invariants.** The installer's `result_schema` carries a closed
+  `oneOf` envelope (same shape as
+  `service.netbox.staging.rotate_backend_token`): a nested `ok=true` must also
+  report `installed=true`, `ready=true`, and `stage="complete"`, and `installed`,
+  `ready`, `stage`, and `package_held` are all **required**. On its own that is not
+  enough, because a `result_schema` can only constrain the *nested* object while
+  `event_store` selects `ExecutionSucceeded` from the **outer** response `ok` — so
+  `record_backend_response()` additionally requires outer/nested `ok` agreement for
+  this family via the shared `_envelope_ok_state_mismatch()` helper (extracted from
+  the staging-rotation validator, which keeps its extra events prohibition). Both
+  values must be strict booleans, so a truthy non-boolean cannot pass `bool()`
+  coercion silently. Together these mean a response of `ok=true` wrapping a failed
+  or partial install is rejected instead of recorded as a successful installation. A
+  genuine failure stays fully representable through the `ok=false` branch, including
+  a partial `stage` and a bounded `error`. Every result string additionally carries an
+  explicit `maxLength` (or a closed `enum`/`const`), because `event_store` silently
+  clamps unbounded strings at 4096 characters — an unbounded audit field would be
+  truncated with no validation error, and an unbounded contract lets a malformed
+  backend return an arbitrarily large valid result. `procedure` is a `const`, so a
+  backend cannot relabel which procedure ran.
+
+  **Reverse migration is PROTECT-safe.** `RPCExecution.procedure` is
+  `on_delete=PROTECT`, so `0072`'s reverse handles each procedure individually and
+  falls back to forcing `enabled=False` on a `ProtectedError` instead of
+  bulk-deleting — otherwise a downgrade would abort outright once either procedure
+  had run, and audited execution history must never be destroyed to allow one.
+
+  Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
+  representative `["backend-orchestrated", …]` command row each — key-fingerprint
+  verification, `apt-cache madison` candidate resolution, and
+  validate/write/restart/health/hold sequencing have no faithful fixed-argv
+  form. Both procedures are also `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` and
+  envelope-state-strict members, so adding a third procedure to this family means
+  reviewing those three registries too, not just the seed migration.
+  **Catalog-first: the matching `os.linux_debian_13.*` handler does not
+  exist in `netbox-rpc-backend` yet** and lands separately, exactly as with the
+  whole `service.influxdb.1.*` family and the Samba catalog. The paired
+  `netbox-packer` profile `influxdb-core-3.11.0-debian-13` (VMID 9052) bakes the
+  same production posture into a first-boot cloud-init template for new guests;
+  this catalog is for hosts that already exist.
 - Akvorado service management uses the typed `service.akvorado.1.*` catalog
   seeded by migration `0057`, targeting `dcim.device` and
   `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
@@ -581,12 +741,15 @@ approval or distinct-actor check.
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
 - InfluxDB service management is provided by the generic Ubuntu 24 systemd
-  procedures through the seeded `RPCLinuxServiceAllowlist` row
-  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
-  `dcim.device` and `virtualization.virtualmachine`. Do not add
-  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
-  a new typed procedure if a future operation cannot be modeled as service
-  lifecycle control.
+  procedures through two seeded `RPCLinuxServiceAllowlist` rows, both targeting
+  `dcim.device` and `virtualization.virtualmachine`:
+  `slug="influxdb"` -> `systemd_unit="influxdb.service"` (**OSS 2**, migration
+  `0053`) and `slug="influxdb3-core"` -> `systemd_unit="influxdb3-core.service"`
+  (**Core 3**, migration `0071`). The two products ship different units, so pick
+  the row that matches the family — the OSS 2 row cannot control a Core 3
+  instance. Do not add InfluxDB-specific shell text; use the existing fixed
+  systemctl handlers or add a new typed procedure if a future operation cannot be
+  modeled as service lifecycle control.
 - NetBox stack service management is provided the same way, through the allowlist
   rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
   (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
@@ -1346,6 +1509,29 @@ approval or distinct-actor check.
   containers, VMs, or Huawei OLTs.
 
 ## CI / Testing
+
+> **The pure-domain tier is blind to every database constraint.** Seed-migration tests
+> here drive fake managers (plain dicts), so they enforce no column width, no NOT NULL,
+> no uniqueness, and no FK integrity. A seeded value that violates one passes locally
+> and fails only when a real database applies the migration — which means CI at best,
+> and the production deploy at worst, since the plugin auto-deploys on merge to `main`
+> and runs migrations via `ExecStartPre`. This is not theoretical: a 291-character
+> seeded `description` shipped through a green pure-domain suite and failed the
+> DB-backed compatibility job with
+> `DataError: value too long for type character varying(255)`. When adding a seed,
+> assert field lengths against the model explicitly (see
+> `tests/test_influxdb3_debian13_procedures.py::test_seeded_descriptions_fit_the_model_column`,
+> which reads `max_length` out of `models.py`).
+>
+> **Never delete through a historical model in a data migration.** `Model.delete()` and
+> `QuerySet.delete()` both run Django's deletion collector, which walks related models —
+> and a related model whose app has no migrations is rendered from the *real* app
+> registry rather than from the migration state. The collector then filters that real
+> model by a historical instance and Django raises
+> `ValueError: Cannot query "<Model> object (N)": Must be "<Model>" instance`. This
+> failed the NetBox 4.5.8 compatibility job, which migrates backwards past a seed with
+> its rows present. Prefer `queryset.update(enabled=False)` in a reverse: it touches one
+> table, never invokes the collector, and never destroys audited history.
 
 Two tiers (see `docs/architecture.md` → Testing):
 

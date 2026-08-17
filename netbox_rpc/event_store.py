@@ -11,7 +11,10 @@ import jsonschema
 from django.db import IntegrityError
 from django.utils import timezone
 
-from .constants import NETBOX_STAGING_ROTATE_BACKEND_TOKEN
+from .constants import (
+    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+)
 from .domain import events as domain_events
 from .domain.projection import ProjectionState, apply, rebuild
 from .models import RPCExecution, RPCExecutionEvent
@@ -489,6 +492,12 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         getattr(getattr(execution, "procedure", None), "name", "") or ""
     )
     is_staging_rotation = procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
+    # These two carry a closed oneOf success envelope in their result_schema, which
+    # only constrains the NESTED object; requiring outer/nested agreement is what
+    # stops an ok=true response around a failed install being recorded as success.
+    requires_envelope_state_match = (
+        is_staging_rotation or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+    )
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
     string_limits = _result_schema_string_limits(execution)
@@ -520,10 +529,12 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     # disagree about whether a wide field is oversized.
     has_nested_result = isinstance(raw_result, dict)
     result_is_present = "result" in response
-    should_validate_result = ok or result_is_present or is_staging_rotation
+    should_validate_result = ok or result_is_present or requires_envelope_state_match
     schema_mismatch = ""
     if is_staging_rotation:
         schema_mismatch = _staging_backend_response_mismatch(response, raw_result)
+    elif requires_envelope_state_match:
+        schema_mismatch = _envelope_ok_state_mismatch(response, raw_result)
     if should_validate_result and not schema_mismatch:
         schema_mismatch = _backend_result_schema_mismatch(
             execution,
@@ -568,9 +579,7 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
             for item in backend_events:
                 if not isinstance(item, dict):
                     continue
-                raw_backend_name = str(
-                    item.get("event") or "BackendEventRecorded"
-                )
+                raw_backend_name = str(item.get("event") or "BackendEventRecorded")
                 backend_name = (
                     _BACKEND_EVENT_PREFIX
                     + raw_backend_name[: 100 - len(_BACKEND_EVENT_PREFIX)]
@@ -604,16 +613,27 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
                     error_message=error_message or "RPC execution failed.",
                     code=error_code or "RPC_EXECUTION_FAILED",
                     finished_at=finished_at,
-                    result=(result if has_nested_result and not schema_mismatch else {}),
+                    result=(
+                        result if has_nested_result and not schema_mismatch else {}
+                    ),
                 ),
             )
 
 
-def _staging_backend_response_mismatch(
+def _envelope_ok_state_mismatch(
     response: dict[str, Any],
     raw_result: object,
 ) -> str:
-    """Validate the closed staging envelope before persisting any content."""
+    """Require the outer response ``ok`` and the nested ``result.ok`` to agree.
+
+    The terminal event is derived from the OUTER ``ok``, and a procedure's
+    ``result_schema`` can only constrain the nested object — so without this check
+    a backend response of ``ok=true`` wrapping a nested ``ok=false`` result is
+    schema-valid and still records ``ExecutionSucceeded``. For a privileged or
+    approval-gated procedure that means a failed or partial run reported as a
+    success, which an operator could act on. Both values must be strict booleans:
+    a truthy non-boolean would otherwise pass ``bool()`` coercion silently.
+    """
 
     if type(response.get("ok")) is not bool:
         return "Backend result schema mismatch at response.ok: boolean required."
@@ -624,6 +644,18 @@ def _staging_backend_response_mismatch(
     nested_ok = raw_result.get("ok")
     if type(nested_ok) is not bool or nested_ok is not response["ok"]:
         return "Backend result schema mismatch at result.ok: envelope state mismatch."
+    return ""
+
+
+def _staging_backend_response_mismatch(
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    """Validate the closed staging envelope before persisting any content."""
+
+    envelope_mismatch = _envelope_ok_state_mismatch(response, raw_result)
+    if envelope_mismatch:
+        return envelope_mismatch
     backend_events = response.get("events")
     if backend_events not in (None, []):
         return "Backend result schema mismatch at events: staging events are forbidden."

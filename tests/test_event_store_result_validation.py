@@ -891,3 +891,163 @@ def _result_schema(required_field: str) -> dict[str, object]:
             required_field: {"type": "string"},
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# Debian 13 InfluxDB 3 Core install/preflight envelope agreement
+# --------------------------------------------------------------------------- #
+
+_INFLUXDB3_INSTALL = "os.linux.debian.13.install_influxdb3_core"
+
+
+def _influxdb3_install_schema():
+    """Load the real seeded result schema from migration 0072.
+
+    Using the shipped schema rather than a hand-copied one keeps this test honest:
+    if the migration's envelope rules change, this test sees the change.
+    """
+
+    django_db = sys.modules.setdefault("django.db", types.ModuleType("django.db"))
+    django_migrations = types.ModuleType("django.db.migrations")
+    django_migrations.Migration = type("Migration", (), {})
+    django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
+    sys.modules["django.db.migrations"] = django_migrations
+    django_db.migrations = django_migrations
+    django_models = sys.modules.setdefault(
+        "django.db.models", types.ModuleType("django.db.models")
+    )
+    deletion = types.ModuleType("django.db.models.deletion")
+    deletion.ProtectedError = type("ProtectedError", (Exception,), {})
+    sys.modules["django.db.models.deletion"] = deletion
+    django_models.deletion = deletion
+    name = "netbox_rpc.migrations.0072_seed_influxdb3_debian13_install_procedures"
+    sys.modules.pop(name, None)
+    migration = importlib.import_module(name)
+    return migration._INSTALL_RESULT
+
+
+def _influxdb3_success_result():
+    return {
+        "ok": True,
+        "procedure": _INFLUXDB3_INSTALL,
+        "target": "influx01",
+        "installed": True,
+        "package_version": "3.11.0-1",
+        "service_state": "active",
+        "service_enabled": "enabled",
+        "http_bind": "127.0.0.1:8181",
+        "node_id": "influx01-node",
+        "data_dir": "/var/lib/influxdb3/data",
+        "config_path": "/etc/influxdb3/influxdb3-core.conf",
+        "plugins_enabled": False,
+        "package_held": True,
+        "ready": True,
+        "stage": "complete",
+    }
+
+
+def _influxdb3_execution():
+    return SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=_INFLUXDB3_INSTALL,
+            result_schema=_influxdb3_install_schema(),
+        )
+    )
+
+
+def test_influxdb3_install_success_envelope_records_success(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": True, "result": _influxdb3_success_result()},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionSucceeded"
+
+
+@pytest.mark.parametrize(
+    ("outer_ok", "nested_overrides"),
+    [
+        # The motivating case: a truthy outer envelope wrapping a failed install.
+        # The terminal event is derived from the OUTER ok, so without the envelope
+        # check this would be recorded as a successful installation.
+        (True, {"ok": False, "installed": False, "ready": False, "stage": "package"}),
+        # The reverse direction must fail closed too.
+        (False, {"ok": True}),
+    ],
+)
+def test_influxdb3_install_outer_and_nested_ok_must_agree(
+    event_store_module,
+    outer_ok: bool,
+    nested_overrides: dict,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": outer_ok, "result": {**_influxdb3_success_result(), **nested_overrides}},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+@pytest.mark.parametrize("outer_ok", [1, "true", None, 0, [], {}])
+def test_influxdb3_install_rejects_a_non_boolean_outer_ok(
+    event_store_module,
+    outer_ok: object,
+) -> None:
+    """A truthy non-boolean would otherwise pass bool() coercion silently."""
+
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": outer_ok, "result": _influxdb3_success_result()},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_influxdb3_install_requires_a_nested_result(event_store_module) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(_influxdb3_execution(), {"ok": True})
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_influxdb3_install_matching_failure_envelope_is_preserved(
+    event_store_module,
+) -> None:
+    """A genuine failure must stay representable, with its partial stage intact."""
+
+    event_store, events = event_store_module
+    failure = {
+        **_influxdb3_success_result(),
+        "ok": False,
+        "installed": False,
+        "ready": False,
+        "stage": "package",
+        "error": "apt candidate 3.11.0 not offered by the repository",
+    }
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": False, "result": failure},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code != event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result["stage"] == "package"

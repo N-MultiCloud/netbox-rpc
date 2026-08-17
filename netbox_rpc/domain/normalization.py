@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
@@ -43,6 +44,9 @@ from ..constants import (
     INFLUXDB_1_PROCEDURE_NAMES,
     INFLUXDB_1_SERVICE_CONTROL,
     INFLUXDB_1_TOKEN_CREATE,
+    INFLUXDB3_DEBIAN13_INSTALL,
+    INFLUXDB3_DEBIAN13_PREFLIGHT,
+    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     LINUX_COLLECT_FACTS,
     LINUX_ENV_FILE_UPSERT_VAR,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
@@ -155,6 +159,14 @@ _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # are met.
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
 _HUAWEI_NE8000_BGP_AVAILABLE = False
+# No os.linux_debian_13.* handler exists in netbox-rpc-backend yet. Capability
+# discovery is NOT a substitute for this gate: a backend that advertises no
+# manifest yields verification UNKNOWN and admission proceeds, so without the gate
+# /procedures/available/ would advertise these rows as dispatchable and every
+# execution would queue only to fail on an unknown handler. Flip to True in the
+# same coordinated rollout that deploys the handlers and their capability
+# contract, via an additive migration that also sets RPCProcedure.enabled=True.
+_INFLUXDB3_DEBIAN13_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -188,6 +200,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "netbox-rpc-backend execution handler and its approved capability "
             "contract are not deployed, and the coordinated BGP rollout has "
             "not been authorized."
+        )
+    if (
+        procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        and not _INFLUXDB3_DEBIAN13_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no os.linux_debian_13.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handlers and "
+            "their approved capability contract."
         )
     return None
 
@@ -329,6 +352,74 @@ _INFLUXDB_SECRET_REF_RE = re.compile(
     r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
+# Debian 13 InfluxDB 3 Core installation catalog (migration 0072). Every value is
+# re-validated here, in the pure domain, so a params_schema edit alone can never
+# widen what actually reaches the execution backend.
+_INFLUXDB3_ABSOLUTE_PATH_RE = re.compile(r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_INFLUXDB3_NODE_ID_RE = re.compile(r"[A-Za-z0-9]+(?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_INFLUXDB3_BIND_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9.-]{0,252}):([0-9]{1,5})$")
+_INFLUXDB3_WAL_FLUSH_INTERVAL_RE = re.compile(r"[0-9]{1,9}(?:ms|s)$")
+_INFLUXDB3_LOG_FILTER_RE = re.compile(r"[A-Za-z0-9_=,.-]{1,128}$")
+_INFLUXDB3_PACKAGE_VERSION_RE = re.compile(r"[A-Za-z0-9.+:~_-]{1,64}$")
+# The packaged systemd unit sandboxes these trees, so a data directory beneath one
+# of them yields a service that cannot start. Mirrors the operator installer.
+_INFLUXDB3_FORBIDDEN_DATA_DIR_ROOTS = (
+    "/home",
+    "/root",
+    "/run",
+    "/tmp",
+    "/var/tmp",
+)
+_INFLUXDB3_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_INFLUXDB3_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
+_INFLUXDB3_BOOLEAN_PARAM_DEFAULTS = {
+    "enable_plugins": False,
+    "disable_telemetry": True,
+    "hold_package": True,
+    "upgrade_package": False,
+    "force_reconfigure": False,
+    "allow_plaintext_remote": False,
+}
+_INFLUXDB3_INSTALL_STRING_PARAMS = (
+    "node_id",
+    "data_dir",
+    "http_bind",
+    "tls_cert",
+    "tls_key",
+    "wal_flush_interval",
+    "log_filter",
+    "package_version",
+)
+# Explicitly FORBIDDEN, not accepted. A caller-supplied rpc_ssh_credential_pk is
+# not object-scoped against the requester (issue #203), so honouring it here would
+# let a requester use a credential they cannot view; a caller-supplied rpc_ssh_host
+# would additionally pivot the SSH destination away from the audited NetBox target.
+# The execution backend must resolve host, port, credential, and known-host policy
+# from the execution's assigned object alone — the same rule the Huawei NE8000 BGP
+# procedure follows. These names are listed so the refusal is explicit rather than a
+# generic "unsupported parameter".
+_INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+# Underscore-prefixed keys the platform itself stamps into params after schema
+# validation (intent origin markers, the frozen RQ timeout snapshot). They are not
+# caller input and must not trip the unknown-parameter guard.
+_INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
 _AKVORADO_SENSITIVE_KEY_RE = re.compile(
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
@@ -730,6 +821,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in INFLUXDB_1_PROCEDURE_NAMES:
         return _normalize_influxdb_1_execution(execution, target)
+
+    if procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES:
+        return _normalize_influxdb3_debian13_execution(execution, target)
 
     if procedure_name in AKVORADO_1_PROCEDURE_NAMES:
         return _normalize_akvorado_1_execution(execution)
@@ -1344,6 +1438,261 @@ def _normalize_influxdb_1_execution(
                 normalized["command_fingerprint"]["expiry_seconds"] = expiry
 
     _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _influxdb3_absolute_path(raw_value: object, field_name: str) -> str:
+    """Return a validated, already-canonical absolute path.
+
+    The charset permits ``.`` inside a segment (``server.crt``), so a segment that
+    is exactly ``.`` or ``..`` has to be rejected explicitly. Both matter: ``..``
+    is traversal, and ``.`` would let ``/var/./tmp/influxdb3`` pass a literal
+    prefix comparison against the forbidden ``/var/tmp`` root while still
+    resolving inside it. Requiring the value to be canonical up front is stronger
+    than normalizing it, because what gets stored, fingerprinted, approved, and
+    executed is then the same string an operator read.
+    """
+
+    value = str(raw_value or "").strip()
+    if not _INFLUXDB3_ABSOLUTE_PATH_RE.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} must be a safe absolute path without whitespace.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(value) > 255:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most 255 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(segment in {"", ".", ".."} for segment in value.split("/")[1:]):
+        raise RPCExecutionError(
+            f"{field_name} must be canonical: '.' and '..' segments are rejected.",
+            code="RPC_PARAM_INVALID",
+        )
+    if posixpath.normpath(value) != value:
+        raise RPCExecutionError(
+            f"{field_name} must already be a canonical absolute path.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _influxdb3_pattern_param(
+    raw_value: object,
+    field_name: str,
+    pattern: re.Pattern[str],
+) -> str:
+    value = str(raw_value or "").strip()
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_influxdb3_debian13_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the Debian 13 InfluxDB 3 Core preflight/install procedures.
+
+    Neither procedure accepts a token, password, or secret reference of any kind:
+    administrative credentials for this product family are created and vaulted
+    exclusively by ``service.influxdb.1.bootstrap``. Everything forwarded here is a
+    structured, charset-bounded configuration value; nothing may reach a shell.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+
+    # Worker-claim layer of the fail-closed code gate. Admission
+    # (create_execution) and advertisement (/procedures/available/) check the same
+    # shared function; this third check covers an RPCExecution row created by an
+    # older process before the gate existed, or claimed by a worker running stale
+    # code during a rolling deployment.
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    # ``target`` is an audit-only display value. Runtime host and credential
+    # resolution must use the immutable content-type + object-ID identity below,
+    # never the display string: the caller chooses assigned_object_id, so an
+    # approved installation must be pinned to the object that was approved.
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    if target_model not in _INFLUXDB3_TARGET_MODEL_LABELS:
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require a dcim.device or "
+            "virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    content_type = f"{app_label}.{model}"
+    if (
+        content_type != target_model
+        or content_type not in _INFLUXDB3_TARGET_MODEL_LABELS
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require an existing assigned "
+            "dcim.device or virtualization.virtualmachine.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            # Flat scalars, so the fingerprint stays a single-level mapping.
+            "target_content_type": content_type,
+            "target_object_id": object_id,
+        },
+    }
+
+    # The SSH destination is derived from the assigned NetBox object by the
+    # execution backend. Refuse a caller-supplied override outright, ahead of the
+    # generic unknown-parameter check, so the reason is unambiguous in the audit
+    # trail.
+    supplied_overrides = sorted(set(params) & _INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS)
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # Reject unknown params in the pure domain as well as in params_schema, so a
+    # row created by an older process (or a loosened schema) cannot smuggle a key
+    # past this boundary.
+    allowed: set[str] = set()
+    if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
+        allowed.update({"tls_cert", "tls_key"})
+    elif procedure_name == INFLUXDB3_DEBIAN13_INSTALL:
+        allowed.update(_INFLUXDB3_INSTALL_STRING_PARAMS)
+        allowed.update(_INFLUXDB3_BOOLEAN_PARAM_DEFAULTS)
+    else:
+        # Fail closed rather than silently applying the installer's parameter set
+        # to a third procedure someone later adds to the dispatch frozenset.
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+    unexpected = sorted(set(params) - allowed - _INFLUXDB3_INTERNAL_PARAM_KEYS)
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # TLS material is both-or-neither on either procedure: preflight probes exactly
+    # the pair the install would consume, so a half-specified pair is a caller bug
+    # in both directions.
+    tls_cert_present = params.get("tls_cert") not in (None, "")
+    tls_key_present = params.get("tls_key") not in (None, "")
+    if tls_cert_present != tls_key_present:
+        raise RPCExecutionError(
+            "tls_cert and tls_key must be supplied together, or neither.",
+            code="RPC_PARAM_INVALID",
+        )
+    tls_enabled = tls_cert_present and tls_key_present
+    if tls_enabled:
+        for key in ("tls_cert", "tls_key"):
+            value = _influxdb3_absolute_path(params.get(key), key)
+            normalized[key] = value
+            normalized["command_fingerprint"][key] = value
+    normalized["tls_enabled"] = tls_enabled
+    normalized["command_fingerprint"]["tls_enabled"] = tls_enabled
+
+    if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
+        return normalized
+
+    for key, default in _INFLUXDB3_BOOLEAN_PARAM_DEFAULTS.items():
+        value = _bool_param(params, key, default)
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = value
+
+    if params.get("node_id") not in (None, ""):
+        node_id = _influxdb3_pattern_param(
+            params.get("node_id"), "node_id", _INFLUXDB3_NODE_ID_RE
+        )
+        if len(node_id) > 128:
+            raise RPCExecutionError(
+                "node_id may contain at most 128 characters.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["node_id"] = node_id
+        normalized["command_fingerprint"]["node_id"] = node_id
+
+    if params.get("data_dir") not in (None, ""):
+        data_dir = _influxdb3_absolute_path(params.get("data_dir"), "data_dir")
+        for root in _INFLUXDB3_FORBIDDEN_DATA_DIR_ROOTS:
+            if data_dir == root or data_dir.startswith(f"{root}/"):
+                raise RPCExecutionError(
+                    "data_dir must not be under /home, /root, /run, /tmp, or "
+                    "/var/tmp: the packaged systemd unit sandboxes those trees.",
+                    code="RPC_PARAM_INVALID",
+                )
+        normalized["data_dir"] = data_dir
+        normalized["command_fingerprint"]["data_dir"] = data_dir
+
+    for key, pattern in (
+        ("wal_flush_interval", _INFLUXDB3_WAL_FLUSH_INTERVAL_RE),
+        ("log_filter", _INFLUXDB3_LOG_FILTER_RE),
+        ("package_version", _INFLUXDB3_PACKAGE_VERSION_RE),
+    ):
+        if params.get(key) in (None, ""):
+            continue
+        value = _influxdb3_pattern_param(params.get(key), key, pattern)
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = value
+
+    # http_bind gates the security posture below, so it is parsed even when the
+    # caller relies on the backend's loopback default.
+    bind_host = "127.0.0.1"
+    if params.get("http_bind") not in (None, ""):
+        http_bind = str(params.get("http_bind") or "").strip()
+        match = _INFLUXDB3_BIND_RE.fullmatch(http_bind)
+        if match is None:
+            raise RPCExecutionError(
+                "http_bind must use hostname-or-IPv4:port syntax, for example "
+                "127.0.0.1:8181.",
+                code="RPC_PARAM_INVALID",
+            )
+        bind_host = match.group(1)
+        bind_port = int(match.group(2))
+        if not 1 <= bind_port <= 65535:
+            raise RPCExecutionError(
+                "http_bind port must be between 1 and 65535.",
+                code="RPC_PARAM_OUT_OF_RANGE",
+            )
+        normalized["http_bind"] = f"{bind_host}:{bind_port}"
+        normalized["command_fingerprint"]["http_bind"] = normalized["http_bind"]
+
+    # The operator installer refuses to expose bearer-token authentication over
+    # plaintext HTTP. Reproduce that refusal here so the audited catalog cannot be
+    # used to stand up an unprotected remote listener by omission.
+    remote_bind = bind_host not in _INFLUXDB3_LOOPBACK_BIND_HOSTS
+    if remote_bind and not tls_enabled and not normalized["allow_plaintext_remote"]:
+        raise RPCExecutionError(
+            "Refusing to expose token authentication over plaintext HTTP: supply "
+            "tls_cert and tls_key, keep http_bind on loopback behind a TLS reverse "
+            "proxy, or set allow_plaintext_remote=true for a trusted, firewalled "
+            "network.",
+            code="RPC_PARAM_INVALID",
+        )
+    normalized["remote_bind"] = remote_bind
+    normalized["command_fingerprint"]["remote_bind"] = remote_bind
+
     return normalized
 
 

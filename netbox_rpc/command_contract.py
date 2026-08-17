@@ -232,6 +232,15 @@ EXEMPT_HANDLER_RATIONALE = {
         "Resolves an administrative nms-secret reference, creates a family-supported token, and "
         "stores the one-time plaintext through the netbox-nms secret bridge before returning metadata."
     ),
+    "os.linux_debian_13.preflight_influxdb3_core": (
+        "Collects release, architecture, systemd, package/hold, managed-config, unit, bind, and "
+        "TLS-readability facts and derives a single posture verdict from them."
+    ),
+    "os.linux_debian_13.install_influxdb3_core": (
+        "Verifies the repository key fingerprint, resolves the pinned apt candidate, renders a "
+        "managed configuration plus systemd drop-in, restarts, probes readiness, and holds the "
+        "package — sequencing no fixed argv can express."
+    ),
     "service.akvorado.1.config_read": (
         "Reads the backend-owned Akvorado config path and returns bounded file content."
     ),
