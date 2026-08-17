@@ -1,16 +1,18 @@
 """Contract tests for the Debian 13 InfluxDB 3 Core installation catalog.
 
-Two properties matter most here and are asserted against transcribed constants
-rather than values re-derived from the code under test:
+The properties that matter most are asserted against transcribed constants rather
+than values re-derived from the code under test:
 
 1. The seeded rows carry the intended gating — the installer is a write procedure
    that requires approval, the posture read is neither.
-2. The normalizer refuses, in the pure domain, every input the operator installer
+2. Neither procedure accepts a credential *or* an SSH override, so the execution
+   backend can only reach the execution's assigned NetBox object.
+3. The normalizer refuses, in the pure domain, every input the operator installer
    refuses — most importantly a remote bind with no TLS and no explicit
-   ``allow_plaintext_remote`` opt-in.
+   ``allow_plaintext_remote`` opt-in, and any non-canonical data directory.
+4. A success envelope cannot describe a failed or partial installation.
 
-Neither procedure may declare or forward any credential parameter: administrative
-tokens for this product family belong exclusively to
+Administrative tokens for this product family belong exclusively to
 ``service.influxdb.1.bootstrap``.
 """
 
@@ -61,6 +63,33 @@ SECRET_SHAPED_PARAM_NAMES = (
     "token_output_file",
     "admin_token_name",
 )
+# The shared connection-override contract, deliberately NOT offered here: a
+# caller-supplied credential pk is not object-scoped against the requester, and a
+# caller-supplied host would pivot SSH away from the audited target.
+FORBIDDEN_SSH_OVERRIDES = (
+    "rpc_ssh_credential_pk",
+    "rpc_ssh_host",
+    "rpc_ssh_port",
+    "rpc_ssh_known_hosts_entry",
+    "rpc_ssh_strict_host_key_checking",
+)
+A_SUCCESSFUL_INSTALL_RESULT = {
+    "ok": True,
+    "procedure": INSTALL,
+    "target": "influx01",
+    "installed": True,
+    "package_version": "3.11.0-1",
+    "service_state": "active",
+    "service_enabled": "enabled",
+    "http_bind": "127.0.0.1:8181",
+    "node_id": "influx01-node",
+    "data_dir": "/var/lib/influxdb3/data",
+    "config_path": "/etc/influxdb3/influxdb3-core.conf",
+    "plugins_enabled": False,
+    "package_held": True,
+    "ready": True,
+    "stage": "complete",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -138,10 +167,10 @@ def test_seed_creates_two_procedures_with_the_intended_gating(
         assert "_" not in command["argv"][1]
 
 
-def test_seed_declares_no_credential_parameter(
+def test_seed_declares_no_credential_or_ssh_override_parameter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Token creation belongs to service.influxdb.1.bootstrap, not to these rows."""
+    """Token creation belongs to service.influxdb.1.bootstrap; SSH comes from target."""
 
     procedures, _ = _run_procedure_seed(monkeypatch)
 
@@ -152,9 +181,10 @@ def test_seed_declares_no_credential_parameter(
         for forbidden in SECRET_SHAPED_PARAM_NAMES:
             assert forbidden not in params_properties, (name, forbidden)
             assert forbidden not in result_properties, (name, forbidden)
-        # rpc_ssh_credential_pk is the shared connection override, the only
-        # credential *reference* either procedure may carry.
-        assert "rpc_ssh_credential_pk" in params_properties
+        for forbidden in FORBIDDEN_SSH_OVERRIDES:
+            assert forbidden not in params_properties, (name, forbidden)
+        # Nothing is required, so a run can be issued with no parameters at all.
+        assert row["params_schema"]["required"] == []
 
 
 def test_seed_patterns_are_anchored_against_the_trailing_newline_bypass(
@@ -197,8 +227,13 @@ def test_install_schema_rejects_unsafe_shapes(
 
     for params in (
         {"data_dir": "/var/lib/../etc/influxdb3"},  # traversal
+        {"data_dir": "/var/./tmp/influxdb3"},  # single-dot segment
+        {"data_dir": "/./tmp/influxdb3"},
+        {"data_dir": "/var/lib/influxdb3/."},
+        {"data_dir": "/.."},
         {"data_dir": "relative/path"},  # not absolute
         {"data_dir": "/var/lib/influx db3"},  # whitespace
+        {"data_dir": "/var/lib/influxdb3/"},  # trailing separator
         {"node_id": "-leading-hyphen"},  # could read as an option
         {"node_id": "trailing-hyphen-"},
         {"http_bind": "127.0.0.1"},  # missing port
@@ -208,7 +243,10 @@ def test_install_schema_rejects_unsafe_shapes(
         {"log_filter": "info;rm -rf /"},
         {"package_version": "3.11.0 && id"},
         {"tls_cert": "../relative.pem"},
+        {"tls_cert": "/etc/influxdb3/../../root/key.pem"},
         {"unknown_param": "x"},  # additionalProperties: false
+        # The shared SSH overrides are refused by the schema, not just the normalizer.
+        *({override: "x"} for override in FORBIDDEN_SSH_OVERRIDES),
     ):
         with pytest.raises(ValidationError):
             validate(params, schema)
@@ -227,10 +265,115 @@ def test_install_schema_rejects_unsafe_shapes(
         },
         schema,
     )
+    # A path whose *segment* merely contains a dot is legitimate.
+    validate({"tls_cert": "/etc/influxdb3/tls/server.crt"}, schema)
     assert "\\u0000" not in json.dumps(schema)
 
 
-def test_seed_reverse_removes_only_its_own_rows(
+def test_every_result_string_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """event_store silently clamps unbounded strings at 4096 characters.
+
+    An unbounded audit field would therefore be truncated with no validation error,
+    and a malformed backend could return an arbitrarily large valid result.
+    """
+
+    procedures, _ = _run_procedure_seed(monkeypatch)
+
+    for name in (PREFLIGHT, INSTALL):
+        schema = procedures.rows[name]["result_schema"]
+        for field, spec in schema["properties"].items():
+            if not isinstance(spec, dict):
+                continue
+            if spec.get("type") == "string" or "const" in spec:
+                # A closed value set bounds the field just as well as maxLength.
+                if "enum" in spec:
+                    assert all(len(v) <= 4096 for v in spec["enum"]), (name, field)
+                elif "const" in spec:
+                    assert len(str(spec["const"])) <= 4096, (name, field)
+                else:
+                    assert "maxLength" in spec, (name, field)
+                    assert 0 < spec["maxLength"] <= 4096, (name, field)
+            if spec.get("type") == "array":
+                assert "maxItems" in spec, (name, field)
+                assert "maxLength" in spec["items"], (name, field)
+        # The procedure identity is a constant, so a backend cannot relabel a run.
+        assert schema["properties"]["procedure"] == {"const": name}
+
+
+def test_install_result_cannot_report_success_for_a_failed_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """event_store derives ExecutionSucceeded from the outer envelope ok.
+
+    So the nested result must not be allowed to say ok=true while describing an
+    incomplete installation, or a partial install would be recorded as a success.
+    """
+
+    procedures, _ = _run_procedure_seed(monkeypatch)
+    schema = procedures.rows[INSTALL]["result_schema"]
+
+    validate(A_SUCCESSFUL_INSTALL_RESULT, schema)
+
+    for override in (
+        {"installed": False},
+        {"ready": False},
+        {"stage": "package"},
+        {"stage": "activate"},
+        {"stage": "verify"},
+    ):
+        with pytest.raises(ValidationError):
+            validate({**A_SUCCESSFUL_INSTALL_RESULT, **override}, schema)
+
+    # A genuine failure envelope stays representable, including a partial stage.
+    validate(
+        {
+            **A_SUCCESSFUL_INSTALL_RESULT,
+            "ok": False,
+            "installed": False,
+            "ready": False,
+            "stage": "package",
+            "error": "apt candidate 3.11.0 not offered by the repository",
+        },
+        schema,
+    )
+
+    # stage and ready are mandatory: an omitted field cannot mean "assume fine".
+    for dropped in ("stage", "ready", "installed", "package_held"):
+        incomplete = dict(A_SUCCESSFUL_INSTALL_RESULT)
+        incomplete.pop(dropped)
+        with pytest.raises(ValidationError):
+            validate(incomplete, schema)
+
+    # A relabelled procedure identity is refused.
+    with pytest.raises(ValidationError):
+        validate({**A_SUCCESSFUL_INSTALL_RESULT, "procedure": PREFLIGHT}, schema)
+
+
+def test_seed_reverse_preserves_procedures_that_have_execution_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RPCExecution.procedure is PROTECT, so a bulk delete would abort the downgrade."""
+
+    procedures, _ = _run_procedure_seed(monkeypatch)
+    procedures.rows["service.influxdb.1.bootstrap"] = {"handler_id": "unrelated"}
+    # The installer has run, so its row is protected; the read procedure has not.
+    procedures.protected.add(INSTALL)
+
+    migration = sys.modules[PROCEDURE_MIGRATION]
+    apps = SimpleNamespace(
+        get_model=lambda app_label, model_name: _expect_model(
+            (app_label, model_name), ("netbox_rpc", "RPCProcedure"), procedures
+        )
+    )
+    migration.unseed_influxdb3_debian13_procedures(apps, None)
+
+    # Unreferenced seed row deleted; protected row preserved but forced disabled;
+    # the unrelated procedure untouched.
+    assert set(procedures.rows) == {INSTALL, "service.influxdb.1.bootstrap"}
+    assert procedures.rows[INSTALL]["enabled"] is False
+
+
+def test_seed_reverse_removes_both_rows_when_unreferenced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     procedures, _ = _run_procedure_seed(monkeypatch)
@@ -299,25 +442,22 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_preflight_normalizes_to_a_read_only_posture_probe(jobs_module) -> None:
-    normalized = jobs_module.normalize_execution_params(
-        _execution(PREFLIGHT, {**_ssh_params()})
-    )
+    normalized = jobs_module.normalize_execution_params(_execution(PREFLIGHT, {}))
 
     assert normalized["target"] == "influx01"
     assert normalized["tls_enabled"] is False
-    assert normalized["rpc_ssh_host"] == "influx01.example.net"
-    assert normalized["rpc_ssh_credential_pk"] == 17
     assert normalized["command_fingerprint"]["handler_id"] == HANDLERS[PREFLIGHT]
     assert normalized["command_fingerprint"]["procedure"] == PREFLIGHT
+    # No SSH routing is emitted: the backend resolves it from the assigned object.
+    for key in FORBIDDEN_SSH_OVERRIDES:
+        assert key not in normalized
     # Install-only knobs are never invented for the read procedure.
     for key in ("hold_package", "node_id", "data_dir", "remote_bind"):
         assert key not in normalized
 
 
 def test_install_applies_the_documented_defaults(jobs_module) -> None:
-    normalized = jobs_module.normalize_execution_params(
-        _execution(INSTALL, {**_ssh_params()})
-    )
+    normalized = jobs_module.normalize_execution_params(_execution(INSTALL, {}))
 
     assert normalized["enable_plugins"] is False
     assert normalized["disable_telemetry"] is True
@@ -329,6 +469,8 @@ def test_install_applies_the_documented_defaults(jobs_module) -> None:
     # posture is still evaluated as loopback rather than left undefined.
     assert normalized["remote_bind"] is False
     assert normalized["tls_enabled"] is False
+    for key in FORBIDDEN_SSH_OVERRIDES:
+        assert key not in normalized
     for key, value in normalized["command_fingerprint"].items():
         assert not isinstance(value, (dict, list)), key
 
@@ -346,7 +488,6 @@ def test_install_forwards_only_validated_configuration(jobs_module) -> None:
                 "package_version": "3.11.0-1",
                 "enable_plugins": True,
                 "disable_telemetry": False,
-                **_ssh_params(),
             },
         )
     )
@@ -372,7 +513,6 @@ def test_install_accepts_a_remote_bind_with_tls(jobs_module) -> None:
                 "http_bind": "10.0.30.150:8181",
                 "tls_cert": "/etc/letsencrypt/live/influx.example.net/fullchain.pem",
                 "tls_key": "/etc/letsencrypt/live/influx.example.net/privkey.pem",
-                **_ssh_params(),
             },
         )
     )
@@ -385,7 +525,7 @@ def test_install_accepts_a_remote_bind_with_tls(jobs_module) -> None:
 def test_install_accepts_a_remote_plaintext_bind_only_on_explicit_opt_in(
     jobs_module,
 ) -> None:
-    params = {"http_bind": "10.0.30.150:8181", **_ssh_params()}
+    params = {"http_bind": "10.0.30.150:8181"}
 
     with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
         jobs_module.normalize_execution_params(_execution(INSTALL, dict(params)))
@@ -398,6 +538,26 @@ def test_install_accepts_a_remote_plaintext_bind_only_on_explicit_opt_in(
     assert normalized["remote_bind"] is True
     assert normalized["tls_enabled"] is False
     assert normalized["allow_plaintext_remote"] is True
+
+
+@pytest.mark.parametrize("procedure_name", [PREFLIGHT, INSTALL])
+@pytest.mark.parametrize("override", FORBIDDEN_SSH_OVERRIDES)
+def test_normalizer_refuses_caller_supplied_ssh_overrides(
+    jobs_module, procedure_name: str, override: str
+) -> None:
+    """A caller must not choose the credential or the SSH destination.
+
+    ``rpc_ssh_credential_pk`` is not object-scoped against the requester, and
+    ``rpc_ssh_host`` would move execution off the audited NetBox target.
+    """
+
+    value = 22 if override in {"rpc_ssh_credential_pk", "rpc_ssh_port"} else "attacker"
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(
+            _execution(procedure_name, {override: value})
+        )
+    assert excinfo.value.code == "RPC_PARAM_INVALID"
+    assert override in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -415,8 +575,18 @@ def test_install_accepts_a_remote_plaintext_bind_only_on_explicit_opt_in(
         (INSTALL, {"data_dir": "/run/influxdb3"}, "RPC_PARAM_INVALID"),
         # Exact-root forms, not just prefixed children.
         (INSTALL, {"data_dir": "/tmp"}, "RPC_PARAM_INVALID"),
-        # Unsafe or malformed values.
+        # Non-canonical paths that resolve *into* a forbidden root: a literal
+        # prefix comparison alone would let these through.
+        (INSTALL, {"data_dir": "/var/./tmp/influxdb3"}, "RPC_PARAM_INVALID"),
+        (INSTALL, {"data_dir": "/./tmp/influxdb3"}, "RPC_PARAM_INVALID"),
+        (INSTALL, {"data_dir": "/var/lib/../tmp/influxdb3"}, "RPC_PARAM_INVALID"),
+        (INSTALL, {"data_dir": "/var/lib/influxdb3/."}, "RPC_PARAM_INVALID"),
         (INSTALL, {"data_dir": "/var/lib/../etc/influxdb3"}, "RPC_PARAM_INVALID"),
+        (
+            PREFLIGHT,
+            {"tls_cert": "/etc/./tls/a.pem", "tls_key": "/etc/tls/b.pem"},
+            "RPC_PARAM_INVALID",
+        ),
         (INSTALL, {"data_dir": "not-absolute"}, "RPC_PARAM_INVALID"),
         (INSTALL, {"node_id": "-dash-first"}, "RPC_PARAM_INVALID"),
         (INSTALL, {"node_id": "has space"}, "RPC_PARAM_INVALID"),
@@ -439,10 +609,26 @@ def test_normalizer_rejects_unsafe_inputs(
     jobs_module, procedure_name: str, params: dict, expected_code: str
 ) -> None:
     with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
-        jobs_module.normalize_execution_params(
-            _execution(procedure_name, {**params, **_ssh_params()})
-        )
+        jobs_module.normalize_execution_params(_execution(procedure_name, params))
     assert excinfo.value.code == expected_code
+
+
+def test_normalizer_accepts_a_dot_inside_a_path_segment(jobs_module) -> None:
+    """Rejecting '.' segments must not reject a legitimate dotted filename."""
+
+    normalized = jobs_module.normalize_execution_params(
+        _execution(
+            INSTALL,
+            {
+                "tls_cert": "/etc/influxdb3/tls/server.crt",
+                "tls_key": "/etc/influxdb3/tls/server.key",
+                "data_dir": "/srv/influx.db3/data",
+            },
+        )
+    )
+
+    assert normalized["tls_cert"] == "/etc/influxdb3/tls/server.crt"
+    assert normalized["data_dir"] == "/srv/influx.db3/data"
 
 
 def test_normalizer_tolerates_platform_stamped_internal_params(jobs_module) -> None:
@@ -455,7 +641,6 @@ def test_normalizer_tolerates_platform_stamped_internal_params(jobs_module) -> N
                 "_intent": 7,
                 "_intent_name": "influxdb.provision",
                 "_timeout_seconds_snapshot": 900,
-                **_ssh_params(),
             },
         )
     )
@@ -492,60 +677,11 @@ def test_normalizer_fails_closed_for_an_unrecognised_family_member(
 def test_normalized_payload_never_carries_secret_shaped_keys(jobs_module) -> None:
     for procedure_name in (PREFLIGHT, INSTALL):
         normalized = jobs_module.normalize_execution_params(
-            _execution(procedure_name, {**_ssh_params()})
+            _execution(procedure_name, {})
         )
         serialized = json.dumps(normalized).lower()
-        for forbidden in ("token", "password", "passphrase", "nms-secret"):
+        for forbidden in ("token", "password", "passphrase", "nms-secret", "rpc_ssh"):
             assert forbidden not in serialized, (procedure_name, forbidden)
-
-
-def test_install_result_schema_reports_the_installer_summary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    procedures, _ = _run_procedure_seed(monkeypatch)
-    schema = procedures.rows[INSTALL]["result_schema"]
-
-    validate(
-        {
-            "ok": True,
-            "procedure": INSTALL,
-            "target": "influx01",
-            "installed": True,
-            "package_version": "3.11.0-1",
-            "service_state": "active",
-            "service_enabled": "enabled",
-            "http_bind": "127.0.0.1:8181",
-            "node_id": "influx01-node",
-            "data_dir": "/var/lib/influxdb3/data",
-            "config_path": "/etc/influxdb3/influxdb3-core.conf",
-            "plugins_enabled": False,
-            "package_held": True,
-            "stage": "complete",
-        },
-        schema,
-    )
-    with pytest.raises(ValidationError):
-        validate({"ok": True, "procedure": INSTALL, "target": "influx01"}, schema)
-    with pytest.raises(ValidationError):
-        validate(
-            {
-                "ok": True,
-                "procedure": INSTALL,
-                "target": "influx01",
-                "installed": True,
-                "package_version": "3.11.0-1",
-                "service_state": "active",
-                "service_enabled": "enabled",
-                "http_bind": "127.0.0.1:8181",
-                "node_id": "influx01-node",
-                "data_dir": "/var/lib/influxdb3/data",
-                "config_path": "/etc/influxdb3/influxdb3-core.conf",
-                "plugins_enabled": False,
-                "package_held": True,
-                "stage": "not-a-declared-stage",
-            },
-            schema,
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -591,20 +727,30 @@ def _execution(procedure_name: str, params: dict[str, object]):
     )
 
 
-def _ssh_params() -> dict[str, object]:
-    return {
-        "rpc_ssh_host": "influx01.example.net",
-        "rpc_ssh_credential_pk": 17,
-        "rpc_ssh_port": 22,
-        "rpc_ssh_known_hosts_entry": "influx01.example.net ssh-ed25519 AAAA",
-        "rpc_ssh_strict_host_key_checking": True,
-    }
+class _ProtectedError(Exception):
+    """Stand-in for django.db.models.deletion.ProtectedError."""
 
 
 class _FakeProcedure:
-    def __init__(self, name: str, data: dict[str, object]) -> None:
+    def __init__(self, manager: "_FakeProcedureManager", name: str, data: dict) -> None:
+        self._manager = manager
         self.name = name
         self.handler_id = str(data["handler_id"])
+        self.enabled = bool(data.get("enabled", True))
+
+    def delete(self) -> None:
+        if self.name in self._manager.protected:
+            raise self._manager.protected_error_class(
+                f"{self.name} is referenced by execution history"
+            )
+        self._manager.rows.pop(self.name, None)
+
+    def save(self, update_fields=None) -> None:
+        row = self._manager.rows.get(self.name)
+        if row is None:
+            raise AssertionError(f"saving a deleted row: {self.name}")
+        for field in update_fields or ("enabled",):
+            row[field] = getattr(self, field)
 
 
 class _ProcedureQuery:
@@ -613,25 +759,32 @@ class _ProcedureQuery:
         self.names = names
 
     def __iter__(self):
-        for name, row in self.manager.rows.items():
+        for name, row in list(self.manager.rows.items()):
             if name in self.names:
-                yield _FakeProcedure(name, row)
+                yield _FakeProcedure(self.manager, name, row)
+
+    def first(self):
+        return next(iter(self), None)
 
     def delete(self) -> None:
         for procedure in list(self):
-            self.manager.rows.pop(procedure.name, None)
+            procedure.delete()
 
 
 class _FakeProcedureManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
+        self.protected: set[str] = set()
+        self.protected_error_class = _ProtectedError
 
     def update_or_create(self, *, name: str, defaults: dict[str, object]):
         self.rows[name] = dict(defaults)
-        return _FakeProcedure(name, self.rows[name]), True
+        return _FakeProcedure(self, name, self.rows[name]), True
 
-    def filter(self, *, name__in):
-        return _ProcedureQuery(self, set(name__in))
+    def filter(self, *, name=None, name__in=None):
+        if name is not None:
+            return _ProcedureQuery(self, {name})
+        return _ProcedureQuery(self, set(name__in or ()))
 
 
 class _FakeCommandManager:
@@ -677,6 +830,11 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_migrations.Migration = type("Migration", (), {})
     django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
     django_db.migrations = django_migrations
+    django_models = types.ModuleType("django.db.models")
+    django_deletion = types.ModuleType("django.db.models.deletion")
+    django_deletion.ProtectedError = _ProtectedError
+    django_models.deletion = django_deletion
+    django_db.models = django_models
     django.db = django_db
 
     monkeypatch.setitem(sys.modules, "netbox", netbox)
@@ -684,6 +842,8 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     monkeypatch.setitem(sys.modules, "django.db.migrations", django_migrations)
+    monkeypatch.setitem(sys.modules, "django.db.models", django_models)
+    monkeypatch.setitem(sys.modules, "django.db.models.deletion", django_deletion)
 
 
 def _install_runtime_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:

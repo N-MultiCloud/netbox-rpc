@@ -13,39 +13,40 @@ session, which estate policy forbids. These two procedures close that gap:
   fingerprint-verified repository key, pinned package install, managed configuration,
   systemd drop-in, restart, readiness probe, and package hold.
 
-**No credential is generated, accepted, or returned here.** The first administrative
-token is created and vaulted exclusively by the pre-existing typed procedure
-``service.influxdb.1.bootstrap`` (``family="core3"``, migration ``0056``), which stores
-the plaintext through the netbox-nms secret bridge and returns only an ``nms-secret:``
-reference. Operators chain ``preflight`` -> ``install`` ->
-``service.influxdb.1.bootstrap`` so the product family keeps exactly one token
+**No credential of any kind is accepted, generated, or returned here.** Neither
+procedure declares the shared ``rpc_ssh_*`` connection overrides: the execution
+backend must resolve the SSH destination, credential, and known-host policy
+exclusively from the execution's assigned NetBox object, exactly as
+``network.device.huawei.router.ne8000.f1a.show_bgp_peer`` does. Accepting a
+caller-supplied ``rpc_ssh_credential_pk``/``rpc_ssh_host`` would let a requester
+select a credential they cannot view and pivot SSH away from the authorized target,
+because that parameter is not yet object-scoped against the requester (issue #203).
+The first administrative token is likewise created and vaulted only by the
+pre-existing ``service.influxdb.1.bootstrap`` (``family="core3"``, migration
+``0056``), which stores the plaintext through the netbox-nms secret bridge and
+returns an ``nms-secret:`` reference. Operators chain ``preflight`` -> ``install``
+-> ``service.influxdb.1.bootstrap`` so the product family keeps exactly one token
 contract.
 
 Every ``pattern`` below is anchored with ``(?![\\s\\S])`` rather than ``$``, because
 ``jsonschema`` applies ``pattern`` with ``re.search`` and Python's ``$`` also matches
-immediately before a single trailing newline.
+immediately before a single trailing newline. Every result string carries an explicit
+``maxLength``: ``event_store`` silently clamps unbounded strings at 4096 characters,
+which would quietly truncate the audited completion report, and an unbounded contract
+lets a malformed backend return an arbitrarily large valid result.
 """
 
 from django.db import migrations
+from django.db.models.deletion import ProtectedError
 
 _TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
 
-_SSH_PROPERTIES = {
-    "rpc_ssh_credential_pk": {"type": "integer", "minimum": 1},
-    "rpc_ssh_host": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 255,
-        "pattern": r"^[^\s\x00-\x1f]{1,255}(?![\s\S])",
-    },
-    "rpc_ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535},
-    "rpc_ssh_known_hosts_entry": {"type": "string", "maxLength": 16384},
-    "rpc_ssh_strict_host_key_checking": {"type": "boolean"},
-}
-
-# Absolute path, no whitespace, no traversal segment, no control characters.
+# Absolute path: no whitespace, no control characters, and no "." or ".." segment.
+# The normalizer re-checks the segments, because a charset alone cannot express
+# "no dot segment" without this negative lookahead.
 _ABSOLUTE_PATH_PATTERN = (
-    r"^(?!.*(?:^|/)\.\.(?:/|$))/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*(?![\s\S])"
+    r"^(?!(?:.*/)?\.{1,2}(?:/|(?![\s\S])))"
+    r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*(?![\s\S])"
 )
 _ABSOLUTE_PATH = {
     "type": "string",
@@ -88,46 +89,62 @@ _PACKAGE_VERSION = {
     "description": "Exact apt candidate version, as shown by apt-cache policy.",
 }
 
-_COMMON_RESULT_PROPERTIES = {
-    "ok": {"type": "boolean"},
-    "procedure": {"type": "string"},
-    "target": {"type": "string"},
-}
+_SHORT_TEXT = {"type": "string", "maxLength": 64}
+_IDENTIFIER_TEXT = {"type": "string", "maxLength": 128}
+_PATH_TEXT = {"type": "string", "maxLength": 255}
+_URL_TEXT = {"type": "string", "maxLength": 512}
 _UNIT_STATE_PROPERTIES = {
-    "unit": {"type": "string"},
-    "load_state": {"type": "string"},
-    "active_state": {"type": "string"},
-    "sub_state": {"type": "string"},
-    "unit_file_state": {"type": "string"},
+    "unit": _IDENTIFIER_TEXT,
+    "load_state": _SHORT_TEXT,
+    "active_state": _SHORT_TEXT,
+    "sub_state": _SHORT_TEXT,
+    "unit_file_state": _SHORT_TEXT,
 }
 
 
-def _params(required=(), properties=None):
+def _params(properties=None):
+    """Build a closed params schema.
+
+    Deliberately does NOT merge the shared ``rpc_ssh_*`` connection overrides — see
+    the module docstring. Adding them back would reopen the unscoped-credential and
+    SSH-pivot gap.
+    """
+
     return {
         "type": "object",
-        "required": list(required),
+        "required": [],
         "additionalProperties": False,
-        "properties": {**(properties or {}), **_SSH_PROPERTIES},
+        "properties": dict(properties or {}),
     }
 
 
-def _result(required=(), properties=None):
+def _result(procedure_name, required=(), properties=None):
     return {
         "type": "object",
         "required": ["ok", "procedure", "target", *required],
         "additionalProperties": False,
-        "properties": {**_COMMON_RESULT_PROPERTIES, **(properties or {})},
+        "properties": {
+            "ok": {"type": "boolean"},
+            # Constant per row: the backend cannot relabel which procedure ran.
+            "procedure": {"const": procedure_name},
+            "target": {"type": "string", "maxLength": 255},
+            **(properties or {}),
+        },
     }
 
 
+_PREFLIGHT_NAME = "os.linux.debian.13.preflight_influxdb3_core"
+_INSTALL_NAME = "os.linux.debian.13.install_influxdb3_core"
+
 _PREFLIGHT_PARAMS = _params(
-    properties={
+    {
         "tls_cert": _ABSOLUTE_PATH,
         "tls_key": _ABSOLUTE_PATH,
     }
 )
 
 _PREFLIGHT_RESULT = _result(
+    _PREFLIGHT_NAME,
     (
         "supported",
         "os_id",
@@ -142,22 +159,22 @@ _PREFLIGHT_RESULT = _result(
     ),
     {
         "supported": {"type": "boolean"},
-        "os_id": {"type": "string"},
-        "os_version_id": {"type": "string"},
-        "architecture": {"type": "string"},
+        "os_id": _SHORT_TEXT,
+        "os_version_id": _SHORT_TEXT,
+        "architecture": _SHORT_TEXT,
         "systemd_present": {"type": "boolean"},
         "package_installed": {"type": "boolean"},
-        "package_version": {"type": "string"},
+        "package_version": _IDENTIFIER_TEXT,
         "package_held": {"type": "boolean"},
-        "binary_version": {"type": "string"},
+        "binary_version": _IDENTIFIER_TEXT,
         "service_account_present": {"type": "boolean"},
         "config_present": {"type": "boolean"},
         "config_managed": {"type": "boolean"},
-        "config_path": {"type": "string"},
+        "config_path": _PATH_TEXT,
         "installer_state_present": {"type": "boolean"},
-        "http_bind": {"type": "string"},
-        "node_id": {"type": "string"},
-        "data_dir": {"type": "string"},
+        "http_bind": {"type": "string", "maxLength": 261},
+        "node_id": _IDENTIFIER_TEXT,
+        "data_dir": _PATH_TEXT,
         "data_dir_populated": {"type": "boolean"},
         "plugins_enabled": {"type": "boolean"},
         "telemetry_upload_disabled": {"type": "boolean"},
@@ -175,7 +192,7 @@ _PREFLIGHT_RESULT = _result(
 )
 
 _INSTALL_PARAMS = _params(
-    properties={
+    {
         "node_id": _NODE_ID,
         "data_dir": _ABSOLUTE_PATH,
         "http_bind": _HTTP_BIND,
@@ -194,6 +211,7 @@ _INSTALL_PARAMS = _params(
 )
 
 _INSTALL_RESULT = _result(
+    _INSTALL_NAME,
     (
         "installed",
         "package_version",
@@ -205,19 +223,21 @@ _INSTALL_RESULT = _result(
         "config_path",
         "plugins_enabled",
         "package_held",
+        "ready",
+        "stage",
     ),
     {
         "installed": {"type": "boolean"},
-        "package_version": {"type": "string"},
-        "binary_version": {"type": "string"},
-        "service_state": {"type": "string"},
-        "service_enabled": {"type": "string"},
-        "http_bind": {"type": "string"},
-        "base_url": {"type": "string"},
-        "node_id": {"type": "string"},
-        "data_dir": {"type": "string"},
-        "config_path": {"type": "string"},
-        "installer_state_path": {"type": "string"},
+        "package_version": _IDENTIFIER_TEXT,
+        "binary_version": _IDENTIFIER_TEXT,
+        "service_state": _SHORT_TEXT,
+        "service_enabled": _SHORT_TEXT,
+        "http_bind": {"type": "string", "maxLength": 261},
+        "base_url": _URL_TEXT,
+        "node_id": _IDENTIFIER_TEXT,
+        "data_dir": _PATH_TEXT,
+        "config_path": _PATH_TEXT,
+        "installer_state_path": _PATH_TEXT,
         "plugins_enabled": {"type": "boolean"},
         "telemetry_upload_disabled": {"type": "boolean"},
         "tls_enabled": {"type": "boolean"},
@@ -249,10 +269,26 @@ _INSTALL_RESULT = _result(
         **_UNIT_STATE_PROPERTIES,
     },
 )
+# A success envelope must actually describe a completed installation. Without this,
+# a nested result carrying ok=false / installed=false / stage="package" still
+# validates, and event_store selects ExecutionSucceeded from the *outer* response
+# ok — so a failed or partial install would be recorded as successful. Mirrors the
+# closed oneOf envelope used by service.netbox.staging.rotate_backend_token.
+_INSTALL_RESULT["oneOf"] = [
+    {
+        "properties": {
+            "ok": {"const": True},
+            "installed": {"const": True},
+            "ready": {"const": True},
+            "stage": {"const": "complete"},
+        }
+    },
+    {"properties": {"ok": {"const": False}}},
+]
 
 _PROCEDURES = (
     {
-        "name": "os.linux.debian.13.preflight_influxdb3_core",
+        "name": _PREFLIGHT_NAME,
         "handler_id": "os.linux_debian_13.preflight_influxdb3_core",
         "effect": "read",
         "timeout_seconds": 60,
@@ -267,7 +303,7 @@ _PROCEDURES = (
         "command_slug": "influxdb3-core-preflight",
     },
     {
-        "name": "os.linux.debian.13.install_influxdb3_core",
+        "name": _INSTALL_NAME,
         "handler_id": "os.linux_debian_13.install_influxdb3_core",
         "effect": "write",
         "timeout_seconds": 900,
@@ -326,8 +362,25 @@ def seed_influxdb3_debian13_procedures(apps, schema_editor):
 
 
 def unseed_influxdb3_debian13_procedures(apps, schema_editor):
+    """Delete an unreferenced seed; preserve referenced history, forced disabled.
+
+    ``RPCExecution.procedure`` is ``on_delete=PROTECT``, so a bulk delete would
+    raise ``ProtectedError`` and abort the whole downgrade once either procedure has
+    run. Per-procedure handling matches migration ``0068``: audited execution
+    history is never destroyed, and a preserved row is left disabled so it cannot be
+    dispatched after the reversal.
+    """
+
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    RPCProcedure.objects.filter(name__in=[row["name"] for row in _PROCEDURES]).delete()
+    for row in _PROCEDURES:
+        procedure = RPCProcedure.objects.filter(name=row["name"]).first()
+        if procedure is None:
+            continue
+        try:
+            procedure.delete()
+        except ProtectedError:
+            procedure.enabled = False
+            procedure.save(update_fields=["enabled"])
 
 
 class Migration(migrations.Migration):

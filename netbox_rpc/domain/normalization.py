@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
@@ -369,7 +370,15 @@ _INFLUXDB3_INSTALL_STRING_PARAMS = (
     "log_filter",
     "package_version",
 )
-_INFLUXDB3_SSH_OVERRIDE_PARAMS = frozenset(
+# Explicitly FORBIDDEN, not accepted. A caller-supplied rpc_ssh_credential_pk is
+# not object-scoped against the requester (issue #203), so honouring it here would
+# let a requester use a credential they cannot view; a caller-supplied rpc_ssh_host
+# would additionally pivot the SSH destination away from the audited NetBox target.
+# The execution backend must resolve host, port, credential, and known-host policy
+# from the execution's assigned object alone — the same rule the Huawei NE8000 BGP
+# procedure follows. These names are listed so the refusal is explicit rather than a
+# generic "unsupported parameter".
+_INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
     {
         "rpc_ssh_credential_pk",
         "rpc_ssh_host",
@@ -1411,7 +1420,16 @@ def _normalize_influxdb_1_execution(
 
 
 def _influxdb3_absolute_path(raw_value: object, field_name: str) -> str:
-    """Return a validated absolute path with no traversal segment."""
+    """Return a validated, already-canonical absolute path.
+
+    The charset permits ``.`` inside a segment (``server.crt``), so a segment that
+    is exactly ``.`` or ``..`` has to be rejected explicitly. Both matter: ``..``
+    is traversal, and ``.`` would let ``/var/./tmp/influxdb3`` pass a literal
+    prefix comparison against the forbidden ``/var/tmp`` root while still
+    resolving inside it. Requiring the value to be canonical up front is stronger
+    than normalizing it, because what gets stored, fingerprinted, approved, and
+    executed is then the same string an operator read.
+    """
 
     value = str(raw_value or "").strip()
     if not _INFLUXDB3_ABSOLUTE_PATH_RE.fullmatch(value):
@@ -1424,11 +1442,14 @@ def _influxdb3_absolute_path(raw_value: object, field_name: str) -> str:
             f"{field_name} may contain at most 255 characters.",
             code="RPC_PARAM_INVALID",
         )
-    # fullmatch on the charset already excludes "..", but re-check the resolved
-    # segments so a future pattern relaxation cannot reintroduce traversal.
-    if any(segment == ".." for segment in value.split("/")):
+    if any(segment in {"", ".", ".."} for segment in value.split("/")[1:]):
         raise RPCExecutionError(
-            f"{field_name} must not contain a path traversal segment.",
+            f"{field_name} must be canonical: '.' and '..' segments are rejected.",
+            code="RPC_PARAM_INVALID",
+        )
+    if posixpath.normpath(value) != value:
+        raise RPCExecutionError(
+            f"{field_name} must already be a canonical absolute path.",
             code="RPC_PARAM_INVALID",
         )
     return value
@@ -1470,10 +1491,24 @@ def _normalize_influxdb3_debian13_execution(
         },
     }
 
+    # The SSH destination is derived from the assigned NetBox object by the
+    # execution backend. Refuse a caller-supplied override outright, ahead of the
+    # generic unknown-parameter check, so the reason is unambiguous in the audit
+    # trail.
+    supplied_overrides = sorted(set(params) & _INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS)
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+
     # Reject unknown params in the pure domain as well as in params_schema, so a
     # row created by an older process (or a loosened schema) cannot smuggle a key
     # past this boundary.
-    allowed = set(_INFLUXDB3_SSH_OVERRIDE_PARAMS)
+    allowed: set[str] = set()
     if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
         allowed.update({"tls_cert", "tls_key"})
     elif procedure_name == INFLUXDB3_DEBIAN13_INSTALL:
@@ -1513,7 +1548,6 @@ def _normalize_influxdb3_debian13_execution(
     normalized["command_fingerprint"]["tls_enabled"] = tls_enabled
 
     if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
-        _copy_optional_ssh_overrides(params, normalized)
         return normalized
 
     for key, default in _INFLUXDB3_BOOLEAN_PARAM_DEFAULTS.items():
@@ -1593,7 +1627,6 @@ def _normalize_influxdb3_debian13_execution(
     normalized["remote_bind"] = remote_bind
     normalized["command_fingerprint"]["remote_bind"] = remote_bind
 
-    _copy_optional_ssh_overrides(params, normalized)
     return normalized
 
 

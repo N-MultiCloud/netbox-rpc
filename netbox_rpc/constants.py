@@ -270,9 +270,7 @@ INFLUXDB_1_PROCEDURE_NAMES = frozenset(
 # that already exists, and service.influxdb.1.bootstrap remains the only place
 # an administrative token is created and vaulted.
 INFLUXDB3_DEBIAN13_PREFLIGHT = "os.linux.debian.13.preflight_influxdb3_core"
-INFLUXDB3_DEBIAN13_PREFLIGHT_HANDLER = (
-    "os.linux_debian_13.preflight_influxdb3_core"
-)
+INFLUXDB3_DEBIAN13_PREFLIGHT_HANDLER = "os.linux_debian_13.preflight_influxdb3_core"
 INFLUXDB3_DEBIAN13_INSTALL = "os.linux.debian.13.install_influxdb3_core"
 INFLUXDB3_DEBIAN13_INSTALL_HANDLER = "os.linux_debian_13.install_influxdb3_core"
 INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = frozenset(

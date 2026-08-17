@@ -587,10 +587,28 @@ approval or distinct-actor check.
     operator script's environment variables — `node_id`, `data_dir`, `http_bind`,
     `tls_cert`/`tls_key`, `enable_plugins`, `disable_telemetry`,
     `wal_flush_interval`, `log_filter`, `package_version`, `hold_package`,
-    `upgrade_package`, `force_reconfigure`, `allow_plaintext_remote` — plus the
-    shared `rpc_ssh_*` overrides. Its `result_schema` carries the installer's
-    completion report (package/binary version, unit state, bind, node id, data
-    dir, config path, plugins enabled, package held, `stage`).
+    `upgrade_package`, `force_reconfigure`, `allow_plaintext_remote`. Its
+    `result_schema` carries the installer's completion report (package/binary
+    version, unit state, bind, node id, data dir, config path, plugins enabled,
+    package held, `ready`, `stage`).
+
+  **Neither procedure accepts the shared `rpc_ssh_*` connection overrides — this
+  is deliberate and must not be "restored".** Unlike the agent-install, ookla, and
+  nmap procedures, these two declare no `rpc_ssh_credential_pk`, `rpc_ssh_host`,
+  `rpc_ssh_port`, `rpc_ssh_known_hosts_entry`, or
+  `rpc_ssh_strict_host_key_checking`, and the normalizer rejects them explicitly
+  (`RPC_PARAM_INVALID`, naming the offending keys) before the generic
+  unknown-parameter check. The execution backend must resolve host, port,
+  credential, and known-host policy from the execution's **assigned NetBox
+  object** alone, exactly as
+  `network.device.huawei.router.ne8000.f1a.show_bgp_peer` does. Reason: a
+  caller-supplied `rpc_ssh_credential_pk` is not object-scoped against the
+  requesting user (the open gap tracked in issue #203), so honouring one would let
+  a requester use a credential they cannot view; and a caller-supplied
+  `rpc_ssh_host` would move an approved installation off the audited target
+  entirely. Because the installer is `approval_required=True`, both would be
+  approved against one target and executed against another. Adding these params
+  back requires #203 (or equivalent object-scoped authorization) to land first.
 
   **No credential, anywhere in this pair (hard invariant).** Neither
   `params_schema` declares a token, password, secret reference, or
@@ -606,11 +624,19 @@ approval or distinct-actor check.
 
   **Normalizer invariants** (`_normalize_influxdb3_debian13_execution`): every
   value is re-validated in the pure domain, so a `params_schema` edit alone can
-  never widen what reaches the backend. `data_dir` must be a safe absolute path
-  with no traversal segment and must **not** be under `/home`, `/root`, `/run`,
-  `/tmp`, or `/var/tmp` (the packaged unit sandboxes those trees, so the service
-  would not start). `tls_cert`/`tls_key` are both-or-neither absolute paths on
-  *both* procedures. Unknown parameters are rejected here as well as by
+  never widen what reaches the backend. Every path parameter must be
+  **canonical**: a segment equal to `.` or `..` is rejected, and the value must
+  equal its own `posixpath.normpath()`. This is load-bearing, not cosmetic —
+  `data_dir` is then compared against the forbidden roots `/home`, `/root`,
+  `/run`, `/tmp`, `/var/tmp` (the packaged unit sandboxes those trees, so the
+  service would not start), and a literal prefix comparison alone would let
+  `/var/./tmp/influxdb3` or `/var/lib/../tmp/influxdb3` through while they resolve
+  *inside* a forbidden root. Requiring canonical input rather than normalizing it
+  also means the value that is stored, fingerprinted, approved, and executed is
+  the same string the operator read. A dot **inside** a segment
+  (`/etc/influxdb3/tls/server.crt`) stays legal. `tls_cert`/`tls_key` are
+  both-or-neither absolute paths on *both* procedures. Unknown parameters are
+  rejected here as well as by
   `additionalProperties: false`, tolerating only the platform-stamped
   `_intent`/`_intent_name`/`_timeout_seconds_snapshot` keys. Most importantly the
   normalizer reproduces the installer's own security gate: **a remote
@@ -622,6 +648,29 @@ approval or distinct-actor check.
   parameter set. Every seed `pattern` is anchored with `(?![\s\S])`, not `$`,
   because `jsonschema` applies `pattern` via `re.search` and Python's `$` also
   matches before a single trailing newline.
+
+  **Result-schema invariants.** The installer's `result_schema` carries a closed
+  `oneOf` envelope (same shape as
+  `service.netbox.staging.rotate_backend_token`): a nested `ok=true` must also
+  report `installed=true`, `ready=true`, and `stage="complete"`, and `installed`,
+  `ready`, `stage`, and `package_held` are all **required**. This matters because
+  `event_store` selects `ExecutionSucceeded` from the *outer* response `ok` and
+  does not require the nested result to agree — without the envelope rule, a
+  backend returning `ok=true` around a nested `installed=false` / `stage="package"`
+  result would validate and be recorded as a successful installation. A genuine
+  failure stays fully representable through the `ok=false` branch, including a
+  partial `stage` and a bounded `error`. Every result string additionally carries an
+  explicit `maxLength` (or a closed `enum`/`const`), because `event_store` silently
+  clamps unbounded strings at 4096 characters — an unbounded audit field would be
+  truncated with no validation error, and an unbounded contract lets a malformed
+  backend return an arbitrarily large valid result. `procedure` is a `const`, so a
+  backend cannot relabel which procedure ran.
+
+  **Reverse migration is PROTECT-safe.** `RPCExecution.procedure` is
+  `on_delete=PROTECT`, so `0072`'s reverse handles each procedure individually and
+  falls back to forcing `enabled=False` on a `ProtectedError` instead of
+  bulk-deleting — otherwise a downgrade would abort outright once either procedure
+  had run, and audited execution history must never be destroyed to allow one.
 
   Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
   representative `["backend-orchestrated", …]` command row each — key-fingerprint

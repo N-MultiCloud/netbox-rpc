@@ -600,16 +600,36 @@ plugins enabled, package held, `stage`).
 Optional install parameters mirror the operator script's environment variables:
 `node_id`, `data_dir`, `http_bind`, `tls_cert`/`tls_key`, `enable_plugins`,
 `disable_telemetry`, `wal_flush_interval`, `log_filter`, `package_version`,
-`hold_package`, `upgrade_package`, `force_reconfigure`,
-`allow_plaintext_remote`, plus the shared `rpc_ssh_*` connection overrides.
-Every one is re-validated in the normalizer as well as in `params_schema`, so a
-schema edit alone cannot widen what reaches the execution backend. `data_dir`
-must be a safe absolute path outside `/home`, `/root`, `/run`, `/tmp`, and
-`/var/tmp`, because the packaged systemd unit sandboxes those trees.
-`tls_cert`/`tls_key` are both-or-neither absolute paths. Unknown parameters are
-rejected in both layers. **A remote `http_bind` with no TLS is refused** unless
-the caller explicitly sets `allow_plaintext_remote=true`, reproducing the
-installer's refusal to expose bearer-token authentication over plaintext HTTP.
+`hold_package`, `upgrade_package`, `force_reconfigure`, and
+`allow_plaintext_remote`. Every one is re-validated in the normalizer as well as
+in `params_schema`, so a schema edit alone cannot widen what reaches the
+execution backend.
+
+**Neither procedure accepts the shared `rpc_ssh_*` connection overrides.** The
+execution backend resolves host, port, credential, and known-host policy from the
+execution's assigned NetBox object alone, as with the Huawei NE8000 BGP read; a
+caller-supplied override is rejected with `RPC_PARAM_INVALID`. A caller-selected
+`rpc_ssh_credential_pk` is not object-scoped against the requester, and a
+caller-selected `rpc_ssh_host` would move an approved installation off the
+audited target.
+
+Path parameters must be **canonical**: `.` and `..` segments are rejected and the
+value must equal its own `normpath`, so `data_dir` cannot resolve into one of the
+forbidden roots `/home`, `/root`, `/run`, `/tmp`, `/var/tmp` (the packaged systemd
+unit sandboxes those trees) via a non-canonical spelling such as
+`/var/./tmp/influxdb3`. A dot inside a segment — `/etc/influxdb3/tls/server.crt` —
+remains legal. `tls_cert`/`tls_key` are both-or-neither absolute paths, and
+unknown parameters are rejected in both layers. **A remote `http_bind` with no TLS
+is refused** unless the caller explicitly sets `allow_plaintext_remote=true`,
+reproducing the installer's refusal to expose bearer-token authentication over
+plaintext HTTP.
+
+The installer's `result_schema` is a closed envelope: a nested `ok=true` must also
+report `installed=true`, `ready=true`, and `stage="complete"`, so a partial or
+failed installation cannot be recorded as a success (the event store derives
+success from the outer response `ok`). Every result string is explicitly bounded,
+since unbounded strings are silently clamped at 4096 characters when the result is
+persisted.
 
 **Neither procedure accepts or returns a credential.** The first administrative
 token is created and vaulted only by `service.influxdb.1.bootstrap`
