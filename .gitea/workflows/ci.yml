@@ -38,7 +38,7 @@ jobs:
           test -x "$python_bin"
           test -x "$uv_bin"
           test "$("$python_bin" --version)" = "Python 3.12.14"
-          test "$("$uv_bin" --version)" = "uv 0.12.5"
+          test "$("$uv_bin" --version)" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
           "$python_bin" -I -S - <<'PY'
           import platform
           import sys

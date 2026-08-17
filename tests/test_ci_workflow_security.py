@@ -30,7 +30,7 @@ PYTEST_CONFIG_SHA256 = "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f17
 INTEGRATION_WORKFLOW_SHA256 = "85a25dc1c6fadf45a018bd4b148473b258d4b1eb4807d414c8c45b63af966403"
 STEP_RUN_SHA256 = {
     "Verify preprovisioned toolchain": (
-        "01e72343ecac62fc7beaa834bc21ae88cd3582cf84ea3955f6bbee3d354e089d"
+        "8e371c88d91f45cbdce5d25a290abaf45e3ba899effcdfe0ab43c2056150b038"
     ),
     "Create isolated venv and install locked wheels": (
         "f080f69479ad7361b28a493957db402c37d43f67ad1ae08268ab3fc10b4bc110"
@@ -158,7 +158,11 @@ def _assert_ci_contract(workflow: str) -> None:
         ]
 
     assert 'test "$("$python_bin" --version)" = "Python 3.12.14"' in workflow
-    assert 'test "$("$uv_bin" --version)" = "uv 0.12.5"' in workflow
+    assert (
+        'test "$("$uv_bin" --version)" = '
+        '"uv 0.12.5 (x86_64-unknown-linux-gnu)"'
+        in workflow
+    )
     assert workflow.count('python_bin="/usr/local/bin/python3.12"') == 2
     assert workflow.count('uv_bin="/usr/local/bin/uv"') == 2
     assert workflow.count('test -x "$python_bin"') == 2
@@ -444,7 +448,10 @@ def test_manual_privileged_integration_rejects_trigger_or_ref_drift(
         ("ref: ${{ github.sha }}", "ref: ${{ github.ref }}"),
         ("persist-credentials: false", "persist-credentials: true"),
         ("Python 3.12.14", "Python 3.12.15"),
-        ("uv 0.12.5", "uv 0.12.4"),
+        (
+            "uv 0.12.5 (x86_64-unknown-linux-gnu)",
+            "uv 0.12.4 (x86_64-unknown-linux-gnu)",
+        ),
         ("/usr/local/bin/python3.12", "$(command -v python3.12)"),
         ("/usr/local/bin/uv", "$(command -v uv)"),
         ("UV_PYTHON_DOWNLOADS: never", "UV_PYTHON_DOWNLOADS: automatic"),
