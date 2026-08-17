@@ -649,17 +649,53 @@ approval or distinct-actor check.
   because `jsonschema` applies `pattern` via `re.search` and Python's `$` also
   matches before a single trailing newline.
 
+  **Seeded `enabled=False` behind a three-point code gate.** No
+  `os.linux_debian_13.*` handler exists in `netbox-rpc-backend` yet, so an enabled
+  row would be advertised by `/procedures/available/` and every execution would
+  queue only to fail on an unknown handler. Capability discovery does **not** cover
+  this: a backend that advertises no manifest yields verification `UNKNOWN` and
+  admission proceeds. `_INFLUXDB3_DEBIAN13_AVAILABLE = False` in
+  `netbox_rpc.domain.normalization` is therefore checked through the shared
+  `code_gate_unavailable_reason()` at all three enforcement points — admission
+  (`create_execution()`), advertisement (`RPCProcedureViewSet.available()`), and
+  worker claim (inside this normalizer) — so flipping the mutable
+  `RPCProcedure.enabled` flag alone cannot make them dispatchable. Enable the gate
+  and the flag **together**, in an *additive* migration, as part of the coordinated
+  rollout that ships the handlers and their approved capability contract. Do not
+  edit `0072`'s data defaults in place (Django tracks an applied migration by name,
+  so an in-place edit silently skips databases that already ran it — the `0060`/
+  `0061` lesson).
+
+  **The assigned object is authorization-checked and pinned.** The requester
+  chooses `assigned_object_id`, and these procedures derive their SSH target
+  *exclusively* from it, so `create_execution()` resolves the exact device/VM
+  through `model.objects.restrict(user, "view")` before the row is written —
+  `_require_viewable_assigned_object()` in `command_handlers.py`, whose
+  `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` set now covers both the Akvorado family
+  and this one. (It was `_require_akvorado_assigned_object` before; the rename is
+  the whole point — any family with no `rpc_ssh_*` escape hatch belongs in it.)
+  Without that check a requester could aim an approval-gated installation at a
+  device they cannot even view. The normalizer then **re-validates** the identity at
+  worker claim and forwards `target_object = {content_type, object_id}`, with flat
+  `target_content_type`/`target_object_id` scalars in the command fingerprint, so an
+  approved run is pinned to the object that was approved. `target` remains an
+  audit-only display value and must never be used for host resolution.
+
   **Result-schema invariants.** The installer's `result_schema` carries a closed
   `oneOf` envelope (same shape as
   `service.netbox.staging.rotate_backend_token`): a nested `ok=true` must also
   report `installed=true`, `ready=true`, and `stage="complete"`, and `installed`,
-  `ready`, `stage`, and `package_held` are all **required**. This matters because
-  `event_store` selects `ExecutionSucceeded` from the *outer* response `ok` and
-  does not require the nested result to agree — without the envelope rule, a
-  backend returning `ok=true` around a nested `installed=false` / `stage="package"`
-  result would validate and be recorded as a successful installation. A genuine
-  failure stays fully representable through the `ok=false` branch, including a
-  partial `stage` and a bounded `error`. Every result string additionally carries an
+  `ready`, `stage`, and `package_held` are all **required**. On its own that is not
+  enough, because a `result_schema` can only constrain the *nested* object while
+  `event_store` selects `ExecutionSucceeded` from the **outer** response `ok` — so
+  `record_backend_response()` additionally requires outer/nested `ok` agreement for
+  this family via the shared `_envelope_ok_state_mismatch()` helper (extracted from
+  the staging-rotation validator, which keeps its extra events prohibition). Both
+  values must be strict booleans, so a truthy non-boolean cannot pass `bool()`
+  coercion silently. Together these mean a response of `ok=true` wrapping a failed
+  or partial install is rejected instead of recorded as a successful installation. A
+  genuine failure stays fully representable through the `ok=false` branch, including
+  a partial `stage` and a bounded `error`. Every result string additionally carries an
   explicit `maxLength` (or a closed `enum`/`const`), because `event_store` silently
   clamps unbounded strings at 4096 characters — an unbounded audit field would be
   truncated with no validation error, and an unbounded contract lets a malformed
@@ -676,7 +712,10 @@ approval or distinct-actor check.
   representative `["backend-orchestrated", …]` command row each — key-fingerprint
   verification, `apt-cache madison` candidate resolution, and
   validate/write/restart/health/hold sequencing have no faithful fixed-argv
-  form. **Catalog-first: the matching `os.linux_debian_13.*` handler does not
+  form. Both procedures are also `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` and
+  envelope-state-strict members, so adding a third procedure to this family means
+  reviewing those three registries too, not just the seed migration.
+  **Catalog-first: the matching `os.linux_debian_13.*` handler does not
   exist in `netbox-rpc-backend` yet** and lands separately, exactly as with the
   whole `service.influxdb.1.*` family and the Samba catalog. The paired
   `netbox-packer` profile `influxdb-core-3.11.0-debian-13` (VMID 9052) bakes the

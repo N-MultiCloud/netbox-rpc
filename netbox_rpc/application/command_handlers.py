@@ -12,6 +12,7 @@ from rest_framework.exceptions import PermissionDenied
 from ..backends import resolve_backend
 from ..constants import (
     AKVORADO_1_PROCEDURE_NAMES,
+    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
 )
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
@@ -34,6 +35,14 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
         "service.samba_1.user_create",
         "service.samba_1.user_set_password",
     }
+)
+
+# Procedure families whose SSH target is derived exclusively from the execution's
+# assigned NetBox object, so the object must exist AND be viewable by the
+# requester at admission time. Neither family accepts an rpc_ssh_* override, which
+# is exactly why the assigned object has to be authorization-checked here.
+_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
+    AKVORADO_1_PROCEDURE_NAMES | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
 )
 
 # #215: RPCExecutionJob.enqueue() used to fall back to a flat 600s RQ
@@ -231,7 +240,7 @@ def create_execution(*, serializer: Any, user: object) -> object:
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
-    _require_akvorado_assigned_object(serializer.validated_data, procedure, user)
+    _require_viewable_assigned_object(serializer.validated_data, procedure, user)
     _require_staging_rotation_assigned_object(
         serializer.validated_data,
         procedure,
@@ -407,20 +416,24 @@ def _create_approval_request(
     )
 
 
-def _require_akvorado_assigned_object(
+def _require_viewable_assigned_object(
     validated_data: dict[str, Any],
     procedure: object,
     user: object,
 ) -> None:
-    """Fail creation when an Akvorado target is absent or not viewable.
+    """Fail creation when the target is absent or not viewable by the requester.
 
     RPCExecution stores a GenericForeignKey, so a syntactically valid content
-    type + object ID can otherwise point at no object. Akvorado SSH targeting is
-    derived exclusively from that object and must never bypass NetBox object
-    restrictions or fall back to a dangling display value.
+    type + object ID can otherwise point at no object. Applies to every procedure
+    family whose SSH targeting is derived *exclusively* from the assigned object:
+    such a procedure must never bypass NetBox object restrictions or fall back to
+    a dangling display value. The requester chooses ``assigned_object_id``, so
+    without this the requester could aim a privileged run at a device or VM they
+    cannot even view — which matters most for the approval-gated Debian 13
+    InfluxDB 3 Core installer.
     """
 
-    if getattr(procedure, "name", "") not in AKVORADO_1_PROCEDURE_NAMES:
+    if getattr(procedure, "name", "") not in _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES:
         return
     content_type = validated_data.get("assigned_object_type")
     object_id = validated_data.get("assigned_object_id")

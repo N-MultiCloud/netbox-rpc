@@ -150,7 +150,9 @@ def test_seed_creates_two_procedures_with_the_intended_gating(
         row = procedures.rows[name]
         assert row["handler_id"] == HANDLERS[name]
         assert row["version"] == 1
-        assert row["enabled"] is True
+        # Seeded DISABLED: no os.linux_debian_13.* backend handler exists yet, so an
+        # advertised/queued execution could only fail on an unknown handler.
+        assert row["enabled"] is False
         assert row["target_models"] == [
             "dcim.device",
             "virtualization.virtualmachine",
@@ -434,11 +436,119 @@ def test_constants_match_the_seeded_names(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.fixture()
 def jobs_module(monkeypatch: pytest.MonkeyPatch):
+    """Import jobs with the fail-closed code gate OPENED.
+
+    The gate is closed in production until the backend handlers ship, so every
+    test that exercises the rest of the normalizer has to open it explicitly —
+    the same pattern tests/test_jobs_huawei_ne8000_bgp_normalization.py uses. The
+    gate itself is covered separately by the worker-claim/admission tests below,
+    which force it shut.
+    """
+
     _install_runtime_import_stubs(monkeypatch)
     sys.modules.pop("netbox_rpc.jobs", None)
     module = importlib.import_module("netbox_rpc.jobs")
+    normalization_module = sys.modules["netbox_rpc.domain.normalization"]
+    monkeypatch.setattr(normalization_module, "_INFLUXDB3_DEBIAN13_AVAILABLE", True)
     yield module
     sys.modules.pop("netbox_rpc.jobs", None)
+
+
+@pytest.mark.parametrize("procedure_name", [PREFLIGHT, INSTALL])
+def test_worker_claim_gate_blocks_by_default(
+    jobs_module, monkeypatch: pytest.MonkeyPatch, procedure_name: str
+) -> None:
+    """With no backend handler deployed, a claimed execution must fail closed."""
+
+    normalization_module = sys.modules["netbox_rpc.domain.normalization"]
+    monkeypatch.setattr(normalization_module, "_INFLUXDB3_DEBIAN13_AVAILABLE", False)
+
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(_execution(procedure_name, {}))
+
+    assert excinfo.value.code == "RPC_PROCEDURE_NOT_AVAILABLE"
+    assert "cannot run yet" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("procedure_name", [PREFLIGHT, INSTALL])
+def test_code_gate_reason_is_shared_by_all_three_enforcement_points(
+    jobs_module, procedure_name: str
+) -> None:
+    """Admission, advertisement, and worker claim must consult one function.
+
+    `command_handlers.create_execution()` and `RPCProcedureViewSet.available()`
+    both call `code_gate_unavailable_reason`; asserting it reports these
+    procedures closed is what ties all three points to the same verdict.
+    """
+
+    normalization = importlib.import_module("netbox_rpc.domain.normalization")
+    # The fixture opened the gate, so close it to read the production verdict.
+    original = normalization._INFLUXDB3_DEBIAN13_AVAILABLE
+    normalization._INFLUXDB3_DEBIAN13_AVAILABLE = False
+    try:
+        reason = normalization.code_gate_unavailable_reason(procedure_name)
+    finally:
+        normalization._INFLUXDB3_DEBIAN13_AVAILABLE = original
+
+    assert reason is not None
+    assert procedure_name in reason
+    assert "netbox-rpc-backend" in reason
+    # An unrelated procedure must not be swept into the gate.
+    assert (
+        normalization.code_gate_unavailable_reason("service.influxdb.1.inspect") is None
+    )
+
+
+def test_normalizer_binds_the_immutable_assigned_object_identity(jobs_module) -> None:
+    """The caller picks assigned_object_id, so the identity must be pinned.
+
+    An approved installation has to execute against the object that was approved,
+    which means the normalizer forwards the content type + object ID and does not
+    let the display name stand in for them.
+    """
+
+    normalized = jobs_module.normalize_execution_params(
+        _execution(INSTALL, {}, target_model_label="dcim.device", object_id=77)
+    )
+
+    assert normalized["target_object"] == {
+        "content_type": "dcim.device",
+        "object_id": 77,
+    }
+    fingerprint = normalized["command_fingerprint"]
+    assert fingerprint["target_content_type"] == "dcim.device"
+    assert fingerprint["target_object_id"] == 77
+
+
+@pytest.mark.parametrize("procedure_name", [PREFLIGHT, INSTALL])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # No assigned object at all.
+        {"object_id": None},
+        # Present but not a usable primary key.
+        {"object_id": 0},
+        {"object_id": -1},
+        {"object_id": "42"},
+        # True is an int in Python; it must not be accepted as a pk.
+        {"object_id": True},
+        # A target model this catalog does not support.
+        {"target_model_label": "ipam.ipaddress"},
+        {"target_model_label": "netbox_proxbox.proxmoxendpoint"},
+        # The declared label and the actual content type disagree.
+        {"target_model_label": "dcim.device", "content_type": "ipam.ipaddress"},
+        {
+            "target_model_label": "virtualization.virtualmachine",
+            "content_type": "dcim.device",
+        },
+    ],
+)
+def test_normalizer_requires_a_supported_existing_assigned_object(
+    jobs_module, procedure_name: str, kwargs: dict
+) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(_execution(procedure_name, {}, **kwargs))
+    assert excinfo.value.code == "RPC_TARGET_INVALID"
 
 
 def test_preflight_normalizes_to_a_read_only_posture_probe(jobs_module) -> None:
@@ -659,6 +769,8 @@ def test_normalizer_fails_closed_for_an_unrecognised_family_member(
     """
 
     normalization = importlib.import_module("netbox_rpc.domain.normalization")
+    # A fully valid target, so the failure can only come from the unrecognised
+    # procedure name rather than from the target guard that runs before it.
     execution = SimpleNamespace(
         procedure=SimpleNamespace(
             name="os.linux.debian.13.uninstall_influxdb3_core",
@@ -667,6 +779,10 @@ def test_normalizer_fails_closed_for_an_unrecognised_family_member(
         params={"data_dir": "/var/lib/influxdb3/data"},
         target_display="influx01",
         target_model_label="virtualization.virtualmachine",
+        assigned_object_type=SimpleNamespace(
+            app_label="virtualization", model="virtualmachine"
+        ),
+        assigned_object_id=42,
     )
 
     with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
@@ -715,7 +831,23 @@ def _run_procedure_seed(monkeypatch: pytest.MonkeyPatch):
     return procedures, commands
 
 
-def _execution(procedure_name: str, params: dict[str, object]):
+def _execution(
+    procedure_name: str,
+    params: dict[str, object],
+    *,
+    target_model_label: str = "virtualization.virtualmachine",
+    content_type: str | None = None,
+    object_id: object = 42,
+):
+    """Build an execution stub carrying a full assigned-object identity.
+
+    The caller chooses ``assigned_object_id`` in production, so the normalizer must
+    bind the immutable content type + object ID rather than trusting the display
+    name. Defaults describe a well-formed target; tests override to probe the guard.
+    """
+
+    label = content_type if content_type is not None else target_model_label
+    app_label, _, model = label.partition(".")
     return SimpleNamespace(
         procedure=SimpleNamespace(
             name=procedure_name,
@@ -723,7 +855,9 @@ def _execution(procedure_name: str, params: dict[str, object]):
         ),
         params=params,
         target_display="influx01",
-        target_model_label="virtualization.virtualmachine",
+        target_model_label=target_model_label,
+        assigned_object_type=SimpleNamespace(app_label=app_label, model=model),
+        assigned_object_id=object_id,
     )
 
 

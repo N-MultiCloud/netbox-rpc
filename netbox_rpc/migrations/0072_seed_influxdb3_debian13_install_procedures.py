@@ -28,6 +28,13 @@ returns an ``nms-secret:`` reference. Operators chain ``preflight`` -> ``install
 -> ``service.influxdb.1.bootstrap`` so the product family keeps exactly one token
 contract.
 
+**Both rows are seeded ``enabled=False``.** No ``os.linux_debian_13.*`` handler
+exists in ``netbox-rpc-backend`` yet, and a paired fail-closed code gate
+(``_INFLUXDB3_DEBIAN13_AVAILABLE``) refuses them at admission, advertisement, and
+worker claim regardless of this mutable flag. Enabling is a coordinated rollout
+step: deploy the handlers, get their capability contract approved, then flip both
+the gate and the flag in an **additive** migration.
+
 Every ``pattern`` below is anchored with ``(?![\\s\\S])`` rather than ``$``, because
 ``jsonschema`` applies ``pattern`` with ``re.search`` and Python's ``$`` also matches
 immediately before a single trailing newline. Every result string carries an explicit
@@ -347,7 +354,21 @@ def seed_influxdb3_debian13_procedures(apps, schema_editor):
         defaults.update(
             {
                 "version": 1,
-                "enabled": True,
+                # Seeded DISABLED on purpose: no os.linux_debian_13.* handler exists
+                # in netbox-rpc-backend yet, so an execution could only queue and
+                # then fail on an unknown handler, while /procedures/available/
+                # would advertise the rows as dispatchable. Capability discovery is
+                # not a substitute — a backend advertising no manifest yields
+                # verification UNKNOWN and admission proceeds. The matching
+                # fail-closed code gate (_INFLUXDB3_DEBIAN13_AVAILABLE in
+                # netbox_rpc.domain.normalization, enforced at admission,
+                # advertisement, and worker claim) stays closed even if an operator
+                # flips this mutable catalog flag. Enable both together in the
+                # coordinated rollout, via an additive migration — never by editing
+                # this one in place (Django tracks an applied migration by name, so
+                # an in-place data edit silently skips databases that already ran
+                # it; see the 0060/0061 precedent).
+                "enabled": False,
                 "target_models": _TARGET_MODELS,
             }
         )

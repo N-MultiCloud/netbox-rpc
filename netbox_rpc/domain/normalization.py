@@ -159,6 +159,14 @@ _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # are met.
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
 _HUAWEI_NE8000_BGP_AVAILABLE = False
+# No os.linux_debian_13.* handler exists in netbox-rpc-backend yet. Capability
+# discovery is NOT a substitute for this gate: a backend that advertises no
+# manifest yields verification UNKNOWN and admission proceeds, so without the gate
+# /procedures/available/ would advertise these rows as dispatchable and every
+# execution would queue only to fail on an unknown handler. Flip to True in the
+# same coordinated rollout that deploys the handlers and their capability
+# contract, via an additive migration that also sets RPCProcedure.enabled=True.
+_INFLUXDB3_DEBIAN13_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -192,6 +200,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "netbox-rpc-backend execution handler and its approved capability "
             "contract are not deployed, and the coordinated BGP rollout has "
             "not been authorized."
+        )
+    if (
+        procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        and not _INFLUXDB3_DEBIAN13_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no os.linux_debian_13.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handlers and "
+            "their approved capability contract."
         )
     return None
 
@@ -352,6 +371,9 @@ _INFLUXDB3_FORBIDDEN_DATA_DIR_ROOTS = (
     "/var/tmp",
 )
 _INFLUXDB3_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_INFLUXDB3_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
 _INFLUXDB3_BOOLEAN_PARAM_DEFAULTS = {
     "enable_plugins": False,
     "disable_telemetry": True,
@@ -1483,11 +1505,55 @@ def _normalize_influxdb3_debian13_execution(
 
     params = execution.params or {}
     procedure_name = execution.procedure.name
+
+    # Worker-claim layer of the fail-closed code gate. Admission
+    # (create_execution) and advertisement (/procedures/available/) check the same
+    # shared function; this third check covers an RPCExecution row created by an
+    # older process before the gate existed, or claimed by a worker running stale
+    # code during a rolling deployment.
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    # ``target`` is an audit-only display value. Runtime host and credential
+    # resolution must use the immutable content-type + object-ID identity below,
+    # never the display string: the caller chooses assigned_object_id, so an
+    # approved installation must be pinned to the object that was approved.
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    if target_model not in _INFLUXDB3_TARGET_MODEL_LABELS:
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require a dcim.device or "
+            "virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    content_type = f"{app_label}.{model}"
+    if (
+        content_type != target_model
+        or content_type not in _INFLUXDB3_TARGET_MODEL_LABELS
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require an existing assigned "
+            "dcim.device or virtualization.virtualmachine.",
+            code="RPC_TARGET_INVALID",
+        )
+
     normalized: dict[str, Any] = {
         "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "procedure": procedure_name,
+            # Flat scalars, so the fingerprint stays a single-level mapping.
+            "target_content_type": content_type,
+            "target_object_id": object_id,
         },
     }
 

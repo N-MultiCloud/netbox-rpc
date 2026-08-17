@@ -581,9 +581,11 @@ and non-secret resource identifiers.
 
 The family above manages an InfluxDB instance that already exists. Migrations
 `0071` (allowlist row `influxdb3-core` -> `influxdb3-core.service`) and `0072`
-(procedures) add the missing ability to *stand one up* on a Debian 13 guest, so
-a fresh Core 3 host no longer requires an interactive SSH session. Both
-procedures target `dcim.device` and `virtualization.virtualmachine`.
+(procedures) add the audited contract for *standing one up* on a Debian 13 guest,
+so installing a fresh Core 3 host will not require an interactive SSH session.
+Both procedures target `dcim.device` and `virtualization.virtualmachine`, and both
+are **seeded disabled** until the paired execution handler ships (see the end of
+this section).
 
 | Procedure | Effect | Approval | Timeout | Purpose |
 |---|---|---|---|---|
@@ -625,11 +627,25 @@ reproducing the installer's refusal to expose bearer-token authentication over
 plaintext HTTP.
 
 The installer's `result_schema` is a closed envelope: a nested `ok=true` must also
-report `installed=true`, `ready=true`, and `stage="complete"`, so a partial or
-failed installation cannot be recorded as a success (the event store derives
-success from the outer response `ok`). Every result string is explicitly bounded,
-since unbounded strings are silently clamped at 4096 characters when the result is
+report `installed=true`, `ready=true`, and `stage="complete"`. Because the event
+store derives success from the **outer** response `ok`, `record_backend_response()`
+additionally requires the outer and nested `ok` to agree — and both to be strict
+booleans — for this family, so a response wrapping a failed or partial install
+cannot be recorded as a success. Every result string is explicitly bounded, since
+unbounded strings are silently clamped at 4096 characters when the result is
 persisted.
+
+Because the SSH target is derived exclusively from the assigned NetBox object, that
+object must exist **and** be viewable by the requester: execution creation resolves
+it through `objects.restrict(user, "view")`, and the normalizer re-validates the
+identity at worker claim and forwards the content type + object ID rather than the
+display name, so an approved installation is pinned to the object that was approved.
+
+**Both procedures are seeded `enabled=False`** and are additionally refused by a
+fail-closed code gate at admission, advertisement, and worker claim, because no
+`os.linux_debian_13.*` handler is deployed yet — an enabled row would only produce
+executions that fail on an unknown handler. Enabling them is a coordinated rollout
+step performed by an additive migration alongside the handler deployment.
 
 **Neither procedure accepts or returns a credential.** The first administrative
 token is created and vaulted only by `service.influxdb.1.bootstrap`

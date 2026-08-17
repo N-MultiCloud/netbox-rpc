@@ -47,6 +47,10 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "service.akvorado.1.config_read",
         "service.akvorado.1.config_deploy",
     }
+    constants.INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = {
+        "os.linux.debian.13.preflight_influxdb3_core",
+        "os.linux.debian.13.install_influxdb3_core",
+    }
     constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
         "service.netbox.staging.rotate_backend_token"
     )
@@ -126,7 +130,7 @@ def test_akvorado_target_lookup_uses_user_restricted_queryset(
     content_type = SimpleNamespace(model_class=lambda: model)
     procedure = SimpleNamespace(name="service.akvorado.1.config_read")
 
-    command_handlers._require_akvorado_assigned_object(
+    command_handlers._require_viewable_assigned_object(
         {
             "assigned_object_type": content_type,
             "assigned_object_id": 42,
@@ -148,7 +152,7 @@ def test_akvorado_target_lookup_hides_unauthorized_object_existence(
     content_type = SimpleNamespace(model_class=lambda: SimpleNamespace(objects=manager))
 
     with pytest.raises(ValidationError) as exc_info:
-        command_handlers._require_akvorado_assigned_object(
+        command_handlers._require_viewable_assigned_object(
             {
                 "assigned_object_type": content_type,
                 "assigned_object_id": 42,
@@ -320,7 +324,7 @@ def test_unsafe_config_content_is_rejected_before_serializer_save(
     )
     monkeypatch.setattr(
         command_handlers,
-        "_require_akvorado_assigned_object",
+        "_require_viewable_assigned_object",
         lambda validated_data, procedure, user: None,
     )
     monkeypatch.setattr(command_handlers, "_verify_backend_capability", lambda p: None)
