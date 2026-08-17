@@ -44,7 +44,6 @@ lets a malformed backend return an arbitrarily large valid result.
 """
 
 from django.db import migrations
-from django.db.models.deletion import ProtectedError
 
 _TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
 
@@ -384,25 +383,34 @@ def seed_influxdb3_debian13_procedures(apps, schema_editor):
 
 
 def unseed_influxdb3_debian13_procedures(apps, schema_editor):
-    """Delete an unreferenced seed; preserve referenced history, forced disabled.
+    """Disable the seeded rows instead of deleting them.
 
-    ``RPCExecution.procedure`` is ``on_delete=PROTECT``, so a bulk delete would
-    raise ``ProtectedError`` and abort the whole downgrade once either procedure has
-    run. Per-procedure handling matches migration ``0068``: audited execution
-    history is never destroyed, and a preserved row is left disabled so it cannot be
-    dispatched after the reversal.
+    Deliberately non-destructive, for two independent reasons.
+
+    1. ``RPCExecution.procedure`` is ``on_delete=PROTECT``, so deleting a procedure
+       that has run would raise ``ProtectedError`` and abort the whole downgrade.
+       Audited execution history must never be destroyed to allow a rollback.
+    2. Deleting through the historical model is not even safe when the row is
+       unreferenced. ``Model.delete()`` and ``QuerySet.delete()`` both run Django's
+       deletion collector, which walks related models — and a related model whose
+       app has no migrations is rendered from the *real* app registry, not from the
+       migration state. The collector then filters that real model by a historical
+       ``RPCProcedure`` instance and Django raises
+       ``ValueError: Cannot query "RPCProcedure object (N)": Must be "RPCProcedure"
+       instance``. That is not hypothetical: it failed the NetBox 4.5.8
+       compatibility job, which migrates backwards past this migration with the
+       seeded rows present.
+
+    An ``update()`` touches only this table and never invokes the collector, so the
+    reverse is safe in every environment. The rows are seeded ``enabled=False``
+    anyway, so nothing is lost by leaving them in place: a re-apply is
+    ``update_or_create``, which restores the intended state idempotently.
     """
 
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    for row in _PROCEDURES:
-        procedure = RPCProcedure.objects.filter(name=row["name"]).first()
-        if procedure is None:
-            continue
-        try:
-            procedure.delete()
-        except ProtectedError:
-            procedure.enabled = False
-            procedure.save(update_fields=["enabled"])
+    RPCProcedure.objects.filter(name__in=[row["name"] for row in _PROCEDURES]).update(
+        enabled=False
+    )
 
 
 class Migration(migrations.Migration):

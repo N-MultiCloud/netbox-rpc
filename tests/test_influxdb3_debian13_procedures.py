@@ -383,15 +383,29 @@ def test_install_result_cannot_report_success_for_a_failed_install(
         validate({**A_SUCCESSFUL_INSTALL_RESULT, "procedure": PREFLIGHT}, schema)
 
 
-def test_seed_reverse_preserves_procedures_that_have_execution_history(
+def test_seed_reverse_disables_rows_without_deleting_or_using_the_collector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RPCExecution.procedure is PROTECT, so a bulk delete would abort the downgrade."""
+    """The reverse must disable, never delete — and never invoke the collector.
+
+    Two independent reasons, both real:
+
+    1. ``RPCExecution.procedure`` is ``PROTECT``, so deleting a procedure that has
+       run would abort the whole downgrade; audited history must survive a rollback.
+    2. Deleting through a *historical* model is unsafe even for an unreferenced row.
+       ``Model.delete()``/``QuerySet.delete()`` run the deletion collector, which
+       renders a related model from the real app registry when that model's app has
+       no migrations, then filters it by a historical instance — Django raises
+       ``ValueError: Cannot query "RPCProcedure object (N)"``. This actually failed
+       the NetBox 4.5.8 compatibility job, which migrates backwards past this
+       migration with the seeded rows present.
+    """
 
     procedures, _ = _run_procedure_seed(monkeypatch)
-    procedures.rows["service.influxdb.1.bootstrap"] = {"handler_id": "unrelated"}
-    # The installer has run, so its row is protected; the read procedure has not.
-    procedures.protected.add(INSTALL)
+    procedures.rows["service.influxdb.1.bootstrap"] = {
+        "handler_id": "unrelated",
+        "enabled": True,
+    }
 
     migration = sys.modules[PROCEDURE_MIGRATION]
     apps = SimpleNamespace(
@@ -401,27 +415,44 @@ def test_seed_reverse_preserves_procedures_that_have_execution_history(
     )
     migration.unseed_influxdb3_debian13_procedures(apps, None)
 
-    # Unreferenced seed row deleted; protected row preserved but forced disabled;
-    # the unrelated procedure untouched.
-    assert set(procedures.rows) == {INSTALL, "service.influxdb.1.bootstrap"}
+    # Nothing deleted, both seeded rows disabled, unrelated row untouched.
+    assert set(procedures.rows) == {PREFLIGHT, INSTALL, "service.influxdb.1.bootstrap"}
+    assert procedures.rows[PREFLIGHT]["enabled"] is False
     assert procedures.rows[INSTALL]["enabled"] is False
+    assert procedures.rows["service.influxdb.1.bootstrap"]["enabled"] is True
+    # The reverse must reach the database through update(), not delete().
+    assert procedures.deleted == []
+    assert procedures.updates, "reverse did not issue an update()"
+
+    # Re-applying restores the intended state idempotently.
+    procedures_again, _ = _run_procedure_seed(monkeypatch)
+    assert procedures_again.rows[INSTALL]["enabled"] is False
 
 
-def test_seed_reverse_removes_both_rows_when_unreferenced(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    procedures, _ = _run_procedure_seed(monkeypatch)
-    procedures.rows["service.influxdb.1.bootstrap"] = {"handler_id": "unrelated"}
+def test_reverse_migration_source_never_deletes_a_procedure() -> None:
+    """Static guard: a future edit must not reintroduce the collector hazard."""
 
-    migration = sys.modules[PROCEDURE_MIGRATION]
-    apps = SimpleNamespace(
-        get_model=lambda app_label, model_name: _expect_model(
-            (app_label, model_name), ("netbox_rpc", "RPCProcedure"), procedures
-        )
+    import ast
+
+    source = (
+        ROOT
+        / "netbox_rpc/migrations/0072_seed_influxdb3_debian13_install_procedures.py"
+    ).read_text()
+    reverse = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "unseed_influxdb3_debian13_procedures"
     )
-    migration.unseed_influxdb3_debian13_procedures(apps, None)
-
-    assert set(procedures.rows) == {"service.influxdb.1.bootstrap"}
+    # Inspect actual calls, not prose: the docstring legitimately explains why
+    # delete() is avoided, so a substring search would match its own explanation.
+    called = {
+        node.func.attr
+        for node in ast.walk(reverse)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "delete" not in called, called
+    assert "update" in called, called
 
 
 def test_handlers_are_documented_command_contract_exemptions() -> None:
@@ -894,7 +925,40 @@ def _execution(
 
 
 class _ProtectedError(Exception):
-    """Stand-in for django.db.models.deletion.ProtectedError."""
+    """Stand-in for django.db.models.deletion.ProtectedError in the import stubs."""
+
+
+class _ProcedureQuery:
+    """Minimal queryset stand-in that records how the reverse reached the rows."""
+
+    def __init__(self, manager: "_FakeProcedureManager", names: set[str]) -> None:
+        self.manager = manager
+        self.names = names
+
+    def _matching(self) -> list[str]:
+        return [name for name in self.manager.rows if name in self.names]
+
+    def __iter__(self):
+        for name in self._matching():
+            yield _FakeProcedure(self.manager, name, self.manager.rows[name])
+
+    def first(self):
+        return next(iter(self), None)
+
+    def update(self, **fields) -> int:
+        matched = self._matching()
+        self.manager.updates.append((sorted(matched), dict(fields)))
+        for name in matched:
+            self.manager.rows[name].update(fields)
+        return len(matched)
+
+    def delete(self) -> None:
+        # Recorded so a test can assert the reverse never takes this path: a
+        # historical-model delete runs Django's collector, which is exactly the
+        # hazard the reverse avoids.
+        for name in self._matching():
+            self.manager.deleted.append(name)
+            self.manager.rows.pop(name, None)
 
 
 class _FakeProcedure:
@@ -905,10 +969,7 @@ class _FakeProcedure:
         self.enabled = bool(data.get("enabled", True))
 
     def delete(self) -> None:
-        if self.name in self._manager.protected:
-            raise self._manager.protected_error_class(
-                f"{self.name} is referenced by execution history"
-            )
+        self._manager.deleted.append(self.name)
         self._manager.rows.pop(self.name, None)
 
     def save(self, update_fields=None) -> None:
@@ -919,29 +980,11 @@ class _FakeProcedure:
             row[field] = getattr(self, field)
 
 
-class _ProcedureQuery:
-    def __init__(self, manager: "_FakeProcedureManager", names: set[str]) -> None:
-        self.manager = manager
-        self.names = names
-
-    def __iter__(self):
-        for name, row in list(self.manager.rows.items()):
-            if name in self.names:
-                yield _FakeProcedure(self.manager, name, row)
-
-    def first(self):
-        return next(iter(self), None)
-
-    def delete(self) -> None:
-        for procedure in list(self):
-            procedure.delete()
-
-
 class _FakeProcedureManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
-        self.protected: set[str] = set()
-        self.protected_error_class = _ProtectedError
+        self.deleted: list[str] = []
+        self.updates: list[tuple[list[str], dict]] = []
 
     def update_or_create(self, *, name: str, defaults: dict[str, object]):
         self.rows[name] = dict(defaults)
