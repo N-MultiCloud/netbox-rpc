@@ -392,6 +392,9 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "target_model_label",
             "target_display",
             "requested_by",
+            "requested_by_id",
+            "approved_by",
+            "approved_by_id",
             "backend",
             "backend_id",
             "status",
@@ -414,6 +417,9 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
         )
         read_only_fields = (
             "requested_by",
+            "requested_by_id",
+            "approved_by",
+            "approved_by_id",
             "status",
             "normalized_params",
             "result",

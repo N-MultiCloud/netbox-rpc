@@ -115,6 +115,253 @@ def test_schema_valid_backend_result_still_records_success(event_store_module) -
     assert [event.event_name for event in events] == ["ExecutionSucceeded"]
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": False,
+            "stage": "execute",
+        },
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": True,
+            "stage": "complete",
+        },
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": None,
+            "stage": "indeterminate",
+        },
+    ],
+)
+def test_valid_closed_failure_result_is_preserved(
+    event_store_module,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": result,
+            "error_code": "RPC_REMOTE_FAILED",
+            "error_message": "Closed backend failure.",
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == "RPC_REMOTE_FAILED"
+    assert failure.result == result
+
+
+def test_malformed_nested_failure_result_fails_schema_and_is_not_persisted(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "indeterminate",
+            },
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize("raw_result", [None, [], 0, "not-an-object"])
+def test_staging_present_non_object_result_is_rejected(
+    event_store_module,
+    raw_result: object,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {"ok": False, "result": raw_result},
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize(
+    ("outer_ok", "result"),
+    [
+        (
+            True,
+            {
+                "ok": False,
+                "procedure": "service.netbox.staging.rotate_backend_token",
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "execute",
+            },
+        ),
+        (
+            False,
+            {
+                "ok": True,
+                "procedure": "service.netbox.staging.rotate_backend_token",
+                "target": "nms-front-door",
+                "rotated": True,
+                "stage": "complete",
+            },
+        ),
+    ],
+)
+def test_staging_envelope_and_nested_result_must_agree(
+    event_store_module,
+    outer_ok: bool,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {"ok": outer_ok, "result": result},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+def test_staging_backend_events_are_forbidden_before_persistence(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "execute",
+            },
+            "events": [
+                {
+                    "event": "HostileProgress",
+                    "message": "Authorization: Bearer opaque-secret",
+                }
+            ],
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+def test_generic_backend_events_are_namespaced_and_capped(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name="service.test", result_schema={})
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "events": [
+                {
+                    "event": "ExecutionApproved",
+                    "message": f"progress-{index}",
+                }
+                for index in range(event_store.MAX_BACKEND_EVENTS + 20)
+            ],
+        },
+    )
+
+    assert len(events) == event_store.MAX_BACKEND_EVENTS + 1
+    backend_events = events[:-1]
+    assert all(
+        event.event_name == "Backend::ExecutionApproved"
+        for event in backend_events
+    )
+    assert events[-1].event_name == "ExecutionFailed"
+
+
+def test_event_messages_are_redacted_and_hard_capped(event_store_module) -> None:
+    event_store, _events = event_store_module
+    hostile = "Authorization: Bearer opaque-secret\n" + (
+        "x" * (event_store.MAX_EVENT_STRING_LENGTH * 2)
+    )
+
+    bounded = event_store._bounded_event_message(hostile)
+
+    assert "opaque-secret" not in bounded
+    assert len(bounded) <= event_store.MAX_EVENT_STRING_LENGTH
+    assert bounded.endswith(event_store._TRUNCATION_MARKER)
+
+
 def test_schema_bounded_large_config_read_content_is_not_truncated(
     event_store_module,
 ) -> None:

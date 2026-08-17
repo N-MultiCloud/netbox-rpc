@@ -41,7 +41,7 @@ typed events from `RPCExecutionEvent` rows.
 | `JobEnqueued` | `job_id` |
 | `ExecutionStarted` | status `running`, `started_at` |
 | `ParametersNormalized` | `normalized_params`, `resolved_command_hash` |
-| `BackendEventRecorded` | no projection change; audit/progress only |
+| `BackendEventRecorded` | no projection change; audit/progress only; remote names are capped and stored as `Backend::<name>` |
 | `ExecutionSucceeded` | status `succeeded`, `result`, `finished_at`, clear errors |
 | `ExecutionFailed` | status `failed`, `error_code`, `error_message`, `finished_at` |
 | `ExecutionEnqueueFailed` | status `failed`, enqueue error fields, `finished_at` |
@@ -78,66 +78,65 @@ transition follows one path:
 Command-side behavior lives in `netbox_rpc.application.command_handlers`:
 
 - `create_execution(...)` checks execute permission, enabled state, approval
-  permission, JSON schema, creates the row, emits `ExecutionQueued`, enqueues
-  the RQ job, and emits `JobEnqueued` or `ExecutionEnqueueFailed`;
+  policy, and JSON schema. Ordinary procedures emit `ExecutionQueued`, enqueue
+  the RQ job, and emit `JobEnqueued` or `ExecutionEnqueueFailed`. Staging token
+  rotation emits `ExecutionRequested` then `ApprovalRequested` and returns
+  `pending_approval` without enqueueing;
 - `run_execution(execution)` starts the aggregate, resolves the backend,
   normalizes params, records normalization, calls the backend, and records the
-  backend response. A truthy response can append `ExecutionSucceeded` only
-  after its raw inner result validates against `RPCProcedure.result_schema`;
-  mismatch appends `ExecutionFailed` with `RPC_RESULT_SCHEMA_MISMATCH`;
+  backend response. Every present inner result is schema-validated, including
+  false envelopes. A truthy response can append `ExecutionSucceeded` only
+  after validation; a false response keeps `failed` status but projects its
+  valid closed result. Mismatch appends `ExecutionFailed` with
+  `RPC_RESULT_SCHEMA_MISMATCH` and no malformed result;
 - `cancel_execution(execution, user)` is a queued-only command that emits
   `ExecutionCancelled`.
 
 ### Approval enforcement status
 
-The "approval permission" check in `create_execution(...)` verifies only that
-the **requesting** user holds `approve_rpcprocedure` — it is a single-actor
-permission gate, not a two-person approval. Both admission checks in
-`create_execution` are also **object-unscoped**: `execute_rpcprocedure` and
-`approve_rpcprocedure` are each checked via
-`user.has_perm("netbox_rpc.<perm>")` without passing the concrete procedure,
-while the execution serializer accepts procedures from an unrestricted
-queryset. NetBox's object-permission backend treats an objectless check as
-satisfied when the user holds that permission for *any* constrained object,
-so an execute (or approve) permission scoped to one procedure satisfies
-admission for every other enabled procedure — including, with any qualifying
-approve grant, `approval_required` ones. Per-procedure permission constraints
-are not preserved on either check. The decision handler repeats the same
-objectless approve check (plus target-procedure *view* access), so the
-decision path has the same scope limitation.
+The general catalog still uses the historical single-actor permission gate:
+for most `approval_required` procedures, the requester must hold
+`approve_rpcprocedure` and creation proceeds directly to `queued`. Those
+objectless `user.has_perm(...)` admission checks do not preserve a concrete
+procedure constraint; completing general object-scoped two-person enforcement
+remains work under epic #163.
 
-The two-person workflow is a **partial foundation**, not a complete dormant
-feature. The `requested` / `pending_approval` / `approved` / `rejected` /
-`expired` states, the `RPCApprovalRequest` immutable snapshot model, the
-aggregate decision transitions, and the command-only `approve`/`reject` API
-exist and are unit-tested, but several enforcement pieces are absent beyond
-request routing:
+Issue #221 deliberately activates the full existing approval foundation for
+`service.netbox.staging.rotate_backend_token` only:
 
-- `create_execution` does not route `approval_required` procedures through the
-  workflow: `RPCApprovalRequest` is never instantiated by the production
-  request path, and executions go straight to `queued`;
-- `approve_execution()` does not pass live protected state to the aggregate's
-  `approve()`, so the `matches_current()` snapshot-drift check is skipped;
-- no production code enforces `RPCApprovalRequest.expires_at`, so stale
-  decisions would not be rejected;
-- approval terminates at `approved` with no transition to `queued` and no
-  enqueue step, so a routed-and-approved execution would be stranded;
-- there is no pre-dispatch drift re-check at worker claim time;
-- segregation of duties is **conditional on the caller-populated snapshot**:
-  `_require_distinct_actor()` rejects a self-decision only when
-  `snapshot.requested_by_id` is non-null and equal to the deciding actor.
-  `RPCApprovalRequest.requested_by_id` is nullable and nothing binds it to
-  `RPCExecution.requested_by_id` or the request events, so a pending snapshot
-  with a missing or inconsistent requester would let the actual requester
-  approve their own request. Non-null requester identity binding is another
-  missing enforcement invariant.
+- creation needs execute permission scoped to this exact procedure but cannot
+  be self-approved inline; it records an immutable snapshot and
+  `requested → pending_approval` without an RQ enqueue. Its request accepts no
+  caller metadata outside the exact procedure/target/empty-params shape;
+- `approve_execution()` requires approval permission scoped to this procedure
+  (plus procedure view access), rejects the requester even if they are
+  privileged, recomputes the
+  live protected snapshot, including canonical procedure-policy and
+  params/result-schema hashes, and atomically records
+  `approved → queued` before one job is enqueued;
+- the `ExecutionApproved` projection persists `approved_by`; requester and
+  approver IDs are read-only execution API fields and signed lease claims;
+- admission, approval, worker claim, and pre-lease checks require the exact
+  enabled name, handler, version, device target, destructive effect,
+  1800-second timeout, approval bit, transport/output pipeline, representative
+  command hash, and params/result schemas. The snapshot also binds the
+  concrete backend ID and a non-secret URL/TLS identity fingerprint. They also
+  require non-null distinct actors and revalidate the approval snapshot;
+- approval and rejection accept no caller reason for this procedure; their
+  durable event uses a fixed bounded audit phrase;
+- staging rotation requires a signed one-time lease. Missing signing-key
+  configuration fails with `RPC_DISPATCH_LEASE_REQUIRED` before the backend is
+  contacted; ordinary procedures retain the backwards-compatible ID-only
+  fallback.
 
-The remaining snapshot-validation and pre-dispatch drift work is tracked by
-the two-person-approval epic #163 (open items 2 and 9); the decision API,
-opt-in, capability, and lease groundwork already landed via #165–#168. See
-`AGENTS.md` § "Two-person approval workflow — foundation". Until enforcement
-lands, treat `approval_required=True` as "requester must hold the (model-level)
-approve permission", not as an enforced second-person review.
+Ordinary backend audit events are limited to 50 per response and namespaced as
+`Backend::<name>` before append, so remote names cannot replay as internal
+state-transition events. Staging rotation accepts no backend events at all and
+requires the outer and nested result `ok` booleans to agree.
+
+`RPCApprovalRequest.expires_at` remains unenforced and general procedures are
+not implicitly migrated by this scoped change. See `AGENTS.md` § "Two-person
+approval workflow" for the operational contract.
 
 Query-side helpers live in `netbox_rpc.application.queries`. Execution list,
 detail, and event endpoints read projections. The execution API is

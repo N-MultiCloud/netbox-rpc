@@ -77,7 +77,16 @@ cross-repo contract.
   overlap; exactly one is `active` and signs. Rollout mirrors #167: leases are
   **inert until a signing key is configured *and* the paired backend advertises
   verification**. With no key configured, `issue_dispatch_lease` returns `None`
-  and dispatch stays ID-only, byte-for-byte as before (prod-safe).
+  and ordinary dispatch stays ID-only, byte-for-byte as before (prod-safe).
+  `service.netbox.staging.rotate_backend_token` is deliberately stricter: it
+  fails with `RPC_DISPATCH_LEASE_REQUIRED` before contacting the backend unless
+  a lease is signed. Its immutable approval snapshot additionally binds
+  canonical hashes of the exact procedure policy (including transport/output
+  pipeline and representative command), params/result schemas, and the
+  concrete backend ID plus non-secret URL/TLS identity;
+  any mutable catalog drift fails before approval, worker claim, or lease
+  issuance. Coordinated issuer/verifier key provisioning is therefore a
+  deployment prerequisite for that procedure.
 
 ## Operations
 
@@ -97,14 +106,38 @@ PLUGINS_CONFIG["netbox_rpc"] = {
 }
 ```
 
+For deployments whose generated NetBox plugin template cannot carry secret
+material, omit the `dispatch_lease_signing_keys` key entirely and set all three
+service environment variables for both NetBox and its RQ worker:
+
+```text
+NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_FILE=/absolute/path/to/issuer-private.pem
+NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_ID=rpc-sign
+NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_VERSION=2
+```
+
+The environment contains only a path and bounded lineage, never PEM bytes.
+Explicit `PLUGINS_CONFIG` is primary: an existing empty or malformed
+`dispatch_lease_signing_keys` value fails closed and does not fall through. The
+file loader uses descriptor-relative, no-follow path walking and a nonblocking
+final open; it accepts only a ≤16 KiB regular, single-link,
+root/current-euid-owned file with permissions no broader than `0640`, under
+trusted non-writable ancestors (root-owned sticky directories are allowed).
+Unsafe ownership/mode, symlinks, races, partial configuration, special files,
+short/oversized reads, malformed PEM, or unavailable OS primitives yield no
+lease and never log or return key contents. For staging token rotation that
+means `RPC_DISPATCH_LEASE_REQUIRED` before backend dispatch.
+
 - **Key rotation.** Add the new key with `active: True` and a higher
   `key_version`; set the previous key `active: False` (keep it listed so the
   verifier map still recognises its lineage while in-flight leases drain). Once
   drained, remove the old entry from **both** repos.
 - **Rollback.** Remove all `dispatch_lease_signing_keys` (or set every entry
   `active: False`) → `issue_dispatch_lease` returns `None` → dispatch reverts to
-  ID-only with no code change. Malformed key config also degrades to ID-only
-  rather than failing the worker.
+  ID-only for ordinary procedures with no code change. Malformed key config
+  also degrades ordinary procedures to ID-only rather than failing the worker.
+  Staging token rotation instead fails closed and cannot be used during this
+  rollback state.
 - **Retiring ID-only dispatch.** Once every environment is issuing leases and the
   backend (#583) is enforcing, flip the backend to **require** a valid lease
   (reject ID-only). That switch lives on the verifier; this issuer is

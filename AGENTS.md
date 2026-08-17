@@ -189,10 +189,13 @@ under the `_intent`-prefixed keys so this attribution stays correct.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
-- A truthy backend response must validate its raw inner `result` against the
-  procedure's `result_schema` before `ExecutionSucceeded` is appended. Schema
-  mismatch fails closed as `RPC_RESULT_SCHEMA_MISMATCH` with a bounded,
-  value-free diagnostic.
+- Every present backend `result` must validate against the procedure's
+  `result_schema`, including false outer envelopes. A truthy response may append
+  `ExecutionSucceeded` only after validation; a false response remains failed
+  while projecting its valid closed result. Schema mismatch fails closed as
+  `RPC_RESULT_SCHEMA_MISMATCH` without projecting malformed data and with a
+  bounded, value-free diagnostic. Event messages have a separate redacted
+  4096-character hard cap.
 - `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
   (with its `RPCIntentProcedure` through model) are intentional
   reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
@@ -201,13 +204,14 @@ under the `_intent`-prefixed keys so this attribution stays correct.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
-### Two-person approval workflow — foundation (#164)
+### Two-person approval workflow (#164, #221 scoped enforcement)
 
 The execution aggregate carries an additive **approval-workflow** surface (the
-foundation of the P0 two-person-approval epic #163). This is infrastructure
-only — it does **not** yet change behaviour; routing `approval_required`
-procedures through it (enforcement, API/UI, signed dispatch leases) is the paired
-work in #165–#168.
+foundation of the P0 two-person-approval epic #163). Issue #221 activates the
+complete two-person route for
+`service.netbox.staging.rotate_backend_token`; other legacy
+`approval_required` procedures retain their existing requester permission gate
+until they are migrated deliberately.
 
 - **States** (`domain.value_objects.ExecutionStatus`): `requested`,
   `pending_approval`, `approved`, `rejected`, `expired` precede the existing
@@ -227,7 +231,10 @@ work in #165–#168.
   still works), stores references not secrets, and `matches_current()` detects a
   snapshot-invalidating drift.
 - **Aggregate transitions** (`domain.aggregate`): `request` → `request_approval`
-  (never enqueues) → `approve` / `reject` / `expire`. `approve`/`reject` enforce
+  (never enqueues) → `approve` / `reject` / `expire`. The staging rotation's
+  successful `approve` atomically adds `ExecutionApproved` then
+  `ExecutionQueued`, after which the application enqueues one RQ job and adds
+  `JobEnqueued`. `approve`/`reject` enforce
   **segregation of duties** (the requester cannot decide their own request) and
   `approve` re-checks the snapshot; the decision is serialised with a
   `select_for_update` row lock + in-transaction status recheck so
@@ -239,8 +246,11 @@ work in #165–#168.
   Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
   to the execution's procedure on top of the aggregate's segregation-of-duties
   and single-decision concurrency guards; `get_object()` already object-restricts
-  the execution row. The endpoints are dormant in production until the request
-  routing that produces `pending_approval` executions lands (#166+).
+  the execution row. Staging rotation uses this API in production: creation
+  requires execute permission scoped to that exact procedure and never accepts
+  a same-request bypass; a distinct actor with approval permission scoped to
+  that procedure must decide it. Other procedures are not implicitly migrated
+  to this lifecycle.
 - **Authoritative opt-in + selected backend (#166)**: `RpcPluginSettings.enabled`
   and its selected backend are now enforced by `command_handlers`. At execution
   **creation** a disabled integration is rejected (403) and an unconfigured
@@ -287,9 +297,11 @@ work in #165–#168.
   ownership:** the issuer generates + ledgers the nonce; the verifier owns the
   consumed-nonce (accept-once) store. **Graceful degradation / prod-safe:** with
   no signing key configured (current prod), `issue_dispatch_lease` returns
-  `None`, the worker POSTs `{}` byte-for-byte as before (ID-only dispatch), and
-  leases stay inert until an operator configures a key *and* the backend
-  advertises verification (rollout mirrors #167). Keys, audience, and TTL come
+  `None`, ordinary procedures POST `{}` byte-for-byte as before (ID-only
+  dispatch). **Staging token rotation is the fail-closed exception:** a missing
+  signing key produces `RPC_DISPATCH_LEASE_REQUIRED` and no backend request.
+  It cannot run until the control plane provisions the issuer private key and
+  verifier public key. Keys, audience, and TTL normally come
   from `PLUGINS_CONFIG["netbox_rpc"]` (`dispatch_lease_signing_keys` /
   `dispatch_lease_audience` / `dispatch_lease_ttl_seconds`). Threat model, ADR,
   and rotation/rollback/retirement ops live in
@@ -298,6 +310,20 @@ work in #165–#168.
   lineage) is `netbox_rpc/tests/fixtures/dispatch_lease/`. Tests that mint a
   lease patch `dispatch_lease._plugin_setting`; crypto/DB-backed tests live in
   the integration tier (`cryptography` + pydantic are not in the pure-domain env).
+  If and only if `dispatch_lease_signing_keys` is absent, the issuer may instead
+  receive `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_FILE`,
+  `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_ID`, and
+  `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_VERSION`. All three are required. The
+  absolute file path is descriptor-walked without following symlinks, preflighted
+  before a nonblocking open, and accepted only for a regular, single-link,
+  root/current-euid-owned file no larger than 16 KiB with permissions no broader
+  than `0640`; trusted path ancestors are root/current-euid-owned and not
+  group/other writable (root-owned sticky directories are allowed). Reads are
+  bounded and metadata is compared before/after. Missing OS primitives,
+  malformed lineage/PEM, unsafe metadata, races, FIFOs/devices, or partial env
+  configuration return no key without exposing contents. An explicit empty or
+  malformed plugin setting remains authoritative and does not fall through to
+  the environment.
 
 ## Intents
 
@@ -404,6 +430,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
+| `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 
 ### Other Write Procedures
 
@@ -434,12 +461,68 @@ checksums, and migrate/healthcheck/cleanup status.
 See [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md)
 for the operator command sequence. Use placeholder values in docs and tests.
 
+### Staging Backend Token Rotation
+
+`service.netbox.staging.rotate_backend_token` is a destructive,
+approval-required recovery procedure for the staging backend's NetBox service
+token. It targets only the existing, requester-viewable `nms-front-door`
+`dcim.device` and accepts no caller parameters. The backend resolves the
+device's enabled SSH service, credential reference, port, and strict pinned
+known-host policy from managed inventory and invokes the fixed root-owned
+provisioner. Token creation and installation stay entirely outside RPC params,
+argv, results, events, and logs.
+
+The result schema is closed and contains only `ok`, the constant procedure ID,
+constant `target="nms-front-door"`, `rotated`, and `stage`. Exact states are:
+success (`true/true/complete`), pre-commit failure
+(`false/false/execute`), committed-but-recovery-failed
+(`false/true/complete`), and post-dispatch uncertainty
+(`false/null/indeterminate`). The nullable indeterminate state prevents
+automation from treating a transport/timeout ambiguity as proof the old token
+remains active and blindly retrying a destructive rotation. Operators and agents
+must reconcile staging readiness before any new request. They must not attach raw
+token values, upstream bodies, command output, or filesystem contents to the
+execution. Approval is required even for recovery, and agents must never create
+or approve this execution autonomously.
+
+The envelope and nested result must use matching strict boolean `ok` values;
+this privileged procedure accepts no backend progress events. Its approval
+snapshot binds a concrete backend row and the non-secret backend URL/TLS
+identity, plus the full transport/output/representative-command policy. A job
+payload cannot override that destination after approval.
+
+Creation records `ExecutionRequested` then `ApprovalRequested`, persists an
+immutable non-secret approval snapshot, returns `pending_approval`, and does
+not enqueue. It rejects backend/request/trace/comments/tags/custom-field
+metadata (even empty values), and approval/rejection accept no caller reason;
+fixed bounded phrases are the only durable decision messages. Both the execute and approve permissions must include this exact
+procedure; an object permission constrained to some other procedure does not
+grant access. The requester cannot approve their own request even if they hold
+the approval permission. A distinct approver records an immutable
+`approved_by` identity, then the same decision transaction records
+`ExecutionApproved` and `ExecutionQueued`; only afterward is one RQ job
+enqueued. The snapshot includes canonical hashes for the complete immutable
+procedure policy, transport/output pipeline, representative command,
+params/result schemas, and concrete backend URL/TLS identity. Admission,
+approval, worker claim, and pre-lease validation require the exact enabled
+name, handler, version, device target, destructive effect, 1800-second timeout,
+approval bit, and schemas, as well as distinct non-null requester/approver identities. Those identities are exposed read-only
+on the execution API and bound into the signed one-time dispatch lease.
+
+Unlike ordinary procedures' backwards-compatible ID-only dispatch, this
+procedure never falls back when dispatch-lease keys are absent or invalid.
+`RPC_DISPATCH_LEASE_REQUIRED` is the expected fail-closed result until the root
+deployment provisions coordinated issuer/verifier keys; the backend is not
+called in that state.
+
 ### Permission Invariant
 
 Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
 a human operator has explicitly granted it for a specific, bounded task. Holding
-this permission allows bypassing the `approval_required` API gate — it must never
-be used autonomously on destructive procedures.
+this permission satisfies the legacy single-actor gate for most
+`approval_required` procedures — it must never be used autonomously on
+destructive procedures. It does **not** bypass staging token rotation's pending
+approval or distinct-actor check.
 
 ---
 
@@ -803,6 +886,28 @@ be used autonomously on destructive procedures.
   every container, DB, env var, host, user, port, and path parameter; no real
   secret contents are accepted, returned, logged, or stored. Operator commands
   live in `docs/passbolt-migration-runbook.md`.
+- Staging NetBox service-token recovery is seeded by migration `0068` as
+  `service.netbox.staging.rotate_backend_token` (destructive, 1800s, approval
+  required) for the `dcim.device` target. Its
+  schema and normalizer reject every caller parameter, require the exact
+  existing/viewable `nms-front-door` device, and expose only closed non-secret status
+  metadata (`ok`, constant `procedure`, constant `target`, nullable `rotated`,
+  and `execute`/`complete`/`indeterminate` `stage`). The indeterminate tuple is
+  reserved for post-dispatch transport/timeout uncertainty and must not be
+  treated as safe to retry. The backend owns the fixed root-only
+  provisioner and target-owned SSH resolution; this catalog never transports
+  the token itself.
+  Creation rejects request/trace IDs, backend overrides, comments, tags,
+  custom fields, and any other caller metadata outside the exact target plus
+  empty-params shape. Approval/rejection bodies carry no operator note and use
+  a fixed bounded audit reason. The exact enabled name/handler/version/target,
+  destructive effect, 1800-second timeout, approval bit, and params/result
+  schemas are enforced at admission, approval, worker claim, and pre-lease
+  time. Canonical policy/schema hashes are protected by the immutable approval
+  snapshot. Valid closed failure/indeterminate results remain on failed
+  executions; malformed nested results are rejected and not projected. Reverse
+  migration deletes an unreferenced seed, or preserves referenced history with
+  the procedure forced disabled when `RPCExecution.procedure` protects it.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve

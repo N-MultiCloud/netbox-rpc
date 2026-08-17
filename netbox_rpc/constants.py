@@ -109,6 +109,14 @@ PASSBOLT_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Approval-gated, secret-silent staging NetBox service-token rotation. The
+# caller supplies no routing metadata; the backend resolves the exact target's
+# pinned SSH service and invokes the fixed root-owned provisioner.
+NETBOX_STAGING_ROTATE_BACKEND_TOKEN = "service.netbox.staging.rotate_backend_token"
+NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
+    "service.netbox.staging.rotate_backend_token"
+)
+
 SAMBA_1_CONFIG_READ = "service.samba.1.config_read"
 SAMBA_1_CONFIG_READ_HANDLER = "service.samba_1.config_read"
 SAMBA_1_CONFIG_TEST = "service.samba.1.config_test"

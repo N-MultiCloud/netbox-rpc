@@ -725,6 +725,13 @@ class RPCExecution(NetBoxModel):
         blank=True,
         related_name="+",
     )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     backend = models.PositiveBigIntegerField(
         null=True,
         blank=True,
@@ -932,10 +939,10 @@ class RPCApprovalRequest(NetBoxModel):
     Created exactly once when an approval-required execution is requested. It
     pins every value a distinct second-actor approval must decide against, plus
     a tamper-evident ``payload_hash`` over those protected fields. Any later
-    change to the procedure version/effect, target snapshot, normalized
-    params/command fingerprint, backend, or credential policy recomputes to a
-    different hash and therefore invalidates the request (a fresh request is
-    required — see :meth:`matches_current`). References only: it stores
+    change to the procedure policy or schema hashes, target snapshot,
+    normalized params/command fingerprint, backend, or credential policy
+    recomputes to a different hash and therefore invalidates the request (a
+    fresh request is required — see :meth:`matches_current`). References only: it stores
     credential-policy/backend *references*, never secrets. Rows are append-only:
     direct updates and deletes are rejected at the ORM layer, mirroring
     ``RPCExecutionEvent`` (execution-cascade deletes still work — the collector
@@ -953,6 +960,9 @@ class RPCApprovalRequest(NetBoxModel):
     # Procedure snapshot — captured values, never a live read at decision time.
     procedure_id = models.PositiveBigIntegerField()
     procedure_version = models.CharField(max_length=64, blank=True)
+    procedure_policy_sha256 = models.CharField(max_length=128, blank=True)
+    params_schema_sha256 = models.CharField(max_length=128, blank=True)
+    result_schema_sha256 = models.CharField(max_length=128, blank=True)
     effect = models.CharField(max_length=20)
     # Target snapshot.
     target_type_id = models.PositiveBigIntegerField()
@@ -963,6 +973,7 @@ class RPCApprovalRequest(NetBoxModel):
     command_fingerprint = models.JSONField(default=dict, blank=True)
     # Authoritative backend + credential policy — references, not secrets.
     backend_id = models.PositiveBigIntegerField(null=True, blank=True)
+    backend_target_sha256 = models.CharField(max_length=128, blank=True)
     credential_policy_ref = models.CharField(max_length=200, blank=True)
     # Requester + expiry + optimistic-concurrency stream version at request time.
     requested_by_id = models.PositiveBigIntegerField(null=True, blank=True)
@@ -976,6 +987,9 @@ class RPCApprovalRequest(NetBoxModel):
     PROTECTED_FIELDS = (
         "procedure_id",
         "procedure_version",
+        "procedure_policy_sha256",
+        "params_schema_sha256",
+        "result_schema_sha256",
         "effect",
         "target_type_id",
         "target_id",
@@ -983,6 +997,7 @@ class RPCApprovalRequest(NetBoxModel):
         "normalized_params",
         "command_fingerprint",
         "backend_id",
+        "backend_target_sha256",
         "credential_policy_ref",
         "requested_by_id",
     )

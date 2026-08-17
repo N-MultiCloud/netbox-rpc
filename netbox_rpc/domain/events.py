@@ -205,6 +205,7 @@ class ExecutionFailed:
     error_message: str
     code: str
     finished_at: Any
+    result: dict[str, Any] = field(default_factory=dict)
 
     EVENT_NAME: ClassVar[str] = "ExecutionFailed"
 
@@ -222,12 +223,15 @@ class ExecutionFailed:
 
     @property
     def data(self) -> dict[str, Any]:
-        return {
+        data = {
             "status": ExecutionStatus.FAILED.value,
             "code": self.code or "RPC_EXECUTION_FAILED",
             "error_message": self.message,
             "finished_at": _serialize_datetime(self.finished_at),
         }
+        if self.result:
+            data["result"] = self.result
+        return data
 
     @classmethod
     def from_data(cls, data: dict[str, Any]) -> ExecutionFailed:
@@ -235,6 +239,7 @@ class ExecutionFailed:
             error_message=str(data.get("error_message") or "RPC execution failed."),
             code=str(data.get("code") or "RPC_EXECUTION_FAILED"),
             finished_at=data.get("finished_at"),
+            result=dict(data.get("result") or {}),
         )
 
 

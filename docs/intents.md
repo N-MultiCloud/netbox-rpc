@@ -39,9 +39,11 @@ direct `RPCExecution` POST uses
 (`netbox_rpc.application.command_handlers.create_execution`) — never a side
 channel. That means each child independently re-runs **every** existing gate:
 the `execute_rpcprocedure` permission check, the #166 authoritative opt-in +
-selected-backend enforcement, the procedure's `enabled` check, the
-`approval_required` permission gate (`approve_rpcprocedure`), `params_schema`
-validation, and the #167 backend capability check. An intent grouping an
+selected-backend enforcement, the procedure's `enabled` check, its approval
+policy, `params_schema` validation, and the #167 backend capability check.
+Legacy `approval_required` procedures retain the requester permission gate;
+staging token rotation instead returns a pending child and requires a distinct
+later approval. An intent grouping an
 `approval_required` or destructive procedure does **not** auto-run that
 child — the same `PermissionDenied`/`ValidationError` a direct create would
 raise propagates out of `execute_intent()` unmodified, aborting the run. There
