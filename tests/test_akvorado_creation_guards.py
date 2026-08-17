@@ -54,6 +54,13 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
         "service.netbox.staging.rotate_backend_token"
     )
+    constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
+        "service.gitea.production.upgrade_1_27_1"
+    )
+    constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
+        constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
+    }
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
     aggregate.RPCExecutionAggregateError = type(
@@ -64,6 +71,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization = types.ModuleType("netbox_rpc.domain.normalization")
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
+    normalization.validate_gitea_upgrade_target = lambda *args, **kwargs: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
     normalization.code_gate_unavailable_reason = lambda procedure_name: None
     event_store = types.ModuleType("netbox_rpc.event_store")
@@ -290,6 +298,224 @@ def test_staging_rotation_runtime_policy_rejects_every_mutable_drift(
         command_handlers._require_staging_rotation_procedure_policy(
             procedure(canonical, changed_command)
         )
+
+
+def test_gitea_upgrade_target_lookup_is_exact_and_user_restricted(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    user = object()
+    target = SimpleNamespace(pk=170, name="Gitea")
+    manager = _RestrictedManager(target)
+    content_type = SimpleNamespace(
+        app_label="virtualization",
+        model="virtualmachine",
+        model_class=lambda: SimpleNamespace(objects=manager),
+    )
+    procedure = SimpleNamespace(name="service.gitea.production.upgrade_1_27_1")
+
+    command_handlers._require_gitea_upgrade_assigned_object(
+        {
+            "assigned_object_type": content_type,
+            "assigned_object_id": 170,
+        },
+        procedure,
+        user,
+    )
+    assert manager.restricted_user is user
+    assert manager.restricted_action == "view"
+    assert manager.queryset.filtered_pk == 170
+
+    for object_id in (None, 169, 171):
+        with pytest.raises(ValidationError):
+            command_handlers._require_gitea_upgrade_assigned_object(
+                {
+                    "assigned_object_type": content_type,
+                    "assigned_object_id": object_id,
+                },
+                procedure,
+                user,
+            )
+
+
+def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    contract = command_handlers.gitea_contract
+
+    class Commands:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self
+
+        def order_by(self, _field):
+            return self.rows
+
+    def procedure(policy):
+        return SimpleNamespace(
+            **policy,
+            commands=Commands(
+                [SimpleNamespace(**row) for row in contract.COMMAND_CONTRACT]
+            ),
+        )
+
+    canonical = {
+        **contract.PROCEDURE_POLICY,
+        "params_schema": contract.PARAMS_SCHEMA,
+        "result_schema": contract.RESULT_SCHEMA,
+    }
+    command_handlers._require_protected_procedure_policy(procedure(canonical))
+    for field, value in {
+        "enabled": False,
+        "handler_id": "different-handler",
+        "target_models": ["dcim.device"],
+        "timeout_seconds": 1799,
+        "approval_required": False,
+        "params_schema": {"type": "object"},
+        "result_schema": {"type": "object"},
+    }.items():
+        drifted = dict(canonical)
+        drifted[field] = value
+        with pytest.raises(ValidationError):
+            command_handlers._require_protected_procedure_policy(procedure(drifted))
+
+    execution = SimpleNamespace(procedure=SimpleNamespace(effect="destructive"))
+    assert command_handlers._credential_policy_reference(
+        {"ssh_policy_ref": contract.SSH_POLICY_REF},
+        execution,
+    ) == contract.SSH_POLICY_REF
+
+
+def test_gitea_requires_explicit_compatible_backend_capability(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    statuses = SimpleNamespace(
+        COMPATIBLE=object(),
+        MISMATCH=object(),
+        UNKNOWN=object(),
+    )
+    observed = {}
+    capabilities = types.ModuleType("netbox_rpc.capabilities")
+    capabilities.CapabilityStatus = statuses
+    capabilities.fetch_backend_capabilities = lambda target, use_cache=True: observed.update(
+        {"target": target, "use_cache": use_cache}
+    ) or object()
+    procedure = SimpleNamespace(
+        name="service.gitea.production.upgrade_1_27_1",
+    )
+    capabilities.verify_procedure_capability = lambda proc, manifest: statuses.UNKNOWN
+    models = types.ModuleType("netbox_rpc.models")
+    models.RpcPluginSettings = type("RpcPluginSettings", (), {})
+    monkeypatch.setitem(sys.modules, "netbox_rpc.capabilities", capabilities)
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(
+        sys.modules["netbox_rpc"], "capabilities", capabilities, raising=False
+    )
+
+    with pytest.raises(ValidationError):
+        command_handlers._verify_backend_capability(
+            procedure,
+            backend_target="locked-backend",
+            use_cache=False,
+        )
+    assert observed == {"target": "locked-backend", "use_cache": False}
+
+    capabilities.verify_procedure_capability = (
+        lambda proc, manifest: statuses.COMPATIBLE
+    )
+    command_handlers._verify_backend_capability(
+        procedure,
+        backend_target="locked-backend",
+        use_cache=False,
+    )
+
+
+def test_run_execution_persists_jobs_closed_gitea_indeterminate_response(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    closed = {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": None,
+            "healthy": None,
+            "stage": "indeterminate",
+        },
+    }
+    recorded = []
+
+    class Aggregate:
+        def __init__(self, execution):
+            self.execution = execution
+
+        def normalize(self, normalized, resolved_hash):
+            return None
+
+        def record_backend_response(self, response):
+            recorded.append(response)
+
+        def fail(self, message, code):
+            pytest.fail(f"unexpected worker failure {code}: {message}")
+
+    procedure = SimpleNamespace(
+        name="service.gitea.production.upgrade_1_27_1",
+        handler_id="service.gitea.production.upgrade_1_27_1",
+    )
+    execution = SimpleNamespace(
+        pk=1700,
+        procedure=procedure,
+        backend_id=7,
+        status="running",
+        STATUS_RUNNING="running",
+    )
+    models = types.ModuleType("netbox_rpc.models")
+    models.RpcPluginSettings = type(
+        "RpcPluginSettings",
+        (),
+        {"get_solo": classmethod(lambda cls: SimpleNamespace(enabled=True))},
+    )
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs._hash_json = lambda value: "fingerprint"
+    jobs._call_backend = lambda target, execution, lease=None: closed
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
+    monkeypatch.setattr(command_handlers, "resolve_backend", lambda backend: object())
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda ex: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_current_protected_approval",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_issue_dispatch_lease",
+        lambda *args, **kwargs: object(),
+    )
+
+    command_handlers.run_execution(execution)
+
+    assert recorded == [closed]
 
 
 def test_unsafe_config_content_is_rejected_before_serializer_save(

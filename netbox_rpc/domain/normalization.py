@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import posixpath
 import re
+from datetime import timezone
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
 from typing import Any
@@ -30,6 +33,7 @@ from ..constants import (
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
+    GITEA_PRODUCTION_UPGRADE_1_27_1,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
     INFLUXDB_1_BOOTSTRAP,
@@ -815,6 +819,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
             execution,
             target,
         )
+
+    if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
+        return _normalize_gitea_production_upgrade_execution(execution)
 
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
@@ -4371,6 +4378,468 @@ def _normalize_staging_backend_token_rotation_execution(
     }
 
     return normalized
+
+
+_GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+
+def _strict_target_int(value: object, *, field: str, expected: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        raise RPCExecutionError(
+            f"Production Gitea target {field} must be exactly {expected}.",
+            code="RPC_TARGET_INVALID",
+        )
+    return value
+
+
+def _target_relation(
+    target: object,
+    *,
+    field: str,
+    expected_id: int,
+    expected_name: str,
+) -> object:
+    relation = getattr(target, field, None)
+    relation_id = getattr(target, f"{field}_id", None)
+    _strict_target_int(relation_id, field=f"{field}_id", expected=expected_id)
+    if (
+        relation is None
+        or getattr(relation, "pk", None) != expected_id
+        or getattr(relation, "name", None) != expected_name
+    ):
+        raise RPCExecutionError(
+            "Production Gitea target "
+            f"{field} must be {expected_name} (PK {expected_id}).",
+            code="RPC_TARGET_INVALID",
+        )
+    return relation
+
+
+def _target_tag_slugs(target: object) -> set[str] | None:
+    """Return stable ORM tag slugs, or None for pure stubs without a manager."""
+    tags = getattr(target, "tags", None)
+    values_list = getattr(tags, "values_list", None)
+    if not callable(values_list):
+        return None
+    try:
+        return {str(value) for value in values_list("slug", flat=True)}
+    except (AttributeError, TypeError, ValueError):
+        raise RPCExecutionError(
+            "Production Gitea target tags could not be validated.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def validate_gitea_upgrade_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate and return the exact point-in-time production VM identity."""
+    from .. import gitea_upgrade_contract as contract
+
+    if target_model_label != contract.TARGET_OBJECT["content_type"]:
+        raise RPCExecutionError(
+            "Production Gitea upgrade requires a virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+    _strict_target_int(
+        assigned_object_id,
+        field="assigned_object_id",
+        expected=contract.TARGET_OBJECT_ID,
+    )
+    if (
+        target is None
+        or getattr(target, "pk", None) != contract.TARGET_OBJECT_ID
+        or getattr(target, "name", None) != contract.TARGET_NAME
+    ):
+        raise RPCExecutionError(
+            "Production Gitea upgrade requires VM PK 170 named Gitea.",
+            code="RPC_TARGET_INVALID",
+        )
+    if target_display is not None and target_display != contract.TARGET_NAME:
+        raise RPCExecutionError(
+            "Production Gitea target display must be exactly Gitea.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    cluster = _target_relation(
+        target,
+        field="cluster",
+        expected_id=contract.CLUSTER_ID,
+        expected_name=contract.CLUSTER_NAME,
+    )
+    node = _target_relation(
+        target,
+        field="device",
+        expected_id=contract.NODE_ID,
+        expected_name=contract.NODE_NAME,
+    )
+
+    custom_fields = getattr(target, "custom_field_data", None)
+    if not isinstance(custom_fields, dict):
+        raise RPCExecutionError(
+            "Production Gitea target custom fields are unavailable.",
+            code="RPC_TARGET_INVALID",
+        )
+    vmid = _strict_target_int(
+        custom_fields.get("proxmox_vm_id"),
+        field="custom_field_data.proxmox_vm_id",
+        expected=contract.PROXMOX_VMID,
+    )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        ipv4 = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Production Gitea target primary_ip4 is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if ipv4.version != 4 or str(ipv4) != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            f"Production Gitea target primary_ip4 must be {contract.IPV4_ADDRESS}.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Production Gitea target must be active.",
+            code="RPC_TARGET_INVALID",
+        )
+    tag_slugs = _target_tag_slugs(target)
+    if tag_slugs is not None and "production" not in tag_slugs:
+        raise RPCExecutionError(
+            "Production Gitea target must carry the production tag.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.TARGET_NAME,
+        "target_object": dict(contract.TARGET_OBJECT),
+        "vmid": vmid,
+        "cluster_id": getattr(cluster, "pk"),
+        "node": getattr(node, "name"),
+        "ipv4": str(ipv4),
+    }
+
+
+def _normalize_gitea_production_upgrade_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize the exact immutable production Gitea upgrade transaction."""
+    from .. import gitea_upgrade_contract as contract
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "Production Gitea upgrade params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        str(key)[:64]
+        for key in params
+        if key not in _GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            "Production Gitea upgrade accepts no caller parameters; "
+            f"unexpected field(s): {', '.join(unexpected[:8])}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    type_label = (
+        f"{getattr(assigned_object_type, 'app_label', '')}."
+        f"{getattr(assigned_object_type, 'model', '')}"
+    )
+    if type_label == ".":
+        type_label = str(getattr(execution, "target_model_label", "") or "")
+    target_metadata = validate_gitea_upgrade_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=type_label,
+        assigned_object_id=getattr(execution, "assigned_object_id", None),
+        target_display=getattr(execution, "target_display", None),
+    )
+    ssh_identity = _resolve_gitea_upgrade_ssh_identity(execution)
+    normalized: dict[str, Any] = {
+        **target_metadata,
+        "expected_source_version": contract.EXPECTED_SOURCE_VERSION,
+        "target_version": contract.TARGET_VERSION,
+        "artifact_sha256": contract.ARTIFACT_SHA256,
+        **ssh_identity,
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "target": contract.TARGET_NAME,
+        "assigned_object_id": contract.TARGET_OBJECT_ID,
+        "target_object_sha256": contract.TARGET_OBJECT_SHA256,
+        "vmid": contract.PROXMOX_VMID,
+        "cluster_id": contract.CLUSTER_ID,
+        "node": contract.NODE_NAME,
+        "ipv4": contract.IPV4_ADDRESS,
+        "expected_source_version": contract.EXPECTED_SOURCE_VERSION,
+        "target_version": contract.TARGET_VERSION,
+        "artifact_sha256": contract.ARTIFACT_SHA256,
+        **ssh_identity,
+    }
+    return normalized
+
+
+def _resolve_gitea_upgrade_ssh_identity(execution: RPCExecution) -> dict[str, Any]:
+    """Resolve and validate the public identity of Gitea's sole SSH service.
+
+    Secret material is checked only for presence and never returned. The
+    resulting public snapshot is persisted in normalized params, the approval
+    decision, and the signed lease fingerprint so any service/identity drift
+    invalidates the approved operation before dispatch.
+    """
+    from .. import gitea_upgrade_contract as contract
+
+    try:
+        from netbox_network.models import DeviceService
+    except (ImportError, AttributeError) as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy cannot be resolved because "
+            "netbox-network DeviceService is unavailable.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+
+    assigned_object_type_id = getattr(execution, "assigned_object_type_id", None)
+    if assigned_object_type_id is None:
+        assigned_object_type_id = getattr(
+            getattr(execution, "assigned_object_type", None), "pk", None
+        )
+    if assigned_object_type_id is None:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy requires a concrete target content type.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    try:
+        queryset = DeviceService.objects.filter(
+            assigned_object_type_id=assigned_object_type_id,
+            assigned_object_id=contract.TARGET_OBJECT_ID,
+            service_type=DeviceService.SERVICE_SSH,
+            enabled=True,
+        ).select_related("management_host", "credential")
+        services = list(queryset[:2])
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy could not be resolved.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if len(services) != 1:
+        raise RPCExecutionError(
+            "Production Gitea requires exactly one enabled target-owned SSH service.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    service = services[0]
+    management_host = getattr(service, "management_host", None)
+    raw_host = getattr(management_host, "address", None)
+    try:
+        host = ip_address(str(raw_host).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires an explicit IPv4 management host.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4 or str(host) != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            "Production Gitea SSH management host does not match the locked target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    port = getattr(service, "port", None)
+    if type(port) is not int or port != 22:
+        raise RPCExecutionError(
+            "Production Gitea SSH service must explicitly use port 22.",
+            code="RPC_TARGET_INVALID",
+        )
+    if getattr(service, "ssh_strict_host_key_checking", None) is not True:
+        raise RPCExecutionError(
+            "Production Gitea SSH service must enforce strict host-key checking.",
+            code="RPC_TARGET_INVALID",
+        )
+    known_hosts_entry = str(getattr(service, "ssh_known_hosts_entry", "") or "")
+    _validate_gitea_known_hosts_entry(known_hosts_entry)
+
+    identity = getattr(service, "credential", None)
+    identity_id = getattr(service, "credential_id", None)
+    if identity is None or type(identity_id) is not int or identity_id <= 0:
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires a stored SSH identity.",
+            code="RPC_TARGET_INVALID",
+        )
+    principal = str(getattr(identity, "username", "") or "")
+    if (
+        not principal
+        or principal != principal.strip()
+        or len(principal) > 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in principal)
+    ):
+        raise RPCExecutionError(
+            "Production Gitea SSH identity requires a bounded principal.",
+            code="RPC_TARGET_INVALID",
+        )
+    method = str(getattr(identity, "auth_method", "") or "")
+    if method not in contract.SUPPORTED_SSH_METHODS:
+        raise RPCExecutionError(
+            "Production Gitea SSH identity uses an unsupported method.",
+            code="RPC_TARGET_INVALID",
+        )
+    _require_gitea_ssh_identity_material(identity, method)
+
+    return {
+        "ssh_service_id": _positive_model_pk(service, "SSH service"),
+        "ssh_service_revision": _model_revision(service, "SSH service"),
+        "ssh_identity_id": identity_id,
+        "ssh_identity_revision": _model_revision(identity, "SSH identity"),
+        "ssh_principal": principal,
+        "ssh_method": method,
+        "ssh_host": str(host),
+        "ssh_port": port,
+        "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
+        "ssh_policy_ref": contract.SSH_POLICY_REF,
+    }
+
+
+def _require_gitea_ssh_identity_material(identity: object, method: str) -> None:
+    storage_backend = str(getattr(identity, "storage_backend", "local") or "local")
+    if storage_backend == "passbolt":
+        material_present = bool(str(getattr(identity, "passbolt_resource_id", "") or ""))
+    elif storage_backend == "local":
+        if method == "password":
+            material_present = bool(getattr(identity, "password_encrypted", ""))
+        else:
+            material_present = bool(getattr(identity, "ssh_private_key_encrypted", ""))
+            if method == "key_with_passphrase":
+                material_present = material_present and bool(
+                    getattr(identity, "ssh_private_key_passphrase_encrypted", "")
+                )
+    else:
+        material_present = False
+    if not material_present:
+        raise RPCExecutionError(
+            "Production Gitea SSH identity has no usable stored material.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _validate_gitea_known_hosts_entry(entry: str) -> None:
+    """Require one exact, unmarked OpenSSH host-key record for Gitea's IP."""
+    from .. import gitea_upgrade_contract as contract
+
+    if (
+        not entry
+        or entry != entry.strip()
+        or "\n" in entry
+        or "\r" in entry
+        or "\t" in entry
+        or len(entry) > 8192
+    ):
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires one bounded pinned known-hosts entry.",
+            code="RPC_TARGET_INVALID",
+        )
+    fields = entry.split(" ")
+    if len(fields) != 3 or any(not field for field in fields):
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry must contain exactly host, algorithm, and key.",
+            code="RPC_TARGET_INVALID",
+        )
+    host, algorithm, encoded_key = fields
+    if host != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry must pin only the locked IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+    if algorithm not in contract.SUPPORTED_SSH_HOST_KEY_ALGORITHMS:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry uses an unsupported host-key algorithm.",
+            code="RPC_TARGET_INVALID",
+        )
+    if len(encoded_key) > contract.SSH_HOST_KEY_ENCODED_MAX_LENGTH:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts key token is oversized.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        decoded_key = base64.b64decode(encoded_key, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry contains malformed key material.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    algorithm_length = int.from_bytes(decoded_key[:4], "big")
+    algorithm_end = 4 + algorithm_length
+    key_length_end = algorithm_end + 4
+    key_length = (
+        int.from_bytes(decoded_key[algorithm_end:key_length_end], "big")
+        if key_length_end <= len(decoded_key)
+        else -1
+    )
+    if (
+        algorithm_length != len(contract.SSH_HOST_KEY_ALGORITHM)
+        or decoded_key[4:algorithm_end]
+        != contract.SSH_HOST_KEY_ALGORITHM.encode("ascii")
+        or key_length != contract.SSH_HOST_KEY_BYTES
+        or len(decoded_key) != key_length_end + contract.SSH_HOST_KEY_BYTES
+    ):
+        raise RPCExecutionError(
+            "Production Gitea known-hosts key is not an exact Ed25519 wire record.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _positive_model_pk(value: object, label: str) -> int:
+    pk = getattr(value, "pk", None)
+    if type(pk) is not int or pk <= 0:
+        raise RPCExecutionError(
+            f"Production Gitea {label} requires a stable positive ID.",
+            code="RPC_TARGET_INVALID",
+        )
+    return pk
+
+
+def _model_revision(value: object, label: str) -> str:
+    revision = getattr(value, "last_updated", None)
+    if revision is None or not hasattr(revision, "isoformat"):
+        raise RPCExecutionError(
+            f"Production Gitea {label} requires a stable revision.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        if revision.tzinfo is None or revision.utcoffset() is None:
+            raise ValueError("naive revision")
+        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace(
+            "+00:00", "Z"
+        )
+    except (AttributeError, ValueError, OverflowError) as exc:
+        raise RPCExecutionError(
+            f"Production Gitea {label} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if not rendered or len(rendered) > 64:
+        raise RPCExecutionError(
+            f"Production Gitea {label} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    return rendered
 
 
 def _copy_optional_ssh_overrides(

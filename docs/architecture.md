@@ -79,8 +79,9 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
 
 - `create_execution(...)` checks execute permission, enabled state, approval
   policy, and JSON schema. Ordinary procedures emit `ExecutionQueued`, enqueue
-  the RQ job, and emit `JobEnqueued` or `ExecutionEnqueueFailed`. Staging token
-  rotation emits `ExecutionRequested` then `ApprovalRequested` and returns
+  the RQ job, and emit `JobEnqueued` or `ExecutionEnqueueFailed`. Protected
+  staging-token rotation and production Gitea upgrade procedures emit
+  `ExecutionRequested` then `ApprovalRequested` and return
   `pending_approval` without enqueueing;
 - `run_execution(execution)` starts the aggregate, resolves the backend,
   normalizes params, records normalization, calls the backend, and records the
@@ -101,8 +102,9 @@ objectless `user.has_perm(...)` admission checks do not preserve a concrete
 procedure constraint; completing general object-scoped two-person enforcement
 remains work under epic #163.
 
-Issue #221 deliberately activates the full existing approval foundation for
-`service.netbox.staging.rotate_backend_token` only:
+Issues #221 and #224 deliberately activate the full existing approval
+foundation for `service.netbox.staging.rotate_backend_token` and
+`service.gitea.production.upgrade_1_27_1` only:
 
 - creation needs execute permission scoped to this exact procedure but cannot
   be self-approved inline; it records an immutable snapshot and
@@ -124,15 +126,24 @@ Issue #221 deliberately activates the full existing approval foundation for
   require non-null distinct actors and revalidate the approval snapshot;
 - approval and rejection accept no caller reason for this procedure; their
   durable event uses a fixed bounded audit phrase;
-- staging rotation requires a signed one-time lease. Missing signing-key
+- both protected procedures require a signed one-time lease. Missing signing-key
   configuration fails with `RPC_DISPATCH_LEASE_REQUIRED` before the backend is
   contacted; ordinary procedures retain the backwards-compatible ID-only
   fallback.
 
 Ordinary backend audit events are limited to 50 per response and namespaced as
 `Backend::<name>` before append, so remote names cannot replay as internal
-state-transition events. Staging rotation accepts no backend events at all and
-requires the outer and nested result `ok` booleans to agree.
+state-transition events. Protected procedures accept no backend events and
+require the outer and nested result `ok` booleans to agree. The Gitea upgrade's
+normalized target/fingerprint also pins VM PK 170, VMID 222, cluster/node/IPv4,
+source/target versions, artifact digest, and target-owned SSH policy. Its public
+SSH binding snapshot includes stable service/identity IDs plus canonical UTC
+revisions, principal/method, locked host/port, and only a SHA-256 of the pinned
+known-hosts entry. The raw entry and secret material are never projected.
+Gitea capability and dispatch requests reject redirects. Its exact five-key
+backend wrapper is validated at the HTTP boundary, but only `ok/result` crosses
+into the event store; backend diagnostics are discarded and durable failure
+text is selected from a fixed catalog mapping keyed by the closed result tuple.
 
 `RPCApprovalRequest.expires_at` remains unenforced and general procedures are
 not implicitly migrated by this scoped change. See `AGENTS.md` § "Two-person

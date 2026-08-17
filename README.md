@@ -146,6 +146,29 @@ The procedure catalog is intentionally narrow:
   are part of the immutable approval snapshot. Migration reversal deletes the seed
   when it has no executions; if execution history protects it, reversal keeps
   the row and command history but forces `enabled=False`.
+- `service.gitea.production.upgrade_1_27_1` — disabled-by-default,
+  destructive, approval-required upgrade of the exact production `Gitea`
+  `virtualization.virtualmachine` PK 170 from 1.26.2 to 1.27.1. It accepts an
+  exact empty params object and server-normalizes VMID 222, cluster 6
+  (`PVE-CLUSTER-02`), node `pve03`, IPv4 `10.0.30.96`, the target-owned SSH
+  policy plus one enabled `DeviceService` public identity snapshot, and
+  official artifact SHA-256
+  `86a7ac26e7f9c9cca0f56c4fac07fff205d5fc3bca0e54af23a204f07b833bc9`.
+  The service/identity IDs and UTC revisions, principal/method, locked host/port,
+  pinned-known-host digest, policy reference, complete target/fingerprint, and
+  backend/TLS identity are captured in the immutable approval snapshot and
+  signed lease. Its Gitea-only capability extension also binds the target,
+  upgrade and guest constants, SSH pin parser, runtime budgets, closed schemas,
+  and result tuples; other handler hashes remain byte-for-byte unchanged.
+  Results expose only the
+  closed `ok/procedure/target/changed/healthy/stage` state; valid failure and
+  indeterminate results are preserved, while events and secret-prone output
+  are forbidden. Capability and dispatch HTTP redirects are never followed.
+  The exact five-key backend wrapper is reduced to `ok/result`; catalog-owned
+  static diagnostics are selected only from the validated six-state tuple, so
+  backend diagnostic strings never enter persistence. See
+  [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md)
+  for activation order, exact states, security, and rollback invariants.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -1050,9 +1073,10 @@ guards before an execution record is created and the RQ job is enqueued:
 
 1. **Enabled** — disabled procedures are rejected (HTTP 400).
 2. **Approval** — legacy procedures with `approval_required=True` require the
-   caller to hold `netbox_rpc.approve_rpcprocedure`. Staging backend-token
-   rotation instead records `requested → pending_approval` without enqueueing;
-   only a distinct actor with that permission may record
+   caller to hold `netbox_rpc.approve_rpcprocedure`. Protected staging-token
+   rotation and production Gitea upgrade procedures instead record
+   `requested → pending_approval` without enqueueing; only a distinct actor
+   with that permission may record
    `approved → queued` and enqueue it.
 3. **Params schema** — when a procedure defines `params_schema`, submitted
    `params` are validated against the JSON Schema before proceeding.
@@ -1061,8 +1085,8 @@ These guards run at the API layer, not the model layer, because the serializer
 receives the procedure as a foreign-key ID and the schema/enabled/approval
 checks require the resolved object.
 
-Ordinary commands emit `ExecutionQueued` before enqueueing. Staging token
-rotation emits `ExecutionRequested` and `ApprovalRequested` at creation, then
+Ordinary commands emit `ExecutionQueued` before enqueueing. Protected procedures
+emit `ExecutionRequested` and `ApprovalRequested` at creation, then
 `ExecutionApproved` and `ExecutionQueued` only after a distinct decision. If
 RQ/Redis enqueue fails, either flow emits `ExecutionEnqueueFailed` and projects
 `error_code="RPC_ENQUEUE_FAILED"` instead of leaving a permanent queued record

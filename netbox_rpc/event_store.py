@@ -12,8 +12,10 @@ from django.db import IntegrityError
 from django.utils import timezone
 
 from .constants import (
+    GITEA_PRODUCTION_UPGRADE_1_27_1,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+    PROTECTED_APPROVAL_PROCEDURE_NAMES,
 )
 from .domain import events as domain_events
 from .domain.projection import ProjectionState, apply, rebuild
@@ -492,11 +494,15 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         getattr(getattr(execution, "procedure", None), "name", "") or ""
     )
     is_staging_rotation = procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
-    # These two carry a closed oneOf success envelope in their result_schema, which
-    # only constrains the NESTED object; requiring outer/nested agreement is what
-    # stops an ok=true response around a failed install being recorded as success.
+    is_protected_procedure = procedure_name in PROTECTED_APPROVAL_PROCEDURE_NAMES
+    is_gitea_upgrade = procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1
+    # Protected procedures and the InfluxDB installers carry a closed oneOf
+    # success envelope in their result_schema, which only constrains the nested
+    # object. Requiring outer/nested agreement prevents an ok=true wrapper around
+    # a failed operation from being recorded as success.
     requires_envelope_state_match = (
-        is_staging_rotation or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        is_protected_procedure
+        or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
     )
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
@@ -505,8 +511,13 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         raw_result if isinstance(raw_result, dict) else {},
         string_limits=string_limits,
     )
-    error_code = str(response.get("error_code") or "")
-    error_message = str(response.get("error_message") or "")
+    if is_gitea_upgrade and isinstance(raw_result, dict):
+        from .gitea_upgrade_contract import result_diagnostics
+
+        error_code, error_message = result_diagnostics(raw_result)
+    else:
+        error_code = str(response.get("error_code") or "")
+        error_message = str(response.get("error_message") or "")
     # #215 round 3: validate the raw, untouched backend result -- not a
     # length-clamped copy. A schema property only ends up in string_limits
     # when its maxLength was deliberately widened above MAX_EVENT_STRING_LENGTH
@@ -531,7 +542,9 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     result_is_present = "result" in response
     should_validate_result = ok or result_is_present or requires_envelope_state_match
     schema_mismatch = ""
-    if is_staging_rotation:
+    if is_gitea_upgrade:
+        schema_mismatch = _gitea_backend_response_mismatch(response, raw_result)
+    elif is_staging_rotation:
         schema_mismatch = _staging_backend_response_mismatch(response, raw_result)
     elif requires_envelope_state_match:
         schema_mismatch = _envelope_ok_state_mismatch(response, raw_result)
@@ -569,7 +582,7 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         # secret-leak and database-amplification channel before the response
         # itself is accepted. Other procedures retain their existing event
         # behavior.
-        if not is_staging_rotation:
+        if not is_protected_procedure:
             raw_backend_events = response.get("events") or []
             backend_events = (
                 raw_backend_events[:MAX_BACKEND_EVENTS]
@@ -647,19 +660,39 @@ def _envelope_ok_state_mismatch(
     return ""
 
 
-def _staging_backend_response_mismatch(
+def _gitea_backend_response_mismatch(
     response: dict[str, Any],
     raw_result: object,
 ) -> str:
-    """Validate the closed staging envelope before persisting any content."""
+    """Require the diagnostic-free catalog projection of the Gitea envelope."""
+
+    if set(response) != {"ok", "result"}:
+        return "Backend result schema mismatch at response: unexpected property."
+    return _protected_backend_response_mismatch(response, raw_result)
+
+
+def _protected_backend_response_mismatch(
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    """Validate a closed protected envelope before persisting any content."""
 
     envelope_mismatch = _envelope_ok_state_mismatch(response, raw_result)
     if envelope_mismatch:
         return envelope_mismatch
     backend_events = response.get("events")
     if backend_events not in (None, []):
-        return "Backend result schema mismatch at events: staging events are forbidden."
+        return "Backend result schema mismatch at events: protected events are forbidden."
     return ""
+
+
+def _staging_backend_response_mismatch(
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    """Validate the closed staging envelope before persisting any content."""
+
+    return _protected_backend_response_mismatch(response, raw_result)
 
 
 def _result_schema_string_limits(
