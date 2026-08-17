@@ -74,11 +74,28 @@ STATE_PATH = f"{BACKUP_ROOT}/transaction-state.json"
 LOCAL_HEALTH_URL = "http://127.0.0.1:3000/api/healthz"
 LOCAL_VERSION_URL = "http://127.0.0.1:3000/api/v1/version"
 EXTERNAL_VERSION_URL = "https://git.nmulti.cloud/api/v1/version"
+BACKEND_ID = 1
+BACKEND_BASE_URL = "http://127.0.0.1:16005"
+BACKEND_VERIFY_SSL = False
 SUPPORTED_SSH_METHODS = frozenset({"password", "key", "key_with_passphrase"})
 SSH_HOST_KEY_ALGORITHM = "ssh-ed25519"
 SSH_HOST_KEY_ENCODED_MAX_LENGTH = 256
 SSH_HOST_KEY_BYTES = 32
 SUPPORTED_SSH_HOST_KEY_ALGORITHMS = frozenset({SSH_HOST_KEY_ALGORITHM})
+
+# Cross-repository executable identity. The backend derives these values from
+# the exact production script and complete fixed argv; the catalog binds them
+# into capability compatibility without carrying executable bytes or secrets.
+EXECUTABLE_CONTRACT_VERSION = 1
+EXECUTABLE_CANONICALIZATION = "json-sort-keys-compact-utf8"
+EXECUTABLE_SCRIPT_LENGTH_BYTES = 59_952
+EXECUTABLE_SCRIPT_SHA256 = (
+    "8cb74c96ebbc278eaa1e23f0f22d0c4a19fa044a00e15503be95ac54a5d80f93"
+)
+EXECUTABLE_ARGV_LENGTH_BYTES = 63_492
+EXECUTABLE_ARGV_SHA256 = (
+    "c8ba17a10783f0ebe6823026571ac388fbcf75fc4d5443c9c7d309792f4a3631"
+)
 
 COMMAND_CONTRACT = [
     {
@@ -332,6 +349,19 @@ def result_diagnostics(result: dict[str, Any]) -> tuple[str, str]:
     return RESULT_DIAGNOSTICS.get(state, ("", ""))
 
 SEMANTIC_CAPABILITY_EXTENSION = {
+    "backend": {
+        "backend_id": BACKEND_ID,
+        "base_url": BACKEND_BASE_URL,
+        "verify_ssl": BACKEND_VERIFY_SSL,
+    },
+    "executable": {
+        "version": EXECUTABLE_CONTRACT_VERSION,
+        "canonicalization": EXECUTABLE_CANONICALIZATION,
+        "script_length_bytes": EXECUTABLE_SCRIPT_LENGTH_BYTES,
+        "script_sha256": EXECUTABLE_SCRIPT_SHA256,
+        "argv_length_bytes": EXECUTABLE_ARGV_LENGTH_BYTES,
+        "argv_sha256": EXECUTABLE_ARGV_SHA256,
+    },
     "procedure": {
         "effect": EFFECT,
         "timeout_seconds": TIMEOUT_SECONDS,
@@ -400,6 +430,7 @@ def canonical_sha256(value: Any) -> str:
 
 
 COMMAND_CONTRACT_SHA256 = canonical_sha256(COMMAND_CONTRACT)
+SEMANTIC_CAPABILITY_SHA256 = canonical_sha256(SEMANTIC_CAPABILITY_EXTENSION)
 
 PROCEDURE_POLICY = {
     "name": PROCEDURE_NAME,
@@ -415,6 +446,11 @@ PROCEDURE_POLICY = {
     "output_parser": OUTPUT_PARSER,
     "output_schema": OUTPUT_SCHEMA,
     "command_contract_sha256": COMMAND_CONTRACT_SHA256,
+    # Gitea-only approval binding. Capability compatibility and the signed
+    # lease already carry the full contract hash; including the semantic digest
+    # here also invalidates a pending or queued approval when exact backend,
+    # executable, rollback, schema, or result semantics change.
+    "semantic_contract_sha256": SEMANTIC_CAPABILITY_SHA256,
 }
 
 PROCEDURE_POLICY_SHA256 = canonical_sha256(PROCEDURE_POLICY)

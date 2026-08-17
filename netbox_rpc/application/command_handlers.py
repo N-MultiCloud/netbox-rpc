@@ -205,6 +205,20 @@ def _require_concrete_protected_backend_id(
                 )
             }
         )
+    contract = _protected_contract(procedure_name)
+    expected_backend_id = getattr(contract, "BACKEND_ID", None)
+    if (
+        expected_backend_id is not None
+        and concrete_backend_id != expected_backend_id
+    ):
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    f"{_protected_label(procedure_name)} requires authoritative "
+                    f"RPC backend {expected_backend_id}."
+                )
+            }
+        )
     return concrete_backend_id
 
 
@@ -246,6 +260,34 @@ def _verify_backend_capability(
         )
 
 
+def _resolve_validated_protected_backend_target(
+    backend_id: object,
+    procedure_name: str,
+    *,
+    backend_target: object | None = None,
+) -> object:
+    """Resolve and validate one protected target before authenticated I/O.
+
+    Capability discovery and dispatch both carry the backend authentication
+    token.  A mutable backend row must therefore match the immutable reviewed
+    URL/TLS binding before either operation can use it.  Returning the same
+    object lets admission, approval, lease validation, and dispatch avoid a
+    second resolver read and its associated time-of-check/time-of-use gap.
+    """
+
+    concrete_backend_id = _require_concrete_protected_backend_id(
+        backend_id,
+        procedure_name,
+    )
+    target = backend_target or resolve_backend(concrete_backend_id)
+    _protected_backend_target_sha256(
+        concrete_backend_id,
+        procedure_name=procedure_name,
+        backend_target=target,
+    )
+    return target
+
+
 def create_execution(*, serializer: Any, user: object) -> object:
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
@@ -268,6 +310,7 @@ def create_execution(*, serializer: Any, user: object) -> object:
     gate_reason = code_gate_unavailable_reason(procedure.name)
     if gate_reason is not None:
         raise drf_serializers.ValidationError({"procedure_id": gate_reason})
+    protected_backend_target: object | None = None
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
         authoritative_backend_id = _require_concrete_protected_backend_id(
             authoritative_backend_id,
@@ -276,6 +319,10 @@ def create_execution(*, serializer: Any, user: object) -> object:
         _require_protected_procedure_policy(procedure)
         _require_protected_procedure_scope(procedure, user, "execute")
         _require_protected_creation_shape(serializer, procedure.name)
+        protected_backend_target = _resolve_validated_protected_backend_target(
+            authoritative_backend_id,
+            procedure.name,
+        )
     elif procedure.approval_required:
         if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
             raise PermissionDenied(
@@ -323,7 +370,10 @@ def create_execution(*, serializer: Any, user: object) -> object:
         _scrub_password_param(params)
 
     # #167: fail closed before enqueue on a backend capability mismatch.
-    _verify_backend_capability(procedure)
+    _verify_backend_capability(
+        procedure,
+        backend_target=protected_backend_target,
+    )
 
     # #215 round 3: stamp the procedure's timeout_seconds onto `params`
     # BEFORE serializer.save(), not via a second post-save write. The
@@ -362,7 +412,11 @@ def create_execution(*, serializer: Any, user: object) -> object:
             except RPCExecutionError as exc:
                 raise drf_serializers.ValidationError({"params": str(exc)}) from exc
             aggregate.request(requested_by_id=user.pk)
-            approval_request = _create_approval_request(execution, normalized)
+            approval_request = _create_approval_request(
+                execution,
+                normalized,
+                backend_target=protected_backend_target,
+            )
             aggregate.request_approval(
                 snapshot_hash=approval_request.payload_hash,
                 requested_by_id=user.pk,
@@ -471,6 +525,8 @@ def _approval_protected_payload(
 def _create_approval_request(
     execution: object,
     normalized: dict[str, Any],
+    *,
+    backend_target: object | None = None,
 ) -> object:
     """Persist a protected snapshot after ExecutionRequested is recorded."""
     from ..models import RPCApprovalRequest
@@ -478,7 +534,11 @@ def _create_approval_request(
     return RPCApprovalRequest.objects.create(
         execution=execution,
         stream_version=_current_stream_version(execution),
-        **_approval_protected_payload(execution, normalized),
+        **_approval_protected_payload(
+            execution,
+            normalized,
+            backend_target=backend_target,
+        ),
     )
 
 
@@ -670,7 +730,7 @@ def _protected_procedure_policy(
             }
             for command in commands.all().order_by("sequence")
         ]
-    return {
+    policy = {
         "name": getattr(procedure, "name", None),
         "handler_id": getattr(procedure, "handler_id", None),
         "version": getattr(procedure, "version", None),
@@ -689,6 +749,14 @@ def _protected_procedure_policy(
             command_contract
         ),
     }
+    semantic_contract_sha256 = getattr(
+        contract,
+        "SEMANTIC_CAPABILITY_SHA256",
+        None,
+    )
+    if semantic_contract_sha256 is not None:
+        policy["semantic_contract_sha256"] = semantic_contract_sha256
+    return policy
 
 
 def _staging_backend_target_sha256(
@@ -720,6 +788,20 @@ def _protected_backend_target_sha256(
             {
                 "backend": (
                     f"{_protected_label(procedure_name)} authoritative backend is unavailable."
+                )
+            }
+        )
+    expected_backend_url = getattr(contract, "BACKEND_BASE_URL", None)
+    expected_verify_ssl = getattr(contract, "BACKEND_VERIFY_SSL", None)
+    if expected_backend_url is not None and (
+        str(getattr(target, "url", "") or "") != expected_backend_url
+        or bool(getattr(target, "verify_ssl", False)) is not expected_verify_ssl
+    ):
+        raise drf_serializers.ValidationError(
+            {
+                "backend": (
+                    f"{_protected_label(procedure_name)} authoritative backend "
+                    "URL/TLS policy does not match the immutable reviewed contract."
                 )
             }
         )
@@ -897,20 +979,38 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
             backend_pk if backend_pk is not None else execution.backend_id
         )
 
-    target = resolve_backend(backend_selector)
-    if target is None:
-        aggregate.fail(
-            "No NMSBackend configured for RPC execution.",
-            "RPC_BACKEND_NOT_CONFIGURED",
-        )
-        raise RPCExecutionError(
-            "No NMSBackend configured for RPC execution.",
-            code="RPC_BACKEND_NOT_CONFIGURED",
-        )
-
     try:
         from .. import jobs
 
+        try:
+            target = resolve_backend(backend_selector)
+        except Exception as exc:
+            # Resolver implementations may import deployment-owned code or
+            # consult mutable configuration. Once the queued execution has
+            # been claimed, every such failure must append a bounded terminal
+            # event rather than leaking exception text or stranding ``running``.
+            raise RPCExecutionError(
+                "RPC backend resolution failed; execution not dispatched.",
+                code="RPC_BACKEND_RESOLUTION_FAILED",
+            ) from exc
+        if target is None:
+            raise RPCExecutionError(
+                "No NMSBackend configured for RPC execution.",
+                code="RPC_BACKEND_NOT_CONFIGURED",
+            )
+
+        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+            try:
+                target = _resolve_validated_protected_backend_target(
+                    bound_backend_id,
+                    execution.procedure.name,
+                    backend_target=target,
+                )
+            except drf_serializers.ValidationError as exc:
+                raise RPCExecutionError(
+                    f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
+                    code="RPC_BACKEND_BINDING_INVALID",
+                ) from exc
         if execution.procedure.name == GITEA_PRODUCTION_UPGRADE_1_27_1:
             _verify_backend_capability(
                 execution.procedure,
@@ -1163,8 +1263,21 @@ def _approve_protected_execution(
                 .get(pk=execution.pk)
             )
             _require_protected_procedure_policy(locked.procedure)
+            backend_target = _resolve_validated_protected_backend_target(
+                locked.backend_id,
+                locked.procedure.name,
+            )
+            _verify_backend_capability(
+                locked.procedure,
+                backend_target=backend_target,
+                use_cache=False,
+            )
             normalized = normalize_execution_params(locked)
-            current_protected = _approval_protected_payload(locked, normalized)
+            current_protected = _approval_protected_payload(
+                locked,
+                normalized,
+                backend_target=backend_target,
+            )
             RPCExecutionAggregate(locked).approve(
                 approver_id=user.pk,
                 current_protected=current_protected,

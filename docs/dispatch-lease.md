@@ -100,9 +100,20 @@ cross-repo contract.
   backend gate during rollback.
   The capability hash includes the Gitea semantic extension in addition to the
   representative command; all other handler hash payloads remain compatible
-  with the generic command contract. Capability and dispatch requests do not
+  with the generic command contract. Its semantic extension and approval
+  policy both bind backend ID 1, loopback URL `http://127.0.0.1:16005`,
+  `verify_ssl=false`, and the canonical executable/rollback/schema digest.
+  The public Nginx vhost is unsupported. Requested, pending, approved, or queued
+  work is invalidated before enqueue or lease issuance if those semantics
+  drift. The existing lease `contract_hash` provides the signed binding; no new
+  caller or wire field is added. Capability and dispatch requests do not
   follow redirects, so the signed lease cannot leave its approved backend
-  destination. A 3xx dispatch result is persisted as indeterminate. The raw
+  destination. The exact backend URL/TLS binding is validated before any
+  authenticated capability request and the same resolved target is reused
+  through snapshot, lease, and dispatch. Approval performs an uncached
+  compatibility check inside its locked transaction; drift leaves the request
+  pending without approval/queue events or a job. A 3xx dispatch result is
+  persisted as indeterminate. The raw
   backend diagnostic fields are discarded before event persistence; catalog
   failure diagnostics are fixed by the validated closed result tuple.
 

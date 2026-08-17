@@ -998,18 +998,26 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
     assert 'max_version = "4.6.99"' in init
+    assert "on:\n  workflow_dispatch:" in gitea_workflow
+    assert "pull_request:" not in gitea_workflow
+    assert "push:" not in gitea_workflow
+    assert "Manual, non-gating diagnostics only" in gitea_workflow
     assert "\n  compatibility:\n" in gitea_workflow
     compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
     assert "runs-on: mirror-host" in compatibility_job
     assert "fail-fast: false" in compatibility_job
     assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
-    # Host-mode executor: the gate provisions per-leg UTF8 databases on the
-    # host PostgreSQL instead of Docker service containers.
+    # Host-mode manual diagnostic: it provisions per-leg UTF8 databases on host
+    # PostgreSQL only for a trusted canonical-main operator dispatch. It is not
+    # PR/push or branch-protection evidence.
     assert "Provision a UTF8 compatibility database" in compatibility_job
     assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
     assert "v4.5.8" in compatibility_job
     assert "v4.6.5" in compatibility_job
-    assert "if:" not in compatibility_job
+    assert (
+        "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
+        "github.ref == 'refs/heads/main' }}"
+    ) in compatibility_job
     assert "soft-skip" not in compatibility_job
 
     migrations_dir = ROOT / "netbox_rpc" / "migrations"

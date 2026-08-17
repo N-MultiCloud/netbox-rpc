@@ -7,7 +7,6 @@ no secrets or caller-controlled routing enter this catalog procedure.
 
 from django.db import migrations
 from django.db.migrations.exceptions import IrreversibleError
-from django.db.models.deletion import ProtectedError
 
 _PROCEDURE_NAME = "service.gitea.production.upgrade_1_27_1"
 _HANDLER_ID = _PROCEDURE_NAME
@@ -133,31 +132,44 @@ def seed_gitea_production_upgrade(apps, schema_editor):
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
     RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
 
-    procedure, _created = RPCProcedure.objects.update_or_create(
+    # Ownership is deliberately all-or-nothing. ``update_or_create`` would
+    # silently adopt and overwrite an operator-owned row under the canonical
+    # name; the reverse migration could then mistake it for seed-owned data and
+    # destroy it. A pre-existing name therefore aborts the atomic forward
+    # migration before either the procedure or its commands are touched.
+    if RPCProcedure.objects.filter(name=_PROCEDURE_NAME).exists():
+        raise RuntimeError(
+            "Migration 0071 cannot seed the production Gitea upgrade because "
+            "an RPC procedure with the canonical name already exists; preserve "
+            "and reconcile the operator-owned row before retrying."
+        )
+    procedure = RPCProcedure.objects.create(
         name=_PROCEDURE_NAME,
-        defaults=_PROCEDURE_DEFAULTS,
+        **_PROCEDURE_DEFAULTS,
     )
-    RPCProcedureCommand.objects.update_or_create(
+    RPCProcedureCommand.objects.create(
         procedure=procedure,
         sequence=1,
-        defaults=_REPRESENTATIVE_COMMAND,
+        **_REPRESENTATIVE_COMMAND,
     )
 
 
 def unseed_gitea_production_upgrade(apps, schema_editor):
-    """Delete an unused seed or abort while referenced history remains."""
-    RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    procedure = RPCProcedure.objects.filter(name=_PROCEDURE_NAME).first()
-    if procedure is None:
-        return
-    try:
-        procedure.delete()
-    except ProtectedError as exc:
-        raise IrreversibleError(
-            "Cannot reverse migration 0071 while the Gitea upgrade procedure "
-            "is referenced; preserve the applied migration or remove the "
-            "referencing execution/approval history under operator control."
-        ) from exc
+    """Always abort before inspecting or mutating catalog data.
+
+    A data migration has no durable row-ownership ledger. Procedure names,
+    primary keys, commands, and policy fields are all operator-mutable after the
+    forward migration, so reverse-time comparison cannot prove that a matching
+    row is still the seed rather than a replacement (or locate a renamed seed).
+    Explicit irreversibility keeps 0071 applied and preserves every procedure,
+    command, history row, and generic annotation for a reviewed forward repair.
+    """
+
+    raise IrreversibleError(
+        "Migration 0071 is intentionally irreversible because production Gitea "
+        "procedure ownership cannot be proven after operator mutation; keep the "
+        "migration applied and use a reviewed forward repair migration."
+    )
 
 
 class Migration(migrations.Migration):

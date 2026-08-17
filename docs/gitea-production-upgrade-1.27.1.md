@@ -18,6 +18,9 @@ and an operator has authorized the maintenance window.
 - Policy: `effect="destructive"`, approval required, 1800-second timeout,
   1725-second handler budget, 1690-second guest process timeout, and exact
   empty closed params object.
+- Backend: `RPCBackend` PK `1`, exact loopback base URL
+  `http://127.0.0.1:16005`, and `verify_ssl=false`. Dispatch through the public
+  Nginx vhost is unsupported.
 - Guest: `/usr/local/bin/gitea`, `gitea.service`, unit path
   `/etc/systemd/system/gitea.service` with SHA-256
   `557ad3478e463075b1f6dd3a459207631ca6114371a9db670458e76515d4b7f6`,
@@ -53,8 +56,19 @@ the complete procedure/command/schema policy, target and command fingerprint,
 authoritative backend ID plus URL/TLS fingerprint, and SSH-policy
 reference. A signed one-time dispatch lease is mandatory; missing issuer keys
 fail with `RPC_DISPATCH_LEASE_REQUIRED` before the backend is contacted.
+The exact loopback backend binding is validated before every authenticated
+capability request and the same resolved target is reused through approval,
+lease creation, and dispatch. Approval performs an uncached compatibility check
+under its row lock; mismatch or manifest loss leaves the execution pending and
+appends no approval/queue event or job.
 The backend must compare the signed requester and approver with the fetched
 execution and independently re-derive the target, params, and SSH snapshot.
+For this procedure only, the procedure-policy approval hash contains the exact
+canonical semantic-extension digest, including the backend and executable
+identity. Executable-, rollback-, backend-, schema-, or result-contract drift
+therefore invalidates requested, pending, approved, and queued work before
+enqueue or lease issuance. The signed lease's existing `contract_hash` binds
+the same semantics; no redundant caller-controlled or lease field is added.
 
 ## Result states
 
@@ -97,20 +111,33 @@ backup/restore, and capability contract; open the backend gate and advertise
 the exact capability; only then may an operator enable the catalog row. Rollback
 reverses the order: disable the catalog row first so no new approvals can enter,
 drain/reconcile any in-flight execution, then close the backend gate.
-Both admission and an uncached worker pre-dispatch check require the Gitea
-capability to be explicitly `COMPATIBLE`; absent, unreachable, malformed, or
-oversized manifests fail closed.
+Admission, approval, and an uncached worker pre-dispatch check require the
+Gitea capability to be explicitly `COMPATIBLE`; absent, unreachable, malformed,
+or oversized manifests fail closed.
 The capability hash is derived from the representative command plus a
 Gitea-only semantic extension binding static target/topology, versions,
 artifact URL/digest, guest paths/unit/health URLs, 1725-second handler and
 1690-second process budgets, the SSH pin parser, closed
-caller/normalized/fingerprint schemas, and all result tuples. Its compact
+caller/normalized/fingerprint schemas, all result tuples, and executable
+contract version 1. The executable identity binds the backend's exact upgrade
+script (59,952 bytes, SHA-256
+`8cb74c96ebbc278eaa1e23f0f22d0c4a19fa044a00e15503be95ac54a5d80f93`)
+and complete fixed argv (63,492 canonical bytes, SHA-256
+`c8ba17a10783f0ebe6823026571ac388fbcf75fc4d5443c9c7d309792f4a3631`)
+under the shared `json-sort-keys-compact-utf8` canonicalization; changing
+mutation, rollback, or invocation bytes therefore changes capability
+compatibility. Its compact
 canonical JSON and digest fixture must match the paired backend byte-for-byte;
 legacy handler hashes do not gain this extension.
-Migration `0071` can reverse only while the seed is unreferenced. If execution
-or approval history protects the procedure, reversal aborts instead of marking
-the migration unapplied while leaving its catalog rows behind; an operator must
-preserve the applied migration or deliberately reconcile the references first.
+Migration `0071` takes ownership only by creating an absent canonical name; if
+an operator-owned procedure already uses that name, forward migration aborts
+before modifying the procedure or any command. Migration `0071` is intentionally
+irreversible because it has no durable row-ownership ledger. Its reverse always
+raises before inspecting or mutating catalog data, so an operator replacement,
+rename, execution history, approval state, or generic NetBox metadata cannot be
+deleted or left behind while Django records the migration unapplied. Operators
+must keep `0071` applied; removal or repair requires a reviewed forward migration
+with explicit ownership evidence.
 
 The backend must verify the official digest before stopping Gitea, create and
 verify a restorable backup before mutation, atomically install the new binary,

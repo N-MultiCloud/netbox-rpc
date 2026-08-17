@@ -473,7 +473,7 @@ def test_run_execution_persists_jobs_closed_gitea_indeterminate_response(
     execution = SimpleNamespace(
         pk=1700,
         procedure=procedure,
-        backend_id=7,
+        backend_id=1,
         status="running",
         STATUS_RUNNING="running",
     )
@@ -491,7 +491,15 @@ def test_run_execution_persists_jobs_closed_gitea_indeterminate_response(
     monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
     monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
     monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
-    monkeypatch.setattr(command_handlers, "resolve_backend", lambda backend: object())
+    backend_target = SimpleNamespace(
+        url="http://127.0.0.1:16005",
+        verify_ssl=False,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "resolve_backend",
+        lambda backend: backend_target,
+    )
     monkeypatch.setattr(
         command_handlers,
         "_verify_backend_capability",
@@ -516,6 +524,200 @@ def test_run_execution_persists_jobs_closed_gitea_indeterminate_response(
     command_handlers.run_execution(execution)
 
     assert recorded == [closed]
+
+
+def test_protected_admission_rejects_backend_drift_before_capability_probe(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        name="service.gitea.production.upgrade_1_27_1",
+        enabled=True,
+        approval_required=True,
+    )
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": {}}
+        initial_data = {
+            "procedure_id": procedure.name,
+            "assigned_object_type": "virtualization.virtualmachine",
+            "assigned_object_id": 170,
+            "params": {},
+        }
+        saved = False
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            self.saved = True
+            return SimpleNamespace()
+
+    serializer = Serializer()
+    capability_probe = SimpleNamespace(called=False)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: 1,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda protected_procedure: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_creation_shape",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "resolve_backend",
+        lambda backend: SimpleNamespace(
+            url="https://public-proxy.invalid",
+            verify_ssl=True,
+        ),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: setattr(capability_probe, "called", True),
+    )
+
+    with pytest.raises(ValidationError):
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+    assert capability_probe.called is False
+    assert serializer.saved is False
+
+
+def test_worker_rejects_backend_drift_before_capability_or_dispatch(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    observed = []
+
+    class Aggregate:
+        def __init__(self, execution):
+            self.execution = execution
+
+        def fail(self, message, code):
+            observed.append(("fail", code))
+
+    procedure = SimpleNamespace(
+        name="service.gitea.production.upgrade_1_27_1",
+        handler_id="service.gitea.production.upgrade_1_27_1",
+    )
+    execution = SimpleNamespace(
+        pk=1701,
+        procedure=procedure,
+        backend_id=1,
+        status="running",
+        STATUS_RUNNING="running",
+    )
+    models = types.ModuleType("netbox_rpc.models")
+    models.RpcPluginSettings = type(
+        "RpcPluginSettings",
+        (),
+        {"get_solo": classmethod(lambda cls: SimpleNamespace(enabled=True))},
+    )
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs._call_backend = lambda *args, **kwargs: observed.append(("dispatch", None))
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
+    monkeypatch.setattr(
+        command_handlers,
+        "resolve_backend",
+        lambda backend: SimpleNamespace(
+            url="https://public-proxy.invalid",
+            verify_ssl=True,
+        ),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: observed.append(("capability", None)),
+    )
+
+    with pytest.raises(RPCExecutionError) as raised:
+        command_handlers.run_execution(execution)
+
+    assert raised.value.code == "RPC_BACKEND_BINDING_INVALID"
+    assert observed == [("fail", "RPC_BACKEND_BINDING_INVALID")]
+
+
+def test_protected_worker_terminalizes_resolver_exception_without_contact(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    observed = []
+
+    class Aggregate:
+        def __init__(self, execution):
+            self.execution = execution
+
+        def fail(self, message, code):
+            observed.append(("fail", message, code))
+
+    procedure = SimpleNamespace(
+        name="service.gitea.production.upgrade_1_27_1",
+        handler_id="service.gitea.production.upgrade_1_27_1",
+    )
+    execution = SimpleNamespace(
+        pk=1702,
+        procedure=procedure,
+        backend_id=1,
+        status="running",
+        STATUS_RUNNING="running",
+    )
+    models = types.ModuleType("netbox_rpc.models")
+    models.RpcPluginSettings = type(
+        "RpcPluginSettings",
+        (),
+        {"get_solo": classmethod(lambda cls: SimpleNamespace(enabled=True))},
+    )
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs._call_backend = lambda *args, **kwargs: observed.append(("dispatch",))
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
+    def raise_resolver_error(backend):
+        raise RuntimeError("opaque resolver diagnostic")
+
+    monkeypatch.setattr(command_handlers, "resolve_backend", raise_resolver_error)
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: observed.append(("capability",)),
+    )
+
+    with pytest.raises(RPCExecutionError) as raised:
+        command_handlers.run_execution(execution)
+
+    assert raised.value.code == "RPC_BACKEND_RESOLUTION_FAILED"
+    assert observed == [
+        (
+            "fail",
+            "RPC backend resolution failed; execution not dispatched.",
+            "RPC_BACKEND_RESOLUTION_FAILED",
+        )
+    ]
 
 
 def test_unsafe_config_content_is_rejected_before_serializer_save(

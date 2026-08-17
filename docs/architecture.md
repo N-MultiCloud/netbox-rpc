@@ -89,7 +89,10 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
   false envelopes. A truthy response can append `ExecutionSucceeded` only
   after validation; a false response keeps `failed` status but projects its
   valid closed result. Mismatch appends `ExecutionFailed` with
-  `RPC_RESULT_SCHEMA_MISMATCH` and no malformed result;
+  `RPC_RESULT_SCHEMA_MISMATCH` and no malformed result. A resolver exception
+  after claim is reduced to bounded `RPC_BACKEND_RESOLUTION_FAILED`, appends a
+  terminal failure, and cannot strand the execution in `running` or contact a
+  capability/dispatch endpoint;
 - `cancel_execution(execution, user)` is a queued-only command that emits
   `ExecutionCancelled`.
 
@@ -112,10 +115,13 @@ foundation for `service.netbox.staging.rotate_backend_token` and
   caller metadata outside the exact procedure/target/empty-params shape;
 - `approve_execution()` requires approval permission scoped to this procedure
   (plus procedure view access), rejects the requester even if they are
-  privileged, recomputes the
+  privileged, validates the immutable backend URL/TLS binding before sending
+  authentication, requires a fresh uncached compatible capability while the
+  execution row is locked, and recomputes the
   live protected snapshot, including canonical procedure-policy and
   params/result-schema hashes, and atomically records
-  `approved → queued` before one job is enqueued;
+  `approved → queued` before one job is enqueued. A binding or capability
+  failure leaves the request pending without new events or a job;
 - the `ExecutionApproved` projection persists `approved_by`; requester and
   approver IDs are read-only execution API fields and signed lease claims;
 - admission, approval, worker claim, and pre-lease checks require the exact
@@ -123,7 +129,9 @@ foundation for `service.netbox.staging.rotate_backend_token` and
   1800-second timeout, approval bit, transport/output pipeline, representative
   command hash, and params/result schemas. The snapshot also binds the
   concrete backend ID and a non-secret URL/TLS identity fingerprint. They also
-  require non-null distinct actors and revalidate the approval snapshot;
+  require non-null distinct actors and revalidate the approval snapshot. Each
+  authenticated capability probe validates the protected target first and the
+  same resolved target is reused for snapshot, lease, and dispatch;
 - approval and rejection accept no caller reason for this procedure; their
   durable event uses a fixed bounded audit phrase;
 - both protected procedures require a signed one-time lease. Missing signing-key
@@ -144,6 +152,14 @@ Gitea capability and dispatch requests reject redirects. Its exact five-key
 backend wrapper is validated at the HTTP boundary, but only `ok/result` crosses
 into the event store; backend diagnostics are discarded and durable failure
 text is selected from a fixed catalog mapping keyed by the closed result tuple.
+For Gitea, the semantic capability contract additionally fixes backend ID 1,
+loopback URL `http://127.0.0.1:16005`, and `verify_ssl=false`; the public Nginx
+vhost is outside this dispatch path. The same semantic-contract digest is
+included in the procedure-policy approval hash, so executable- or
+backend-semantic drift invalidates requested, pending, approved, and queued
+work before enqueue or lease issuance. The lease's existing `contract_hash`
+binds those semantics without duplicating them in caller-controlled params or
+a new wire claim.
 
 `RPCApprovalRequest.expires_at` remains unenforced and general procedures are
 not implicitly migrated by this scoped change. See `AGENTS.md` § "Two-person
@@ -179,7 +195,31 @@ The suite is two tiers:
    `apply`/`rebuild` fold, typed domain events and their round-trips, the
    aggregate invariants, the value objects, the query helpers, and the
    normalization service — plus source-level contract checks. This is the
-   `ci.yml` workflow.
+   `ci.yml` workflow. That ordinary Gitea job has one allowed runner label,
+   `ci-untrusted-python312`, and queues fail-closed when it is unavailable; it
+   has no mirror, production, generic self-hosted, or hosted fallback. The job
+   pins checkout by full action SHA, checks out the triggering commit without
+   persisted credentials, and verifies preprovisioned CPython 3.12.14 and uv
+   0.12.5 at their fixed `/usr/local/bin` paths instead of trusting ambient
+   `PATH` or downloading tools. `.gitea/ci-requirements.lock` is the
+   canonical exact CPython 3.12 / x86_64 glibc 2.34 wheel closure. It is
+   installed from an empty inherited environment with required hashes,
+   wheel-only resolution, a fixed index, no project/config sources or cache,
+   and Python downloads disabled. Syntax and test execution also use a minimal
+   `env -i` plus Python isolated mode (`-I`) and disabled user site. Pytest uses
+   a separate reviewed and hashed `.gitea/pytest-ci.ini`, an empty
+   `PYTEST_ADDOPTS`, disabled plugin autoload, and only the explicitly loaded
+   locked `pytest-asyncio` plugin, isolating it from candidate or runner Python
+   paths, plugins, and collection/deselection options.
+   A structural YAML and static mutation suite rejects extra jobs, write
+   permissions, duplicate/alias/flow constructs, and weakening any dependency,
+   toolchain, checkout, or test-execution boundary.
+   This repository-side contract is defense in depth only: candidate workflows
+   cannot define their own runner authority. The trusted Gitea
+   repository/organization policy must make mirror and production-capable
+   runners pull-request-ineligible and allow ordinary CI to match only the
+   isolated label. CI stays blocked/queued until that platform prerequisite is
+   demonstrably enforced.
 
 2. **DB-backed integration tests** (`netbox_rpc/tests/`, run by
    `python netbox/manage.py test netbox_rpc` against a real Postgres test
@@ -189,10 +229,16 @@ The suite is two tiers:
    ledger (model guards + the database trigger; an execution with events cannot
    be deleted), the command handlers (create/run/cancel and the cancel-vs-start
    row-locked race), and the REST API (command-only write model: PUT/PATCH/DELETE
-   return 405; cancel is an action; the event log is read-only). This is the
-   `integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
-   with a Postgres service) workflows, using the minimal NetBox config at
-   `tests/ci/netbox_configuration.py`.
+   return 405; cancel is an action; the event log is read-only). The required
+   canonical Gitea pull-request gate needs an externally provisioned isolated
+   untrusted runner, disposable digest-pinned PostgreSQL/Redis, and an exact
+   hash-locked NetBox 4.5.8/4.6.5 dependency closure; it remains blocked until
+   that trusted platform contract exists. The GitHub
+   `.github/workflows/test.yml` matrix is supplementary post-mirror evidence,
+   not canonical pre-merge evidence. Privileged Gitea `integration.yml` is a
+   manual, canonical-`main`-only, non-gating operator diagnostic and never PR or
+   push evidence. Platform runner/ref policy, not its candidate-visible guard,
+   is authoritative.
 
 Run them locally with:
 

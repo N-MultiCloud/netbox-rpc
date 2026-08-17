@@ -156,17 +156,36 @@ The procedure catalog is intentionally narrow:
   `86a7ac26e7f9c9cca0f56c4fac07fff205d5fc3bca0e54af23a204f07b833bc9`.
   The service/identity IDs and UTC revisions, principal/method, locked host/port,
   pinned-known-host digest, policy reference, complete target/fingerprint, and
-  backend/TLS identity are captured in the immutable approval snapshot and
-  signed lease. Its Gitea-only capability extension also binds the target,
+  exact backend `1` at `http://127.0.0.1:16005` with TLS verification disabled
+  are captured in the immutable approval snapshot and signed lease. The public
+  Nginx vhost is not a supported dispatch path. Its Gitea-only capability
+  extension also binds that backend topology, the target,
   upgrade and guest constants, SSH pin parser, runtime budgets, closed schemas,
-  and result tuples; other handler hashes remain byte-for-byte unchanged.
+  result tuples, and versioned length/SHA-256 identities for the backend's exact
+  59,952-byte upgrade script and complete 63,492-byte canonical fixed argv;
+  other handler hashes remain
+  byte-for-byte unchanged. The semantic-extension digest is also part of this
+  procedure's approval-policy hash, so executable- or backend-only drift
+  invalidates requested, pending, approved, and queued work before enqueue or
+  lease issuance without adding a redundant lease field. Before any
+  authenticated capability request at admission, approval, or worker claim,
+  the catalog validates the exact loopback URL/TLS binding and reuses that same
+  resolved target through snapshot, lease, and dispatch. Approval also requires
+  a fresh uncached `COMPATIBLE` capability while the execution row is locked;
+  drift leaves the request pending with no approval/queue event or job.
   Results expose only the
   closed `ok/procedure/target/changed/healthy/stage` state; valid failure and
   indeterminate results are preserved, while events and secret-prone output
   are forbidden. Capability and dispatch HTTP redirects are never followed.
   The exact five-key backend wrapper is reduced to `ok/result`; catalog-owned
   static diagnostics are selected only from the validated six-state tuple, so
-  backend diagnostic strings never enter persistence. See
+  backend diagnostic strings never enter persistence. Migration `0071` is
+  intentionally irreversible and its reverse raises before inspecting or
+  mutating catalog data. This prevents an operator replacement, rename, or
+  referenced seed from being deleted or left behind while Django records the
+  migration unapplied. Forward migration also aborts before mutation if the
+  canonical name already exists. Removal or repair requires a reviewed forward
+  migration with explicit ownership evidence. See
   [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md)
   for activation order, exact states, security, and rollback invariants.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
@@ -1125,13 +1144,50 @@ python netbox/manage.py test netbox_rpc
 
 Tier 1 (`tests/`) covers the domain logic (projection fold/rebuild, typed
 events, aggregate invariants, value objects, queries, normalization) and runs in
-the `ci.yml` workflow. Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound
-behavior — `event_store`, the rebuild oracle, the append-only ledger, the
-command handlers, and the command-only REST API — and runs in the
-`integration.yml` (self-hosted) and `.github/workflows/test.yml` (portable,
-Postgres-service) workflows using `tests/ci/netbox_configuration.py`.
-The fail-closed Gitea compatibility job and the portable GitHub integration job
-both run this DB-backed suite against NetBox 4.5.8 and 4.6.5.
+the `ci.yml` workflow. Ordinary Gitea CI is fail-closed on the dedicated scalar
+runner label `ci-untrusted-python312`: if that runner is unavailable, the job
+queues and never falls back to a mirror or production-capable runner. The
+workflow checks out the triggering commit with a full-SHA-pinned checkout
+action and no persisted credentials, requires preprovisioned CPython 3.12.14
+at `/usr/local/bin/python3.12` plus uv 0.12.5 at `/usr/local/bin/uv`, and forbids
+ambient-`PATH` tool selection or toolchain download/bootstrap. Its exact runtime
+and test closure is `.gitea/ci-requirements.lock`, containing one compatible
+hashed wheel per package for CPython 3.12 on x86_64 glibc 2.34. Installation
+uses hash checking, wheel-only resolution, an empty inherited environment, the
+explicit PyPI simple index, no uv configuration/project sources/cache, and
+`UV_PYTHON_DOWNLOADS=never`. Syntax checks and Pytest also run through
+`env -i` with isolated Python (`-I`), user-site disabled, and no ambient
+Python/Pytest configuration. Pytest uses the reviewed, hashed
+`.gitea/pytest-ci.ini`, an empty `PYTEST_ADDOPTS`, disabled plugin autoload, and
+only the explicitly loaded locked `pytest-asyncio` plugin; candidate or runner
+configuration cannot alter collection, imports, or plugin execution. Update the
+dependency lock deliberately with every direct or transitive
+dependency change and rerun its isolated install plus
+`tests/test_ci_workflow_security.py`; the latter structurally parses the YAML,
+rejects duplicate/alias/flow constructs, and mutation-tests runner, permissions,
+job count, checkout, toolchain, installer, source, pin, hash, and pytest-bypass
+regressions.
+
+The workflow and its repository tests are defense in depth; they are not the
+runner authorization boundary because a candidate branch can modify its own
+workflow. Gitea's trusted repository/organization runner policy must make
+mirror and production-capable runners ineligible for pull-request jobs and
+permit ordinary CI to match only the isolated runner label. Until that external
+policy is provisioned and proven, this CI contract must remain blocked/queued
+rather than activated on a broader runner.
+
+Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, the
+rebuild oracle, the append-only ledger, the command handlers, and the
+command-only REST API. The required canonical Gitea pull-request gate needs an
+externally provisioned isolated untrusted runner, disposable digest-pinned
+PostgreSQL/Redis, and an exact hash-locked NetBox 4.5.8/4.6.5 dependency closure;
+it remains blocked until that trusted platform contract exists. The GitHub
+`.github/workflows/test.yml` matrix is supplementary post-mirror evidence, not
+canonical pre-merge evidence. The privileged Gitea
+`.gitea/workflows/integration.yml` is manual, canonical-`main`-only diagnostic
+evidence and is never a PR/push trigger, branch-protection requirement, or
+substitute for the isolated runner policy. Candidate-side ref checks remain
+defense in depth; trusted Gitea runner/ref eligibility is authoritative.
 
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is

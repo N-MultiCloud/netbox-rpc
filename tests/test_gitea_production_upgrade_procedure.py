@@ -114,7 +114,7 @@ def test_gitea_upgrade_schemas_are_closed_and_match_all_backend_states(migration
             validate(invalid, result_schema)
 
 
-def test_gitea_upgrade_migration_is_inline_ordered_idempotent_and_reversible(
+def test_gitea_upgrade_migration_is_inline_owned_and_explicitly_irreversible(
     migration,
 ) -> None:
     assert migration.Migration.dependencies == [
@@ -128,20 +128,78 @@ def test_gitea_upgrade_migration_is_inline_ordered_idempotent_and_reversible(
 
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
+    execution_references = _FakeReferenceManager()
+    intent_references = _FakeReferenceManager()
+    approval_references = _FakeReferenceManager()
+    generic_references = [_FakeGenericReferenceManager() for _ in range(4)]
     procedures.commands = commands
     _FakeRPCProcedure.objects = procedures
     _FakeRPCProcedureCommand.objects = commands
+    _FakeRPCExecution.objects = execution_references
+    _FakeRPCIntentProcedure.objects = intent_references
+    _FakeRPCApprovalRequest.objects = approval_references
+    (
+        _FakeTaggedItem.objects,
+        _FakeBookmark.objects,
+        _FakeSubscription.objects,
+        _FakeJournalEntry.objects,
+    ) = generic_references
     apps = _fake_apps()
-    migration.seed_gitea_production_upgrade(apps, None)
     migration.seed_gitea_production_upgrade(apps, None)
     assert procedures.rows == {PROCEDURE_ID: migration._PROCEDURE_DEFAULTS}
     assert commands.rows == {(PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND}
+    with pytest.raises(RuntimeError, match="canonical name already exists"):
+        migration.seed_gitea_production_upgrade(apps, None)
+    assert procedures.rows == {PROCEDURE_ID: migration._PROCEDURE_DEFAULTS}
+    assert commands.rows == {(PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND}
 
-    procedures.protected_error = migration.ProtectedError
-    with pytest.raises(migration.IrreversibleError, match="referenced"):
-        migration.unseed_gitea_production_upgrade(apps, None)
+    execution_references.referenced_procedure_ids.add(170)
+    with pytest.raises(migration.IrreversibleError, match="intentionally irreversible"):
+        migration.unseed_gitea_production_upgrade(apps, _FakeSchemaEditor(procedures, commands))
     assert procedures.rows[PROCEDURE_ID]["enabled"] is False
     assert commands.rows == {(PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND}
+
+    execution_references.referenced_procedure_ids.clear()
+    _FakeTaggedItem.objects.referenced_pairs.add((700, 170))
+    with pytest.raises(migration.IrreversibleError, match="intentionally irreversible"):
+        migration.unseed_gitea_production_upgrade(
+            apps,
+            _FakeSchemaEditor(procedures, commands),
+        )
+    _FakeTaggedItem.objects.referenced_pairs.clear()
+
+    schema_editor = _FakeSchemaEditor(procedures, commands)
+    with pytest.raises(migration.IrreversibleError, match="intentionally irreversible"):
+        migration.unseed_gitea_production_upgrade(apps, schema_editor)
+    assert procedures.rows == {PROCEDURE_ID: migration._PROCEDURE_DEFAULTS}
+    assert commands.rows == {(PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND}
+    assert schema_editor.queries == []
+
+
+def test_gitea_upgrade_seed_never_adopts_operator_owned_rows(migration) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    procedures.rows[PROCEDURE_ID] = {
+        "enabled": True,
+        "handler_id": "operator-owned-handler",
+        "description": "Preserve operator data.",
+    }
+    commands.rows[(PROCEDURE_ID, 7)] = {
+        "argv": ["operator-owned", "command"],
+    }
+    procedures.commands = commands
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+
+    before_procedures = {
+        name: dict(row) for name, row in procedures.rows.items()
+    }
+    before_commands = {key: dict(row) for key, row in commands.rows.items()}
+    with pytest.raises(RuntimeError, match="canonical name already exists"):
+        migration.seed_gitea_production_upgrade(_fake_apps(), None)
+
+    assert procedures.rows == before_procedures
+    assert commands.rows == before_commands
 
 
 def test_gitea_upgrade_static_command_and_documentation_contract(migration) -> None:
@@ -214,6 +272,29 @@ def test_gitea_semantic_capability_fixture_is_canonical_and_hashes_exactly(
     Draft202012Validator.check_schema(runtime["COMMAND_FINGERPRINT_SCHEMA"])
     assert runtime["SSH_HOST_KEY_ALGORITHM"] == "ssh-ed25519"
     assert runtime["SSH_HOST_KEY_ENCODED_MAX_LENGTH"] == 256
+    assert runtime["SEMANTIC_CAPABILITY_EXTENSION"]["backend"] == {
+        "backend_id": 1,
+        "base_url": "http://127.0.0.1:16005",
+        "verify_ssl": False,
+    }
+    assert runtime["SEMANTIC_CAPABILITY_SHA256"] == runtime[
+        "canonical_sha256"
+    ](runtime["SEMANTIC_CAPABILITY_EXTENSION"])
+    assert runtime["PROCEDURE_POLICY"]["semantic_contract_sha256"] == runtime[
+        "SEMANTIC_CAPABILITY_SHA256"
+    ]
+    assert runtime["SEMANTIC_CAPABILITY_EXTENSION"]["executable"] == {
+        "version": 1,
+        "canonicalization": "json-sort-keys-compact-utf8",
+        "script_length_bytes": 59_952,
+        "script_sha256": (
+            "8cb74c96ebbc278eaa1e23f0f22d0c4a19fa044a00e15503be95ac54a5d80f93"
+        ),
+        "argv_length_bytes": 63_492,
+        "argv_sha256": (
+            "c8ba17a10783f0ebe6823026571ac388fbcf75fc4d5443c9c7d309792f4a3631"
+        ),
+    }
     assert runtime["SSH_HOST_KEY_BYTES"] == 32
     assert runtime["HANDLER_BUDGET_SECONDS"] == 1725
     assert runtime["PROCESS_TIMEOUT_SECONDS"] == 1690
@@ -252,17 +333,16 @@ class _FakeProcedureQuerySet:
             return None
         return _FakeProcedureRow(self.manager, self.name)
 
+    def exists(self):
+        return self.name in self.manager.rows
+
 
 class _FakeProcedureRow:
     def __init__(self, manager, name):
         self.manager = manager
         self.name = name
+        self.pk = 170
         self.enabled = bool(manager.rows[name]["enabled"])
-
-    def delete(self):
-        if self.manager.protected_error is not None:
-            raise self.manager.protected_error("protected", [])
-        self.manager.rows.pop(self.name, None)
 
     def save(self, *, update_fields):
         assert update_fields == ["enabled"]
@@ -273,12 +353,11 @@ class _FakeProcedureManager:
     def __init__(self):
         self.rows = {}
         self.commands = None
-        self.protected_error = None
 
-    def update_or_create(self, *, name, defaults):
-        created = name not in self.rows
-        self.rows[name] = dict(defaults)
-        return SimpleNamespace(name=name, **defaults), created
+    def create(self, *, name, **values):
+        assert name not in self.rows
+        self.rows[name] = dict(values)
+        return SimpleNamespace(pk=170, name=name, **values)
 
     def filter(self, *, name):
         return _FakeProcedureQuerySet(self, name)
@@ -288,25 +367,188 @@ class _FakeCommandManager:
     def __init__(self):
         self.rows = {}
 
-    def update_or_create(self, *, procedure, sequence, defaults):
+    def create(self, *, procedure, sequence, **values):
         key = (procedure.name, sequence)
-        created = key not in self.rows
-        self.rows[key] = dict(defaults)
-        return SimpleNamespace(), created
+        assert key not in self.rows
+        self.rows[key] = dict(values)
+        return SimpleNamespace()
+
+    def filter(self, *, procedure_id):
+        values = [171] if procedure_id == 170 and self.rows else []
+        return _FakeValuesQuerySet(values)
 
 
 class _FakeRPCProcedure:
     objects = None
+    _meta = SimpleNamespace(
+        db_table="netbox_rpc_rpcprocedure",
+        pk=SimpleNamespace(column="id"),
+    )
 
 
 class _FakeRPCProcedureCommand:
     objects = None
+    _meta = SimpleNamespace(
+        db_table="netbox_rpc_rpcprocedurecommand",
+        get_field=lambda name: SimpleNamespace(column=f"{name}_id"),
+    )
+
+
+class _FakeReferenceQuerySet:
+    def __init__(self, exists):
+        self._exists = exists
+
+    def exists(self):
+        return self._exists
+
+
+class _FakeReferenceManager:
+    def __init__(self):
+        self.referenced_procedure_ids = set()
+
+    def filter(self, *, procedure_id):
+        return _FakeReferenceQuerySet(
+            procedure_id in self.referenced_procedure_ids
+        )
+
+
+class _FakeValuesQuerySet:
+    def __init__(self, values):
+        self.values = values
+
+    def values_list(self, field, *, flat):
+        assert field == "pk"
+        assert flat is True
+        return self
+
+    def first(self):
+        return self.values[0] if self.values else None
+
+    def __iter__(self):
+        return iter(self.values)
+
+
+class _FakeContentTypeManager:
+    ids = {
+        "rpcprocedure": 700,
+        "rpcprocedurecommand": 701,
+    }
+
+    def filter(self, *, app_label, model):
+        assert app_label == "netbox_rpc"
+        value = self.ids.get(model)
+        return _FakeValuesQuerySet([] if value is None else [value])
+
+
+class _FakeGenericReferenceManager:
+    def __init__(self):
+        self.referenced_pairs = set()
+
+    def filter(self, **criteria):
+        content_type_id = next(
+            value
+            for key, value in criteria.items()
+            if key.endswith("type_id")
+        )
+        object_ids = next(
+            value
+            for key, value in criteria.items()
+            if key.endswith("object_id__in")
+        )
+        return _FakeReferenceQuerySet(
+            any(
+                (content_type_id, object_id) in self.referenced_pairs
+                for object_id in object_ids
+            )
+        )
+
+
+class _FakeRPCExecution:
+    objects = None
+
+
+class _FakeRPCIntentProcedure:
+    objects = None
+
+
+class _FakeRPCApprovalRequest:
+    objects = None
+
+
+class _FakeContentType:
+    objects = _FakeContentTypeManager()
+
+
+class _FakeTaggedItem:
+    objects = None
+
+
+class _FakeBookmark:
+    objects = None
+
+
+class _FakeSubscription:
+    objects = None
+
+
+class _FakeJournalEntry:
+    objects = None
+
+
+class _FakeCursor:
+    def __init__(self, schema_editor):
+        self.schema_editor = schema_editor
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params):
+        params = list(params)
+        self.schema_editor.queries.append((query, params))
+        if "rpcprocedurecommand" in query:
+            procedure_names = {
+                name
+                for name, row in self.schema_editor.procedures.rows.items()
+                if params == [170] and row is not None
+            }
+            for key in tuple(self.schema_editor.commands.rows):
+                if key[0] in procedure_names:
+                    self.schema_editor.commands.rows.pop(key)
+            self.rowcount = len(procedure_names)
+            return
+        deleted = int(PROCEDURE_ID in self.schema_editor.procedures.rows)
+        self.schema_editor.procedures.rows.pop(PROCEDURE_ID, None)
+        self.rowcount = deleted
+
+
+class _FakeSchemaEditor:
+    def __init__(self, procedures, commands):
+        self.procedures = procedures
+        self.commands = commands
+        self.queries = []
+        self.connection = SimpleNamespace(cursor=lambda: _FakeCursor(self))
+
+    @staticmethod
+    def quote_name(name):
+        return f'"{name}"'
 
 
 def _fake_apps():
     models = {
         ("netbox_rpc", "RPCProcedure"): _FakeRPCProcedure,
         ("netbox_rpc", "RPCProcedureCommand"): _FakeRPCProcedureCommand,
+        ("netbox_rpc", "RPCExecution"): _FakeRPCExecution,
+        ("netbox_rpc", "RPCIntentProcedure"): _FakeRPCIntentProcedure,
+        ("netbox_rpc", "RPCApprovalRequest"): _FakeRPCApprovalRequest,
+        ("contenttypes", "ContentType"): _FakeContentType,
+        ("extras", "TaggedItem"): _FakeTaggedItem,
+        ("extras", "Bookmark"): _FakeBookmark,
+        ("extras", "Subscription"): _FakeSubscription,
+        ("extras", "JournalEntry"): _FakeJournalEntry,
     }
     return SimpleNamespace(
         get_model=lambda app_label, model_name: models[(app_label, model_name)]
