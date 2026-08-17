@@ -51,8 +51,10 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_firewall`
 - `os.linux.ubuntu.24.upgrade_26.{analyze_preupgrade,save_preupgrade_state,run_upgrade,verify_postupgrade}`
 - `os.linux.ubuntu.24.{restart,status,start,stop,reload,enable,disable}_service`
-  and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`,
-  `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`) services.
+  and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`
+  (`influxdb.service`, OSS 2), `influxdb3-core` (`influxdb3-core.service`,
+  Core 3), `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`)
+  services.
   Restarting `netbox-rq` is the audited way to sweep a NetBox RQ job stuck in
   `running` after its worker died.
 - `os.linux_env_file.upsert_var` — writes a single `KEY=VALUE` line (backend
@@ -574,6 +576,49 @@ use `netbox-nms` secret references for credentials. Onboarding accepts no
 caller-supplied plaintext. The execution backend generates or resolves secrets
 only in memory, uses fixed loopback product APIs, and returns only references
 and non-secret resource identifiers.
+
+### `os.linux.debian.13.*_influxdb3_core` — Debian 13 InfluxDB 3 Core installation
+
+The family above manages an InfluxDB instance that already exists. Migrations
+`0071` (allowlist row `influxdb3-core` -> `influxdb3-core.service`) and `0072`
+(procedures) add the missing ability to *stand one up* on a Debian 13 guest, so
+a fresh Core 3 host no longer requires an interactive SSH session. Both
+procedures target `dcim.device` and `virtualization.virtualmachine`.
+
+| Procedure | Effect | Approval | Timeout | Purpose |
+|---|---|---|---|---|
+| `preflight_influxdb3_core` | read | no | 60s | Report release/architecture/systemd, package + hold state, managed-config marker, unit state, configured bind/node-id/data-dir, TLS readability, and a derived `ready` verdict with bounded `blockers[]` |
+| `install_influxdb3_core` | write | **yes** | 900s | Fingerprint-verified repository key, pinned package install, managed configuration, systemd drop-in, restart, readiness probe, and package hold |
+
+`preflight` is deliberately both the pre-install gate and the post-install
+verification read — the operator installer's precondition block and its
+completion report inspect the same facts — so there is no separate `verify_*`
+procedure. The installer's own completion report is its `result_schema`
+(package/binary version, unit state, bind, node id, data dir, config path,
+plugins enabled, package held, `stage`).
+
+Optional install parameters mirror the operator script's environment variables:
+`node_id`, `data_dir`, `http_bind`, `tls_cert`/`tls_key`, `enable_plugins`,
+`disable_telemetry`, `wal_flush_interval`, `log_filter`, `package_version`,
+`hold_package`, `upgrade_package`, `force_reconfigure`,
+`allow_plaintext_remote`, plus the shared `rpc_ssh_*` connection overrides.
+Every one is re-validated in the normalizer as well as in `params_schema`, so a
+schema edit alone cannot widen what reaches the execution backend. `data_dir`
+must be a safe absolute path outside `/home`, `/root`, `/run`, `/tmp`, and
+`/var/tmp`, because the packaged systemd unit sandboxes those trees.
+`tls_cert`/`tls_key` are both-or-neither absolute paths. Unknown parameters are
+rejected in both layers. **A remote `http_bind` with no TLS is refused** unless
+the caller explicitly sets `allow_plaintext_remote=true`, reproducing the
+installer's refusal to expose bearer-token authentication over plaintext HTTP.
+
+**Neither procedure accepts or returns a credential.** The first administrative
+token is created and vaulted only by `service.influxdb.1.bootstrap`
+(`family="core3"`), which returns an `nms-secret:` reference. The sanctioned
+sequence is `preflight` -> `install` -> `service.influxdb.1.bootstrap`. Both
+handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
+`backend-orchestrated` representative command row each. The paired
+`netbox-packer` profile `influxdb-core-3.11.0-debian-13` bakes the same
+production posture into a first-boot cloud-init template for *new* guests.
 
 ### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
 

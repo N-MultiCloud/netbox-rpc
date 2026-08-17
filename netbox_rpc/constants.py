@@ -265,6 +265,23 @@ INFLUXDB_1_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Debian 13 InfluxDB 3 Core installation catalog (migration 0072). These stand
+# up a Core 3 instance; the typed service.influxdb.1.* family above manages one
+# that already exists, and service.influxdb.1.bootstrap remains the only place
+# an administrative token is created and vaulted.
+INFLUXDB3_DEBIAN13_PREFLIGHT = "os.linux.debian.13.preflight_influxdb3_core"
+INFLUXDB3_DEBIAN13_PREFLIGHT_HANDLER = (
+    "os.linux_debian_13.preflight_influxdb3_core"
+)
+INFLUXDB3_DEBIAN13_INSTALL = "os.linux.debian.13.install_influxdb3_core"
+INFLUXDB3_DEBIAN13_INSTALL_HANDLER = "os.linux_debian_13.install_influxdb3_core"
+INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = frozenset(
+    {
+        INFLUXDB3_DEBIAN13_PREFLIGHT,
+        INFLUXDB3_DEBIAN13_INSTALL,
+    }
+)
+
 AKVORADO_1_CONFIG_READ = "service.akvorado.1.config_read"
 AKVORADO_1_CONFIG_DEPLOY = "service.akvorado.1.config_deploy"
 AKVORADO_1_STATUS_STACK = "service.akvorado.1.status_stack"

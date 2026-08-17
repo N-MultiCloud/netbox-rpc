@@ -431,6 +431,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
+| `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 
 ### Other Write Procedures
 
@@ -561,6 +562,77 @@ approval or distinct-actor check.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
+  (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
+  above manages an instance that already *exists*; these two stand one up, so a
+  fresh Core 3 guest no longer requires an interactive SSH session. Both target
+  `dcim.device` and `virtualization.virtualmachine`.
+  - `os.linux.debian.13.preflight_influxdb3_core`
+    (`os.linux_debian_13.preflight_influxdb3_core`, **read**, no approval, 60s)
+    reports posture: `/etc/os-release` `ID`/`VERSION_ID`, dpkg architecture,
+    systemd presence, whether `influxdb3-core` is installed/held and at which
+    version, the managed-config marker, unit load/active/enabled state, the
+    configured bind/node-id/data-dir, and TLS-material readability, plus a
+    derived `ready` verdict and bounded `blockers[]`. It is deliberately **both**
+    the pre-install gate and the post-install verification read — there is no
+    separate `verify_*` procedure, because the operator installer's precondition
+    block and its completion report read the same facts.
+  - `os.linux.debian.13.install_influxdb3_core`
+    (`os.linux_debian_13.install_influxdb3_core`, **write**,
+    **`approval_required=True`**, 900s) is the audited installer:
+    fingerprint-verified InfluxData repository key
+    (`24C975CBA61A024EE1B631787C3D57159FC2F927`), pinned `influxdb3-core`
+    install, managed `/etc/influxdb3/influxdb3-core.conf`, systemd drop-in,
+    restart, readiness probe, and `apt-mark hold`. Optional params mirror the
+    operator script's environment variables — `node_id`, `data_dir`, `http_bind`,
+    `tls_cert`/`tls_key`, `enable_plugins`, `disable_telemetry`,
+    `wal_flush_interval`, `log_filter`, `package_version`, `hold_package`,
+    `upgrade_package`, `force_reconfigure`, `allow_plaintext_remote` — plus the
+    shared `rpc_ssh_*` overrides. Its `result_schema` carries the installer's
+    completion report (package/binary version, unit state, bind, node id, data
+    dir, config path, plugins enabled, package held, `stage`).
+
+  **No credential, anywhere in this pair (hard invariant).** Neither
+  `params_schema` declares a token, password, secret reference, or
+  `generate_admin_token`-style flag, and neither `result_schema` returns one.
+  The first administrative token is created and vaulted **only** by the
+  pre-existing `service.influxdb.1.bootstrap` (`family="core3"`, migration
+  `0056`), which stores the plaintext through the netbox-nms secret bridge and
+  returns an `nms-secret:` reference. The sanctioned sequence is
+  `preflight` → `install` → `service.influxdb.1.bootstrap`. Do not add token
+  generation to the installer: one token contract per product family is the
+  point, and `tests/test_influxdb3_debian13_procedures.py` asserts the absence
+  of every secret-shaped key in params, results, and the normalized payload.
+
+  **Normalizer invariants** (`_normalize_influxdb3_debian13_execution`): every
+  value is re-validated in the pure domain, so a `params_schema` edit alone can
+  never widen what reaches the backend. `data_dir` must be a safe absolute path
+  with no traversal segment and must **not** be under `/home`, `/root`, `/run`,
+  `/tmp`, or `/var/tmp` (the packaged unit sandboxes those trees, so the service
+  would not start). `tls_cert`/`tls_key` are both-or-neither absolute paths on
+  *both* procedures. Unknown parameters are rejected here as well as by
+  `additionalProperties: false`, tolerating only the platform-stamped
+  `_intent`/`_intent_name`/`_timeout_seconds_snapshot` keys. Most importantly the
+  normalizer reproduces the installer's own security gate: **a remote
+  `http_bind` with no TLS is refused** (`RPC_PARAM_INVALID`) unless the caller
+  explicitly sets `allow_plaintext_remote=true`; an omitted `http_bind` is
+  evaluated as the loopback default rather than left undefined. An
+  out-of-family procedure name reaching this normalizer fails closed with
+  `RPC_PROCEDURE_NOT_NORMALIZABLE` rather than inheriting the installer's
+  parameter set. Every seed `pattern` is anchored with `(?![\s\S])`, not `$`,
+  because `jsonschema` applies `pattern` via `re.search` and Python's `$` also
+  matches before a single trailing newline.
+
+  Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
+  representative `["backend-orchestrated", …]` command row each — key-fingerprint
+  verification, `apt-cache madison` candidate resolution, and
+  validate/write/restart/health/hold sequencing have no faithful fixed-argv
+  form. **Catalog-first: the matching `os.linux_debian_13.*` handler does not
+  exist in `netbox-rpc-backend` yet** and lands separately, exactly as with the
+  whole `service.influxdb.1.*` family and the Samba catalog. The paired
+  `netbox-packer` profile `influxdb-core-3.11.0-debian-13` (VMID 9052) bakes the
+  same production posture into a first-boot cloud-init template for new guests;
+  this catalog is for hosts that already exist.
 - Akvorado service management uses the typed `service.akvorado.1.*` catalog
   seeded by migration `0057`, targeting `dcim.device` and
   `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
@@ -581,12 +653,15 @@ approval or distinct-actor check.
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
 - InfluxDB service management is provided by the generic Ubuntu 24 systemd
-  procedures through the seeded `RPCLinuxServiceAllowlist` row
-  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
-  `dcim.device` and `virtualization.virtualmachine`. Do not add
-  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
-  a new typed procedure if a future operation cannot be modeled as service
-  lifecycle control.
+  procedures through two seeded `RPCLinuxServiceAllowlist` rows, both targeting
+  `dcim.device` and `virtualization.virtualmachine`:
+  `slug="influxdb"` -> `systemd_unit="influxdb.service"` (**OSS 2**, migration
+  `0053`) and `slug="influxdb3-core"` -> `systemd_unit="influxdb3-core.service"`
+  (**Core 3**, migration `0071`). The two products ship different units, so pick
+  the row that matches the family — the OSS 2 row cannot control a Core 3
+  instance. Do not add InfluxDB-specific shell text; use the existing fixed
+  systemctl handlers or add a new typed procedure if a future operation cannot be
+  modeled as service lifecycle control.
 - NetBox stack service management is provided the same way, through the allowlist
   rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
   (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
