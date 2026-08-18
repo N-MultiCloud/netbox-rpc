@@ -43,6 +43,45 @@ def test_every_row_is_a_fixed_systemd_unit() -> None:
     assert len(slugs) == len(set(slugs)), "duplicate slug would make the target ambiguous"
 
 
+# The runner fleet as seeded. Checked in deliberately: the on-disk comparison below can
+# only run where the runner definitions exist, which is not CI — so without this the
+# drift check would be vacuous exactly where it runs most often. Update both together.
+EXPECTED_RUNNER_UNITS = frozenset(
+    {
+        "gitea-act-runner-netbox-ceph.service",
+        "gitea-act-runner-netbox-packer.service",
+        "gitea-act-runner-netbox-pbs.service",
+        "gitea-act-runner-netbox-pdm.service",
+        "gitea-act-runner-netbox-proxbox.service",
+        "gitea-act-runner-network-nms.service",
+        "gitea-act-runner-nmc-netbox-billing.service",
+        "gitea-act-runner-nmc-netbox-bng.service",
+        "gitea-act-runner-nmc-netbox-dns.service",
+        "gitea-act-runner-nmc-netbox-gpon.service",
+        "gitea-act-runner-nmc-netbox-nms.service",
+        "gitea-act-runner-nmc-netbox-opnsense.service",
+        "gitea-act-runner-nmc-netbox-rpc-backend.service",
+        "gitea-act-runner-nmc-netbox-rpc.service",
+        "gitea-act-runner-nmc-nms-backend.service",
+        "gitea-act-runner-nmc-nms-cli.service",
+        "gitea-act-runner-nmc-nms-mcp.service",
+        "gitea-act-runner-nmc-nms.service",
+        "gitea-act-runner-nmulticloud-context.service",
+        "gitea-act-runner-proxbox-api.service",
+    }
+)
+
+
+def test_seeded_units_match_the_recorded_fleet() -> None:
+    """Runs everywhere, including CI, unlike the on-disk comparison below."""
+
+    seeded = {row["systemd_unit"] for row in _rows()}
+    assert seeded == EXPECTED_RUNNER_UNITS, {
+        "seeded_only": sorted(seeded - EXPECTED_RUNNER_UNITS),
+        "expected_only": sorted(EXPECTED_RUNNER_UNITS - seeded),
+    }
+
+
 def test_rows_match_the_real_runner_units_on_disk() -> None:
     """The allowlist is only useful if the units it names actually exist.
 

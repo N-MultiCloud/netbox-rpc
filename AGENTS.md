@@ -582,6 +582,10 @@ approval or distinct-actor check.
   - **Operational warning.** Restarting a runner **aborts any job it is
     currently executing**. Check `status_service` and the repository's
     queued/running runs before restarting one that may be mid-build.
+  - **Do not restart a runner from a job running on it.** These runners are
+    per-repository, so an Actions job that restarts its own runner kills its own
+    execution, and the restart can be reported as a failed job even when it
+    worked. Dispatch recovery with `nms rpc` against the runner **host**.
   - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
     `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
     seeded set drifts from the runner units actually defined on disk.
