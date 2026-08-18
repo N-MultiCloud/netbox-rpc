@@ -567,12 +567,17 @@ approval or distinct-actor check.
   generic Ubuntu-24 systemd procedures can control them. No new procedure or
   backend handler — these are reference data the existing `restart_service`
   normalizer and handler already consume.
-  - **Why.** An `act_runner` can *wedge*: the process keeps heartbeating, so
-    Gitea reports the runner `online` with `busy=false` and the correct labels,
-    while it silently stops claiming jobs. Observed 2026-08-17 on
-    `gitea-act-runner-nmc-netbox-rpc-backend`, whose unit had been active since
-    2026-08-08 while six runs sat queued — including a `deploy-production.yml`
-    for an already-merged `develop → main` promotion.
+  - **Why.** An `act_runner` executes with `maxParallel=1` — one job at a time,
+    everything else queued behind it. If that job **hangs**, the process keeps
+    heartbeating, so Gitea still reports the runner `online` with correct
+    labels while no further job ever starts. Observed 2026-08-17 on
+    `gitea-act-runner-nmc-netbox-rpc-backend`: claimed task 18865 at 17:04:59Z,
+    logged nothing after 17:05:26Z, still holding its worker ~7 hours later with
+    ten runs queued — including a `deploy-production.yml` for an already-merged
+    `develop → main` promotion.
+  - **Uptime is not the signal.** A sibling runner started in the same second was
+    completing jobs normally. Diagnose from the journal: a runner holding a task
+    while logging nothing for hours is hung; one emitting step output is working.
   - **Why it matters more than a crash.** A crashed runner is visibly down. A
     wedged one looks healthy, so a promotion merges, reports success, and never
     deploys: production keeps serving the previous build while the repository

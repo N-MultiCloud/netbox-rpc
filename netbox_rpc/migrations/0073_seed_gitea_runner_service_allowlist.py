@@ -9,12 +9,19 @@ from django.db import migrations
 #
 # Why these belong in the allowlist
 # ---------------------------------
-# An act_runner can wedge: the process keeps heartbeating, so Gitea reports the
-# runner ``online`` and ``busy=false`` with correct labels, while it silently
-# stops claiming jobs. Observed on 2026-08-17 with
-# ``gitea-act-runner-nmc-netbox-rpc-backend``, whose unit had been active since
-# 2026-08-08 while six runs -- including a ``deploy-production.yml`` for an
-# already-merged promotion -- sat queued indefinitely.
+# An act_runner runs jobs with ``maxParallel=1``, so it executes ONE job at a
+# time and everything else queues behind it. If that job hangs, the runner keeps
+# heartbeating -- Gitea still reports it ``online`` with correct labels -- while
+# no further job is ever started. The runner looks healthy and the queue looks
+# merely slow.
+#
+# Observed 2026-08-17 on ``gitea-act-runner-nmc-netbox-rpc-backend``: it claimed
+# task 18865 at 17:04:59Z, logged nothing after 17:05:26Z, and was still holding
+# its single worker ~7 hours later with ten runs queued behind it -- including a
+# ``deploy-production.yml`` for an already-merged promotion.
+#
+# Note the unit's uptime is NOT the signal. A sibling runner started in the same
+# second was completing jobs normally throughout.
 #
 # That failure is worse than a crash. A crashed runner is visibly down; a wedged
 # one looks healthy, so a promotion merges, reports success, and never deploys.
@@ -27,8 +34,12 @@ from django.db import migrations
 # the tooling rather than SSH to the host.
 #
 # Operational note: restarting a runner ABORTS any job it is currently
-# executing. Check ``status_service`` (and the repository's queued/running runs)
-# before restarting one that may be mid-build.
+# executing. For the hung-job case above that abort is the whole point -- it is
+# what frees the single worker -- but it also means a restart issued against a
+# runner that is legitimately mid-build destroys that build. Check
+# ``status_service`` and the repository's running runs first, and prefer the
+# journal: a runner that has logged nothing for hours while holding a task is
+# hung, whereas one emitting step output is working.
 RUNNER_SERVICE_ALLOWLIST = (
     {
         "slug": "gitea-act-runner-netbox-ceph",
