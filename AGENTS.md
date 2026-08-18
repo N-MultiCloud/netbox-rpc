@@ -562,6 +562,29 @@ approval or distinct-actor check.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Gitea Actions runner recovery** is seeded by migration `0073`, which adds all
+  20 `gitea-act-runner-*.service` units to `RPCLinuxServiceAllowlist` so the
+  generic Ubuntu-24 systemd procedures can control them. No new procedure or
+  backend handler — these are reference data the existing `restart_service`
+  normalizer and handler already consume.
+  - **Why.** An `act_runner` can *wedge*: the process keeps heartbeating, so
+    Gitea reports the runner `online` with `busy=false` and the correct labels,
+    while it silently stops claiming jobs. Observed 2026-08-17 on
+    `gitea-act-runner-nmc-netbox-rpc-backend`, whose unit had been active since
+    2026-08-08 while six runs sat queued — including a `deploy-production.yml`
+    for an already-merged `develop → main` promotion.
+  - **Why it matters more than a crash.** A crashed runner is visibly down. A
+    wedged one looks healthy, so a promotion merges, reports success, and never
+    deploys: production keeps serving the previous build while the repository
+    says otherwise. Before `0073` there was no audited way to restart one — the
+    allowlist held only `netbox` and `netbox-rq` — and the estate rule is to
+    extend the tooling rather than SSH to the host.
+  - **Operational warning.** Restarting a runner **aborts any job it is
+    currently executing**. Check `status_service` and the repository's
+    queued/running runs before restarting one that may be mid-build.
+  - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
+    `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
+    seeded set drifts from the runner units actually defined on disk.
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a
