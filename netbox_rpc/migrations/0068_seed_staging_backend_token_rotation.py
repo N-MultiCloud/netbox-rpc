@@ -12,7 +12,6 @@ constants or schemas change later.
 """
 
 from django.db import migrations
-from django.db.models.deletion import ProtectedError
 
 _PROCEDURE_NAME = "service.netbox.staging.rotate_backend_token"
 _HANDLER_ID = "service.netbox.staging.rotate_backend_token"
@@ -126,16 +125,33 @@ def seed_staging_backend_token_rotation(apps, schema_editor):
 
 
 def unseed_staging_backend_token_rotation(apps, schema_editor):
-    """Delete an unused seed or retain referenced history in a disabled state."""
+    """Disable the seeded row instead of deleting it.
+
+    Deliberately non-destructive, matching
+    ``0072_seed_influxdb3_debian13_install_procedures``. Two independent reasons:
+
+    1. ``RPCExecution.procedure`` is ``on_delete=PROTECT``, so deleting a procedure
+       that has run raises ``ProtectedError`` and aborts the whole downgrade.
+       Audited execution history must never be destroyed to allow a rollback.
+    2. Deleting through the historical model is not safe even when the row is
+       unreferenced. ``Model.delete()`` runs Django's deletion collector, which
+       walks related models — and a related model whose app has no migrations is
+       rendered from the *real* app registry rather than from the migration state.
+       The collector then filters that real model by a historical ``RPCProcedure``
+       instance and Django raises ``ValueError: Cannot query "RPCProcedure object
+       (N)": Must be "RPCProcedure" instance``.
+
+    The previous implementation caught only ``ProtectedError``, so it handled
+    reason 1 and not reason 2 — a ``ValueError`` is not a ``ProtectedError``, so
+    the collector failure propagated and aborted the downgrade.
+
+    An ``update()`` touches only this table and never invokes the collector, so
+    the reverse is safe in every environment. Re-apply is ``update_or_create``,
+    which restores the intended state idempotently.
+    """
+
     RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    procedure = RPCProcedure.objects.filter(name=_PROCEDURE_NAME).first()
-    if procedure is None:
-        return
-    try:
-        procedure.delete()
-    except ProtectedError:
-        procedure.enabled = False
-        procedure.save(update_fields=["enabled"])
+    RPCProcedure.objects.filter(name=_PROCEDURE_NAME).update(enabled=False)
 
 
 class Migration(migrations.Migration):

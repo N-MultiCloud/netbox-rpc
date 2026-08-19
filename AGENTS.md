@@ -746,11 +746,17 @@ approval or distinct-actor check.
   backend return an arbitrarily large valid result. `procedure` is a `const`, so a
   backend cannot relabel which procedure ran.
 
-  **Reverse migration is PROTECT-safe.** `RPCExecution.procedure` is
-  `on_delete=PROTECT`, so `0072`'s reverse handles each procedure individually and
-  falls back to forcing `enabled=False` on a `ProtectedError` instead of
-  bulk-deleting — otherwise a downgrade would abort outright once either procedure
-  had run, and audited execution history must never be destroyed to allow one.
+  **Reverse migration is non-destructive.** `0072`'s reverse is a single
+  table-level `queryset.update(enabled=False)`; it never deletes. Two independent
+  reasons, both recorded in the migration's own docstring: `RPCExecution.procedure`
+  is `on_delete=PROTECT`, so deleting a procedure that has run raises
+  `ProtectedError` and aborts the downgrade — and audited execution history must
+  never be destroyed to allow one; and deleting through the historical model is
+  unsafe *even when the row is unreferenced*, because the deletion collector walks
+  related models and raises `ValueError` for a related app with no migrations
+  (this actually failed the NetBox 4.5.8 compatibility job). An `except
+  ProtectedError` guard catches only the first of those. See the historical-model
+  rule under **CI / Testing**.
 
   Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
   representative `["backend-orchestrated", …]` command row each — key-fingerprint
@@ -1112,9 +1118,13 @@ approval or distinct-actor check.
   schemas are enforced at admission, approval, worker claim, and pre-lease
   time. Canonical policy/schema hashes are protected by the immutable approval
   snapshot. Valid closed failure/indeterminate results remain on failed
-  executions; malformed nested results are rejected and not projected. Reverse
-  migration deletes an unreferenced seed, or preserves referenced history with
-  the procedure forced disabled when `RPCExecution.procedure` protects it.
+  executions; malformed nested results are rejected and not projected. The
+  reverse migration is non-destructive: it runs a table-level
+  `queryset.update(enabled=False)` and never deletes, so it neither destroys
+  audited history nor enters Django's deletion collector. It previously called
+  `procedure.delete()` behind an `except ProtectedError` guard, which handled the
+  PROTECT case but *not* the collector's `ValueError` (a `ValueError` is not a
+  `ProtectedError`) — see the historical-model rule under **CI / Testing**.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve
