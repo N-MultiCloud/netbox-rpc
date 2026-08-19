@@ -593,7 +593,19 @@ approval or distinct-actor check.
     worked. Dispatch recovery with `nms rpc` against the runner **host**.
   - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
     `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
-    seeded set drifts from the runner units actually defined on disk.
+    seeded set drifts from the runner **daemons** actually defined on disk.
+  - **The drift check compares daemons, not every unit matching the glob.** The
+    `gitea-act-runner-*` prefix is also used by maintenance units — currently
+    `gitea-act-runner-recycle.service`, a `Type=oneshot` job driven by
+    `gitea-act-runner-recycle.timer` that recycles idle-but-wedged runners. Those
+    are the recovery mechanism, not a recoverable target, so they are deliberately
+    **not** in the allowlist: `restart_service` on a one-shot is meaningless.
+    `_is_runner_daemon()` classifies a unit by its `ExecStart` launching
+    `gitea-runner … daemon` and not being `Type=oneshot`, and
+    `EXPECTED_NON_DAEMON_UNITS` pins the exemption set exactly — so a **new**
+    non-daemon unit fails the test and forces a deliberate decision rather than
+    silently widening it. Adding a maintenance unit under this prefix therefore
+    requires updating that set, not the seed migration.
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a

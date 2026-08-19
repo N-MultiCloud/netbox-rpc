@@ -82,6 +82,38 @@ def test_seeded_units_match_the_recorded_fleet() -> None:
     }
 
 
+# Units matching the `gitea-act-runner-*` glob that are deliberately NOT act_runner
+# daemons. The allowlist exists so `restart_service` can recover a *wedged runner*;
+# restarting a one-shot maintenance job is meaningless, so these do not belong in it.
+# Listed explicitly rather than pattern-matched: a new non-daemon unit fails the test
+# below and forces a deliberate decision instead of silently widening the exemption.
+EXPECTED_NON_DAEMON_UNITS = frozenset(
+    {
+        # Type=oneshot, driven by gitea-act-runner-recycle.timer. Recycles idle-but-
+        # wedged runners; it is the recovery mechanism, not a thing to be recovered.
+        "gitea-act-runner-recycle.service",
+    }
+)
+
+
+def _is_runner_daemon(path: Path) -> bool:
+    """True for a long-running act_runner daemon, false for a one-shot job.
+
+    A runner daemon's ExecStart launches ``gitea-runner ... daemon``; a maintenance
+    unit is ``Type=oneshot`` and runs something else entirely.
+    """
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if any(line.strip() == "Type=oneshot" for line in lines):
+        return False
+    return any(
+        line.startswith("ExecStart=")
+        and "gitea-runner" in line
+        and line.rstrip().endswith("daemon")
+        for line in lines
+    )
+
+
 def test_rows_match_the_real_runner_units_on_disk() -> None:
     """The allowlist is only useful if the units it names actually exist.
 
@@ -89,6 +121,9 @@ def test_rows_match_the_real_runner_units_on_disk() -> None:
     guest instead of at validation, which is a worse place to discover a typo. Skips
     rather than fails when the runner definitions are not present, so the suite stays
     portable.
+
+    Compares against runner *daemons* specifically. The glob also matches maintenance
+    units, which are not recoverable targets — see ``EXPECTED_NON_DAEMON_UNITS``.
     """
 
     unit_dir = Path("/root/personal-context/gitea-act-runner/systemd")
@@ -97,13 +132,23 @@ def test_rows_match_the_real_runner_units_on_disk() -> None:
 
         pytest.skip("runner unit definitions are not available in this environment")
 
-    on_disk = {path.name for path in unit_dir.glob("gitea-act-runner-*.service")}
+    matched = sorted(unit_dir.glob("gitea-act-runner-*.service"))
+    daemons = {path.name for path in matched if _is_runner_daemon(path)}
+    non_daemons = {path.name for path in matched} - daemons
     seeded = {row["systemd_unit"] for row in _rows()}
 
-    assert not (seeded - on_disk), f"seeded units with no definition: {sorted(seeded - on_disk)}"
-    assert not (on_disk - seeded), (
-        "runner units exist that the allowlist does not cover, so they cannot be "
-        f"recovered through the audited path: {sorted(on_disk - seeded)}"
+    # Fail-closed: an unrecognised non-daemon unit is a decision to make, not to skip.
+    assert non_daemons == EXPECTED_NON_DAEMON_UNITS, {
+        "unexpected_non_daemon": sorted(non_daemons - EXPECTED_NON_DAEMON_UNITS),
+        "no_longer_present": sorted(EXPECTED_NON_DAEMON_UNITS - non_daemons),
+    }
+
+    assert not (seeded - daemons), (
+        f"seeded units with no definition: {sorted(seeded - daemons)}"
+    )
+    assert not (daemons - seeded), (
+        "runner daemons exist that the allowlist does not cover, so they cannot be "
+        f"recovered through the audited path: {sorted(daemons - seeded)}"
     )
 
 
