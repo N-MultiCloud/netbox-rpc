@@ -562,6 +562,38 @@ approval or distinct-actor check.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Gitea Actions runner recovery** is seeded by migration `0073`, which adds all
+  20 `gitea-act-runner-*.service` units to `RPCLinuxServiceAllowlist` so the
+  generic Ubuntu-24 systemd procedures can control them. No new procedure or
+  backend handler — these are reference data the existing `restart_service`
+  normalizer and handler already consume.
+  - **Why.** An `act_runner` executes with `maxParallel=1` — one job at a time,
+    everything else queued behind it. If that job **hangs**, the process keeps
+    heartbeating, so Gitea still reports the runner `online` with correct
+    labels while no further job ever starts. Observed 2026-08-17 on
+    `gitea-act-runner-nmc-netbox-rpc-backend`: claimed task 18865 at 17:04:59Z,
+    logged nothing after 17:05:26Z, still holding its worker ~7 hours later with
+    ten runs queued — including a `deploy-production.yml` for an already-merged
+    `develop → main` promotion.
+  - **Uptime is not the signal.** A sibling runner started in the same second was
+    completing jobs normally. Diagnose from the journal: a runner holding a task
+    while logging nothing for hours is hung; one emitting step output is working.
+  - **Why it matters more than a crash.** A crashed runner is visibly down. A
+    wedged one looks healthy, so a promotion merges, reports success, and never
+    deploys: production keeps serving the previous build while the repository
+    says otherwise. Before `0073` there was no audited way to restart one — the
+    allowlist held only `netbox` and `netbox-rq` — and the estate rule is to
+    extend the tooling rather than SSH to the host.
+  - **Operational warning.** Restarting a runner **aborts any job it is
+    currently executing**. Check `status_service` and the repository's
+    queued/running runs before restarting one that may be mid-build.
+  - **Do not restart a runner from a job running on it.** These runners are
+    per-repository, so an Actions job that restarts its own runner kills its own
+    execution, and the restart can be reported as a failed job even when it
+    worked. Dispatch recovery with `nms rpc` against the runner **host**.
+  - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
+    `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
+    seeded set drifts from the runner units actually defined on disk.
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a
