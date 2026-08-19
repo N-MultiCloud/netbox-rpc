@@ -9,13 +9,30 @@ name: Integration tests (NetBox DB-backed)
 # environment-specific /opt/netbox job remains additive and soft-skips when the
 # runner or database secret is not configured.
 
+# A commit on a branch used to trigger this twice — once for `refs/heads/<branch>`
+# and once for `refs/pull/<n>/head`. Restricting `push` to the release branch keeps
+# exactly one run per commit: `pull_request` already covers every branch, via the
+# ref a reviewer actually gates on.
 on:
   push:
+    branches:
+      - main
   pull_request:
 
+# The compatibility matrix provisions fixed-name databases (`test_netbox_compat_458`
+# / `_465`) and fixed Redis DB indexes on the runner host, so the contended resource
+# is the HOST, not the ref. Keying the group on `github.ref` put the two runs above
+# into *different* groups, so they never cancelled each other and raced:
+#
+#   ERROR:  database "test_netbox_compat_458" is being accessed by other users
+#   ERROR:  database "test_netbox_compat_458" already exists
+#
+# A single repo-wide group serialises every run against that shared host state.
+# `cancel-in-progress: false` because these runs are a gate, not a preview: a newer
+# run must wait its turn rather than kill a `main` gate that is already mid-flight.
 concurrency:
-  group: integration-${{ github.ref }}
-  cancel-in-progress: true
+  group: integration-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   integration:

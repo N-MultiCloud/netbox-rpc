@@ -1595,6 +1595,27 @@ Two tiers (see `docs/architecture.md` → Testing):
    them portably with a Postgres service against NetBox 4.5.8 and 4.6.5.
    Config: `tests/ci/netbox_configuration.py`.
 
+   **The Gitea integration workflow must stay serialised on a repo-wide
+   concurrency group, and must not double-trigger.** Its compatibility matrix
+   provisions **fixed-name** databases (`test_netbox_compat_458` / `_465`) and
+   **fixed** Redis DB indexes on the runner host, so the contended resource is
+   the *host*, not the ref. Two mistakes to avoid, both of which were live
+   defects:
+   - Keying `concurrency.group` on `github.ref`. A branch push
+     (`refs/heads/<branch>`) and its pull request (`refs/pull/<n>/head`) are
+     different refs, so they landed in different groups, never cancelled each
+     other, and raced — `database "test_netbox_compat_458" is being accessed by
+     other users`, then `already exists`. Pull-ref runs passed **1 time in 8**
+     while `main` stayed green, because a `main` push has no paired PR ref.
+   - Leaving `on: push` unscoped, which triggered that second run in the first
+     place. `push` is restricted to `main`; `pull_request` already covers every
+     branch, on the ref a reviewer actually gates on.
+
+   `cancel-in-progress` is deliberately **false**: this is a gate, not a
+   preview, so a newer run waits its turn instead of killing a `main` gate that
+   is mid-flight. If the matrix is ever given run-scoped database names and
+   Redis indexes, the serialisation can be relaxed — not before.
+
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.
 
