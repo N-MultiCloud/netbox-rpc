@@ -36,6 +36,7 @@ class RPCProcedureFilterSet(NetBoxModelFilterSet):
             "effect",
             "approval_required",
             "transport_driver",
+            "transport_pinned",
             "output_parser",
         )
 

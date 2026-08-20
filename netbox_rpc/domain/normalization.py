@@ -553,6 +553,159 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     return normalized
 
 
+# ── Transport driver chain resolution ────────────────────────────────────────
+#
+# Precedence, most specific first:
+#
+#   1. the procedure's own transport_driver_chain  — operator intent, verbatim
+#   2. the estate-wide default chain from RpcPluginSettings, with the
+#      procedure's own driver appended as its fallback
+#   3. nothing — the backend then uses the single transport_driver, and failing
+#      that its own built-in capability default
+#
+# A procedure marked ``transport_pinned`` never reaches step 2: its backend
+# handler depends on one specific driver (it disables fallback and relies on
+# AsyncSSH credential isolation, or streams a long-running command's output),
+# so an estate-wide policy must not touch it.
+#
+# NOTE: ``_DEFAULT_TRANSPORT_DRIVER`` below is deliberately still "asyncssh"
+# even though the *model* default is now "ansible". It means "the driver the
+# backend assumes when the key is absent from the payload", which is a property
+# of netbox-rpc-backend, not of this model. Changing it to match the model
+# default would make every asyncssh procedure stop pinning its driver.
+
+_UNSET = object()
+
+from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
+from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
+from ..transport import driver_capability as _driver_capability
+
+
+def _transport_policy() -> Any | None:
+    """The plugin settings singleton, or ``None`` when it cannot be read.
+
+    Never raises: normalization runs on the execution dispatch path, and a
+    settings row that is missing (fresh install, mid-migration, a test using a
+    stub procedure) must degrade to "no estate-wide policy" rather than break
+    the run.
+    """
+
+    try:
+        from netbox_rpc.models import RpcPluginSettings
+
+        # Deliberately NOT get_solo(): that is a get_or_create, i.e. a write.
+        # Normalization runs on the worker's dispatch path and must not create
+        # rows — a read-only lookup that finds nothing simply means "no
+        # estate-wide policy", which is exactly the pre-existing behaviour.
+        return RpcPluginSettings.objects.filter(singleton_key="default").first()
+    except Exception:  # noqa: BLE001 - policy lookup must never break dispatch
+        return None
+
+
+def resolve_driver_chain(procedure: Any, policy: Any = _UNSET) -> list[str]:
+    """The effective driver priority + fallback chain for a procedure.
+
+    ``policy`` is threaded in by the caller so one execution reads the settings
+    singleton exactly once. Reading it again for the platform map could pair a
+    chain from one snapshot with a platform map from another if an operator
+    edits the policy mid-dispatch.
+    """
+
+    raw_chain = getattr(procedure, "transport_driver_chain", None) or []
+    explicit = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
+    if explicit:
+        return explicit
+
+    if getattr(procedure, "transport_pinned", False):
+        return []
+
+    driver = str(getattr(procedure, "transport_driver", "") or "").strip()
+    if not driver:
+        return []
+
+    capability = _driver_capability(driver)
+    if not capability:
+        return []
+
+    if policy is _UNSET:
+        policy = _transport_policy()
+    if policy is None:
+        return []
+    default_chain = policy.default_chain_for(capability)
+    if not default_chain:
+        return []
+
+    chain = list(default_chain)
+    if driver not in chain:
+        chain.append(driver)
+
+    # Safety net: never leave Ansible without a raw fallback. A chain of only
+    # Ansible drivers turns an optional dependency into a hard one — if
+    # ansible-core is missing or the control node cannot serve the request, the
+    # execution would fail outright instead of degrading.
+    if all(entry in _ANSIBLE_DRIVERS for entry in chain):
+        chain.append(_RAW_CAPABILITY_DEFAULT[capability])
+    return chain
+
+
+def _apply_ansible_context(
+    execution: RPCExecution,
+    normalized: dict[str, Any],
+    chain: list[str],
+    policy: Any,
+) -> None:
+    """Inject the target's Ansible connection settings into the payload.
+
+    The execution backend has no view of what a target *is* — its SSH credential
+    carries no platform — but NetBox does. So when the resolved chain actually
+    contains an Ansible driver, netbox-rpc resolves the target device's Platform
+    to the ``netbox.netbox``-conventional ``ansible_network_os`` /
+    ``ansible_connection`` pair and passes it down.
+
+    Gated on the chain so every non-Ansible procedure keeps a byte-for-byte
+    identical ``normalized_params`` payload, exactly like the other overrides.
+    An unmapped platform injects nothing: the backend then reports its network
+    driver unavailable and falls back to a raw driver, which is far better than
+    guessing a vendor CLI dialect.
+    """
+
+    if not any(entry in _ANSIBLE_DRIVERS for entry in chain):
+        return
+    if policy is None:
+        return
+
+    context = policy.ansible_context_for_platform(_target_platform_slug(execution))
+    if not context:
+        return
+
+    normalized["_ansible"] = context
+    fingerprint = normalized.get("command_fingerprint")
+    if isinstance(fingerprint, dict):
+        fingerprint["ansible_context"] = context
+
+
+def _target_platform_slug(execution: RPCExecution) -> str:
+    """Slug of the target object's NetBox Platform, or ``""``.
+
+    Tolerates every shape the target can take (device, VM, plugin model, or a
+    test stub) and any missing relation, because a missing platform is a normal
+    condition — not every RPC target is a network device.
+    """
+
+    try:
+        target = getattr(execution, "assigned_object", None)
+    except Exception:  # noqa: BLE001 - a stale/removed content type must not
+        # break dispatch; a missing platform simply means "no Ansible context".
+        return ""
+    if target is None:
+        return ""
+    platform = getattr(target, "platform", None)
+    if platform is None:
+        return ""
+    slug = getattr(platform, "slug", None)
+    return str(slug).strip().lower() if slug else ""
+
+
 def _apply_driver_pipeline_overrides(
     execution: RPCExecution, normalized: dict[str, Any]
 ) -> None:
@@ -565,16 +718,16 @@ def _apply_driver_pipeline_overrides(
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver"] = driver
 
-    # Ordered driver priority + fallback chain. Injected only when the operator
-    # configured a non-empty chain, so legacy procedures keep a byte-for-byte
-    # identical payload. The backend reads it from normalized_params, tries the
-    # drivers in order, and falls through on unavailable/connection errors.
-    raw_chain = getattr(procedure, "transport_driver_chain", None) or []
-    chain = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
+    # Ordered driver priority + fallback chain. The backend reads it from
+    # normalized_params, tries the drivers in order, and falls through on
+    # unavailable/connection errors.
+    policy = _transport_policy()
+    chain = resolve_driver_chain(procedure, policy)
     if chain:
         normalized["transport_driver_chain"] = chain
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver_chain"] = chain
+        _apply_ansible_context(execution, normalized, chain, policy)
 
     parser = str(getattr(procedure, "output_parser", "") or "").strip()
     if parser and parser != _DEFAULT_OUTPUT_PARSER:

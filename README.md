@@ -1008,15 +1008,38 @@ Each `RPCProcedure` declares a pluggable **transport driver** and **output
 parser** for the nms-backend execution pipeline as explicit model fields (never
 encoded in `handler_id`):
 
-- `transport_driver`: the single default driver — `asyncssh` (default),
-  `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or `scrapli`, `netmiko`,
-  `napalm`, `nornir` (network CLI). `asyncssh` preserves the historical SSH
-  behaviour.
+- `transport_driver`: the procedure's own driver — `ansible` (**default**),
+  `asyncssh`, `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or
+  `ansible-network`, `scrapli`, `netmiko`, `napalm`, `nornir` (network CLI).
+  `asyncssh` preserves the historical SSH behaviour.
 - `transport_driver_chain`: an ordered priority + fallback chain of the same
-  driver names (index 0 tried first). Injected into
-  `normalized_params["transport_driver_chain"]` only when non-empty (legacy
-  procedures keep an identical payload); the netbox-rpc-backend executor tries
-  them in order, advancing on an unavailable/connection error.
+  driver names (index 0 tried first). The netbox-rpc-backend executor tries them
+  in order, advancing on an unavailable/connection error and stopping on a
+  command-level result.
+- `transport_pinned`: excludes this procedure from the estate-wide policy below.
+  Set it when the backend handler depends on one specific driver.
+
+**Ansible is the estate-wide default.** Rather than rewriting every procedure's
+driver, the plugin settings carry a default chain per capability (seeded
+`["ansible"]` / `["ansible-network"]`). A procedure that defines no chain of its
+own resolves at dispatch time to *Ansible first, then the driver it already
+used*, so the raw drivers remain the fallback tier and nothing loses its
+existing behaviour. Rollback is a single settings edit — clearing the chains
+restores raw-driver behaviour estate-wide, with no migration to undo.
+
+A resolved chain containing only Ansible drivers automatically gains the
+capability's raw driver, so making Ansible the default can never turn an
+optional dependency into a required one.
+
+Procedures marked `transport_pinned` are excluded: two ship pinned because they
+disable transport fallback entirely, and one of them additionally needs
+credential isolation Ansible cannot reproduce.
+
+For network procedures the target device's NetBox **Platform** is resolved
+through an operator-editable map (following the official `netbox.netbox`
+collection's conventions) and passed to the executor as the Ansible network OS
+and connection plugin. An unmapped platform passes nothing, and the executor
+falls back to a raw driver instead of guessing a vendor's CLI dialect.
 - `output_parser`: `none` (default, raw), `auto` (native JSON/XML → jc →
   TextFSM → TTP → Genie → regex fallback chain), or a pinned backend (`json`,
   `xml`, `jc`, `textfsm`, `ttp`, `genie`, `regex`).
