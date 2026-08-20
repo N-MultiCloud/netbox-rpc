@@ -6,7 +6,10 @@ sync when architecture, commands, or workflows change.
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
 The DDD/CQRS/Event Sourcing architecture contract lives in
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/architecture.md`](docs/architecture.md), which also carries the
+**System Architecture** diagrams: the component view across netbox-rpc /
+netbox-rpc-backend / managed targets, the execution lifecycle, and driver-chain
+resolution with the Ansible-first policy and its raw-driver fallback.
 
 ## Standalone usage
 

@@ -167,7 +167,9 @@ under the `_intent`-prefixed keys so this attribution stays correct.
 ## DDD / CQRS / Event Sourcing
 
 - Treat `RPCExecution` as the command aggregate and current-state read
-  projection. The detailed contract is in `docs/architecture.md`.
+  projection. The detailed contract is in `docs/architecture.md`, whose
+  **System Architecture** section diagrams the whole current path —
+  component view, execution lifecycle, and driver-chain resolution.
 - Typed execution events live in `netbox_rpc.domain.events`; the canonical
   projection fold is `netbox_rpc.domain.projection.apply()` /
   `rebuild()`. `event_store.rebuild_projection()` and `reproject()` are the
