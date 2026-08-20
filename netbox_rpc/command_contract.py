@@ -94,6 +94,11 @@ EXEMPT_HANDLER_RATIONALE = {
         "installs the staging NetBox service token without accepting or returning "
         "the token value through the RPC contract."
     ),
+    "service.gitea.production.upgrade_1_27_1": (
+        "Runs a backend-owned production Gitea upgrade transaction: exact target "
+        "validation, official artifact verification, backup, service lifecycle, "
+        "health checks, and safe rollback cannot be represented as one fixed argv."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

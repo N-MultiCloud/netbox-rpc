@@ -596,6 +596,14 @@ def verify_dispatch_lease(
     expected_execution_id: int | None = None,
     expected_stream_version: int | None = None,
     expected_contract_hash: str | None = None,
+    expected_handler_id: str | None = None,
+    expected_handler_version: int | None = None,
+    expected_effect: str | None = None,
+    expected_target_snapshot_hash: str | None = None,
+    expected_params_fingerprint: str | None = None,
+    expected_credential_policy: str | None = None,
+    expected_requested_by_id: int | None = None,
+    expected_approved_by_id: int | None = None,
     seen_nonces: set[str] | frozenset[str] | None = None,
 ) -> LeaseVerification:
     """Reference verifier: fail-closed on every mismatch.
@@ -650,6 +658,31 @@ def verify_dispatch_lease(
         and claims.contract_hash != expected_contract_hash
     ):
         return _invalid("contract hash mismatch")
+    semantic_expectations = (
+        (expected_handler_id, claims.handler_id, "handler id mismatch"),
+        (expected_handler_version, claims.handler_version, "handler version mismatch"),
+        (expected_effect, claims.effect, "effect mismatch"),
+        (
+            expected_target_snapshot_hash,
+            claims.target_snapshot_hash,
+            "target snapshot mismatch",
+        ),
+        (
+            expected_params_fingerprint,
+            claims.params_fingerprint,
+            "params fingerprint mismatch",
+        ),
+        (
+            expected_credential_policy,
+            claims.credential_policy,
+            "credential policy mismatch",
+        ),
+        (expected_requested_by_id, claims.requested_by_id, "requester mismatch"),
+        (expected_approved_by_id, claims.approved_by_id, "approver mismatch"),
+    )
+    for expected, actual, mismatch_reason in semantic_expectations:
+        if expected is not None and actual != expected:
+            return _invalid(mismatch_reason)
     if seen_nonces is not None and claims.nonce in seen_nonces:
         return _invalid("nonce replay")
 

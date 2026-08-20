@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import requests
+import jsonschema
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
 
@@ -152,31 +153,59 @@ def _call_backend(
     body: dict[str, Any] = {}
     if lease is not None:
         body["dispatch_lease"] = lease.to_body()
+    is_gitea_upgrade = (
+        str(getattr(execution.procedure, "name", "") or "")
+        == "service.gitea.production.upgrade_1_27_1"
+    )
+    request_kwargs: dict[str, Any] = {
+        "headers": target.headers,
+        "json": body,
+        "verify": target.verify_ssl,
+        "timeout": timeout,
+    }
+    if is_gitea_upgrade:
+        # The protected Gitea lease is approved for one concrete backend
+        # destination and must never be replayed by requests across a redirect.
+        # Legacy procedure calls keep their byte-for-byte request behavior.
+        request_kwargs["allow_redirects"] = False
     try:
-        resp = requests.post(
-            url,
-            headers=target.headers,
-            json=body,
-            verify=target.verify_ssl,
-            timeout=timeout,
-        )
+        resp = requests.post(url, **request_kwargs)
     except requests.exceptions.RequestException as exc:
+        if is_gitea_upgrade:
+            connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
+            if isinstance(exc, connect_timeout):
+                return _gitea_transport_failure_response(stage="execute")
+            return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend is unreachable: {exc}",
             code="RPC_BACKEND_UNREACHABLE",
         ) from exc
-    if resp.status_code == 401:
+    if resp.status_code == 401 and not is_gitea_upgrade:
         raise RPCExecutionError(
             "nms-backend returned 401 Unauthorized.",
             code="RPC_BACKEND_UNAUTHORIZED",
         )
+    if is_gitea_upgrade and 300 <= resp.status_code < 400:
+        # The request reached the approved origin but a redirect response says
+        # nothing trustworthy about whether that origin dispatched work.  Do
+        # not parse or follow it; persist the exact ambiguous outcome.
+        return _gitea_transport_failure_response(stage="indeterminate")
     try:
         data = resp.json()
     except ValueError as exc:
+        if is_gitea_upgrade:
+            return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend returned non-JSON response: HTTP {resp.status_code}",
             code="RPC_BACKEND_BAD_RESPONSE",
         ) from exc
+    if is_gitea_upgrade:
+        normalized = _normalize_gitea_closed_response(data)
+        if normalized is None:
+            return _gitea_transport_failure_response(stage="indeterminate")
+        if not 200 <= resp.status_code < 300 and normalized["ok"] is not False:
+            return _gitea_transport_failure_response(stage="indeterminate")
+        return normalized
     if resp.status_code >= 400:
         if not isinstance(data, dict):
             raise RPCExecutionError(
@@ -193,6 +222,58 @@ def _call_backend(
             str(message), code=str(data.get("code") or "RPC_BACKEND_ERROR")
         )
     return data
+
+
+def _gitea_transport_failure_response(*, stage: str) -> dict[str, Any]:
+    """Return the exact closed failure tuple for a protected transport outcome."""
+    from . import gitea_upgrade_contract as contract
+
+    is_indeterminate = stage == "indeterminate"
+    return {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": contract.PROCEDURE_NAME,
+            "target": contract.TARGET_NAME,
+            "changed": None if is_indeterminate else False,
+            "healthy": None if is_indeterminate else False,
+            "stage": stage,
+        },
+    }
+
+
+def _normalize_gitea_closed_response(data: object) -> dict[str, Any] | None:
+    """Validate the five-key backend wire envelope and discard diagnostics."""
+    from . import gitea_upgrade_contract as contract
+
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    if type(data.get("ok")) is not bool:
+        return None
+    result = data.get("result")
+    if not isinstance(result, dict) or result.get("ok") is not data["ok"]:
+        return None
+    if data.get("events") != []:
+        return None
+    if not isinstance(data.get("error_code"), str) or not isinstance(
+        data.get("error_message"), str
+    ):
+        return None
+    if data["ok"] and (data["error_code"] or data["error_message"]):
+        return None
+    try:
+        jsonschema.validate(result, contract.RESULT_SCHEMA)
+    except jsonschema.ValidationError:
+        return None
+    # Never carry backend-controlled diagnostics into the event store.  It
+    # derives bounded static values solely from this validated result tuple.
+    return {"ok": data["ok"], "result": result}
 
 
 def _store_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:

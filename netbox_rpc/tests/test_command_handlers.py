@@ -11,6 +11,7 @@ from rest_framework.exceptions import ValidationError
 from netbox_rpc.application import command_handlers
 from netbox_rpc.backends import BackendTarget
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
+from netbox_rpc.domain.normalization import RPCExecutionError
 from netbox_rpc.models import RPCExecution, RPCProcedure
 
 from ._common import (
@@ -68,6 +69,36 @@ class RunExecutionTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_FAILED
         assert ex.error_code == "RPC_BACKEND_NOT_CONFIGURED"
+
+    @mock.patch("netbox_rpc.jobs._call_backend")
+    @mock.patch.object(command_handlers, "_verify_backend_capability")
+    @mock.patch.object(
+        command_handlers,
+        "resolve_backend",
+        side_effect=RuntimeError("opaque resolver diagnostic must not persist"),
+    )
+    def test_backend_resolver_exception_terminalizes_without_contact(
+        self,
+        _resolve,
+        verify_capability,
+        call_backend,
+    ):
+        ex = _queued()
+
+        with self.assertRaises(RPCExecutionError) as raised:
+            command_handlers.run_execution(ex)
+
+        assert raised.exception.code == "RPC_BACKEND_RESOLUTION_FAILED"
+        verify_capability.assert_not_called()
+        call_backend.assert_not_called()
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_FAILED
+        assert ex.error_code == "RPC_BACKEND_RESOLUTION_FAILED"
+        assert ex.error_message == (
+            "RPC backend resolution failed; execution not dispatched."
+        )
+        assert "opaque resolver diagnostic" not in ex.error_message
+        assert event_names(ex)[-1] == "ExecutionFailed"
 
     def test_disabled_akvorado_procedure_fails_before_worker_dispatch(self):
         procedure = make_procedure("service.akvorado.1.config_read")

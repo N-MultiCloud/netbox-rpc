@@ -7,6 +7,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -14,45 +17,115 @@ concurrency:
 jobs:
   test:
     name: Syntax check and tests
-    runs-on: mirror-host
+    runs-on: ci-untrusted-python312
     env:
-      HOME: ${{ github.workspace }}
-      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_CONFIG: "1"
+      UV_NO_SOURCES: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Set up uv and Python 3.12
+      - name: Verify preprovisioned toolchain
         shell: bash
         run: |
-          set -eo pipefail
-          export HOME="${GITHUB_WORKSPACE:-$PWD}"
-          export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v uv >/dev/null 2>&1; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          python_bin="/usr/local/bin/python3.12"
+          uv_bin="/usr/local/bin/uv"
+          test -x "$python_bin"
+          test -x "$uv_bin"
+          test "$("$python_bin" --version)" = "Python 3.12.14"
+          test "$("$uv_bin" --version)" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
+          "$python_bin" -I -S - <<'PY'
+          import platform
+          import sys
 
-      - name: Create venv and install pytest
+          if platform.python_implementation() != "CPython":
+              raise SystemExit("CI requires CPython")
+          if sys.version_info[:3] != (3, 12, 14):
+              raise SystemExit("CI requires CPython 3.12.14")
+          if platform.machine() != "x86_64":
+              raise SystemExit("CI requires x86_64")
+          libc_name, libc_version = platform.libc_ver()
+          if libc_name != "glibc":
+              raise SystemExit("CI requires glibc")
+          if tuple(map(int, libc_version.split("."))) < (2, 34):
+              raise SystemExit("CI requires glibc 2.34 or newer")
+          PY
+
+      - name: Create isolated venv and install locked wheels
         shell: bash
         run: |
-          set -eo pipefail
-          export HOME="${GITHUB_WORKSPACE:-$PWD}"
-          export PATH="$HOME/.local/bin:$PATH"
-          uv venv --python 3.12 .ci-venv
-          uv pip install --python .ci-venv pytest pytest-asyncio requests jinja2 jsonschema pyyaml cryptography pydantic
+          set -euo pipefail
+          python_bin="/usr/local/bin/python3.12"
+          uv_bin="/usr/local/bin/uv"
+          test -x "$python_bin"
+          test -x "$uv_bin"
+          env -i \
+            HOME="$HOME" \
+            HTTP_PROXY="${HTTP_PROXY:-}" \
+            HTTPS_PROXY="${HTTPS_PROXY:-}" \
+            NO_PROXY="${NO_PROXY:-}" \
+            UV_PYTHON_DOWNLOADS=never \
+            UV_NO_CONFIG=1 \
+            UV_NO_SOURCES=1 \
+            "$uv_bin" venv \
+              --python "$python_bin" \
+              --no-managed-python \
+              --no-python-downloads \
+              --no-project \
+              --no-config \
+              --no-cache \
+              .ci-venv
+          env -i \
+            HOME="$HOME" \
+            HTTP_PROXY="${HTTP_PROXY:-}" \
+            HTTPS_PROXY="${HTTPS_PROXY:-}" \
+            NO_PROXY="${NO_PROXY:-}" \
+            UV_PYTHON_DOWNLOADS=never \
+            UV_NO_CONFIG=1 \
+            UV_NO_SOURCES=1 \
+            "$uv_bin" pip install \
+              --python .ci-venv/bin/python \
+              --python-version 3.12.14 \
+              --python-platform x86_64-manylinux_2_34 \
+              --no-managed-python \
+              --require-hashes \
+              --only-binary=:all: \
+              --no-sources \
+              --no-python-downloads \
+              --no-config \
+              --no-cache \
+              --keyring-provider disabled \
+              --index-strategy first-index \
+              --default-index https://pypi.org/simple \
+              --exact \
+              --strict \
+              --requirements .gitea/ci-requirements.lock
 
       - name: Syntax check (py_compile)
         shell: bash
         run: |
-          set -eo pipefail
-          . .ci-venv/bin/activate
-          find netbox_rpc -name "*.py" -exec python -m py_compile {} +
-          find tests -name "*.py" -exec python -m py_compile {} +
+          set -euo pipefail
+          /usr/bin/find netbox_rpc -name "*.py" -exec \
+            /usr/bin/env -i PYTHONNOUSERSITE=1 \
+            .ci-venv/bin/python -I -m py_compile {} +
+          /usr/bin/find tests -name "*.py" -exec \
+            /usr/bin/env -i PYTHONNOUSERSITE=1 \
+            .ci-venv/bin/python -I -m py_compile {} +
 
       - name: Run tests
         shell: bash
         run: |
-          set -eo pipefail
-          . .ci-venv/bin/activate
-          pytest tests/ -q --tb=short
+          set -euo pipefail
+          /usr/bin/env -i \
+            PYTHONNOUSERSITE=1 \
+            PYTEST_ADDOPTS= \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            .ci-venv/bin/python -I -m pytest \
+              -p pytest_asyncio.plugin \
+              -c .gitea/pytest-ci.ini \
+              tests/ -q --tb=short

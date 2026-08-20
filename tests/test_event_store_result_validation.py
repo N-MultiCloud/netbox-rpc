@@ -115,6 +115,29 @@ def test_schema_valid_backend_result_still_records_success(event_store_module) -
     assert [event.event_name for event in events] == ["ExecutionSucceeded"]
 
 
+def test_gitea_public_ssh_snapshot_survives_redaction_byte_exact(
+    event_store_module,
+) -> None:
+    event_store, _events = event_store_module
+    snapshot = {
+        "ssh_service_id": 901,
+        "ssh_service_revision": "2026-08-17T12:00:00Z",
+        "ssh_identity_id": 902,
+        "ssh_identity_revision": "2026-08-17T11:00:00Z",
+        "ssh_principal": "gitea-admin",
+        "ssh_method": "key",
+        "ssh_host": "10.0.30.96",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": "a" * 64,
+        "ssh_policy_ref": "target-owned-ssh:virtualization.virtualmachine:170",
+    }
+    payload = {**snapshot, "command_fingerprint": dict(snapshot)}
+    assert event_store.redact_event_data(payload) == payload
+    assert event_store.redact_event_data(
+        {"credential_policy": "must-still-redact"}
+    ) == {"credential_policy": "[REDACTED]"}
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -169,6 +192,141 @@ def test_valid_closed_failure_result_is_preserved(
     assert failure.event_name == "ExecutionFailed"
     assert failure.code == "RPC_REMOTE_FAILED"
     assert failure.result == result
+
+
+def test_gitea_backend_diagnostics_never_reach_the_event_ledger(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    opaque = "m8QvL2pR7xZ1nT6c"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": contract.TARGET_NAME,
+                "changed": False,
+                "healthy": True,
+                "stage": "rolled_back",
+            },
+            "error_code": opaque,
+            "error_message": opaque,
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert opaque not in failure.error_message
+    assert opaque not in repr(failure)
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": False,
+            "healthy": False,
+            "stage": "execute",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": False,
+            "healthy": True,
+            "stage": "rolled_back",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": True,
+            "healthy": False,
+            "stage": "complete",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": None,
+            "healthy": None,
+            "stage": "indeterminate",
+        },
+    ],
+)
+def test_gitea_closed_failure_and_indeterminate_result_is_preserved(
+    event_store_module,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": result,
+        },
+    )
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    expected_code, expected_message = contract.result_diagnostics(result)
+    assert failure.code == expected_code
+    assert failure.error_message == expected_message
+    assert failure.result == result
+
+
+def test_gitea_protected_envelope_rejects_events_and_ok_mismatch(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": True,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "Gitea",
+                "changed": False,
+                "healthy": True,
+                "stage": "complete",
+            },
+            "events": [{"message": "must not persist"}],
+        },
+    )
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
 
 
 def test_malformed_nested_failure_result_fails_schema_and_is_not_persisted(

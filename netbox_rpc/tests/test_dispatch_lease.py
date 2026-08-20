@@ -109,6 +109,50 @@ class CrossRepoFixtureTests(TestCase):
         )
         assert v.is_valid, v.reason
 
+    def test_semantic_bindings_and_actors_are_reverified(self):
+        expected = {
+            "expected_handler_id": self.claims.handler_id,
+            "expected_handler_version": self.claims.handler_version,
+            "expected_effect": self.claims.effect,
+            "expected_target_snapshot_hash": self.claims.target_snapshot_hash,
+            "expected_params_fingerprint": self.claims.params_fingerprint,
+            "expected_credential_policy": self.claims.credential_policy,
+            "expected_requested_by_id": self.claims.requested_by_id,
+            "expected_approved_by_id": self.claims.approved_by_id,
+        }
+        verified = dl.verify_dispatch_lease(
+            self.lease,
+            public_keys=self.pubs,
+            audience=self.fx["audience"],
+            now=self.now,
+            **expected,
+        )
+        assert verified.is_valid, verified.reason
+
+        reasons = {
+            "expected_handler_id": "handler id mismatch",
+            "expected_handler_version": "handler version mismatch",
+            "expected_effect": "effect mismatch",
+            "expected_target_snapshot_hash": "target snapshot mismatch",
+            "expected_params_fingerprint": "params fingerprint mismatch",
+            "expected_credential_policy": "credential policy mismatch",
+            "expected_requested_by_id": "requester mismatch",
+            "expected_approved_by_id": "approver mismatch",
+        }
+        for field, reason in reasons.items():
+            with self.subTest(field=field):
+                drifted = dict(expected)
+                current = drifted[field]
+                drifted[field] = current + 1 if isinstance(current, int) else f"{current}-drift"
+                rejected = dl.verify_dispatch_lease(
+                    self.lease,
+                    public_keys=self.pubs,
+                    audience=self.fx["audience"],
+                    now=self.now,
+                    **drifted,
+                )
+                assert not rejected.is_valid and rejected.reason == reason
+
     def test_rejects_replayed_nonce(self):
         v = dl.verify_dispatch_lease(
             self.lease,

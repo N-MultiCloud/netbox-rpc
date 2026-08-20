@@ -54,6 +54,11 @@ command behavior changes.
 > `services.passbolt.import_secrets`, and `services.passbolt.cleanup`) also
 > require explicit operator approval and must never expose DB dump contents,
 > GPG/JWT material, or DB passwords in params, logs, events, or results.
+> `service.gitea.production.upgrade_1_27_1` is likewise destructive and must
+> never be enabled, created, approved, or dispatched autonomously. It is seeded
+> disabled and accepts no caller parameters; see
+> `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
+> signed-lease, activation, and rollback contract.
 
 @AGENTS.md
 

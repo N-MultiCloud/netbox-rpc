@@ -125,6 +125,18 @@ class FetchTests(TestCase):
                 is None
             )
 
+    def test_redirect_is_not_followed(self):
+        with mock.patch(
+            "netbox_rpc.capabilities.requests.get",
+            return_value=_fake_response(status=307),
+        ) as get:
+            assert (
+                capabilities.fetch_backend_capabilities(self.target, use_cache=False)
+                is None
+            )
+        assert get.call_count == 1
+        assert get.call_args.kwargs["allow_redirects"] is False
+
     def test_connection_error_returns_none(self):
         import requests
 

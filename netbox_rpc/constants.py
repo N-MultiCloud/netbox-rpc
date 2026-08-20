@@ -117,6 +117,18 @@ NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
     "service.netbox.staging.rotate_backend_token"
 )
 
+# Disabled, approval-bound production Gitea binary upgrade. The exact VM,
+# versions, official artifact digest, and target-owned credential policy are
+# server-normalized and signed; the caller supplies no params.
+GITEA_PRODUCTION_UPGRADE_1_27_1 = "service.gitea.production.upgrade_1_27_1"
+GITEA_PRODUCTION_UPGRADE_1_27_1_HANDLER = GITEA_PRODUCTION_UPGRADE_1_27_1
+PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
+    {
+        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        GITEA_PRODUCTION_UPGRADE_1_27_1,
+    }
+)
+
 SAMBA_1_CONFIG_READ = "service.samba.1.config_read"
 SAMBA_1_CONFIG_READ_HANDLER = "service.samba_1.config_read"
 SAMBA_1_CONFIG_TEST = "service.samba.1.config_test"

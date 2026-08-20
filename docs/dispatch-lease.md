@@ -87,6 +87,35 @@ cross-repo contract.
   any mutable catalog drift fails before approval, worker claim, or lease
   issuance. Coordinated issuer/verifier key provisioning is therefore a
   deployment prerequisite for that procedure.
+  `service.gitea.production.upgrade_1_27_1` uses the same mandatory-lease
+  boundary. Its lease and approval snapshot additionally bind the exact VM
+  identity/topology, source/target versions, official artifact SHA-256, and
+  `target-owned-ssh:virtualization.virtualmachine:170` SSH-policy reference.
+  Its params fingerprint also freezes the public SSH service/identity IDs and
+  UTC revisions, principal/method, host/port, and pinned-known-host digest.
+  The verifier accepts expected target/params/policy and requester/approver
+  values so the backend can re-derive and reject each mismatch. It is seeded
+  disabled; activate the backend gate/capability first,
+  then enable the catalog row. Disable the catalog row before closing the
+  backend gate during rollback.
+  The capability hash includes the Gitea semantic extension in addition to the
+  representative command; all other handler hash payloads remain compatible
+  with the generic command contract. Its semantic extension and approval
+  policy both bind backend ID 1, loopback URL `http://127.0.0.1:16005`,
+  `verify_ssl=false`, and the canonical executable/rollback/schema digest.
+  The public Nginx vhost is unsupported. Requested, pending, approved, or queued
+  work is invalidated before enqueue or lease issuance if those semantics
+  drift. The existing lease `contract_hash` provides the signed binding; no new
+  caller or wire field is added. Capability and dispatch requests do not
+  follow redirects, so the signed lease cannot leave its approved backend
+  destination. The exact backend URL/TLS binding is validated before any
+  authenticated capability request and the same resolved target is reused
+  through snapshot, lease, and dispatch. Approval performs an uncached
+  compatibility check inside its locked transaction; drift leaves the request
+  pending without approval/queue events or a job. A 3xx dispatch result is
+  persisted as indeterminate. The raw
+  backend diagnostic fields are discarded before event persistence; catalog
+  failure diagnostics are fixed by the validated closed result tuple.
 
 ## Operations
 
@@ -125,8 +154,9 @@ root/current-euid-owned file with permissions no broader than `0640`, under
 trusted non-writable ancestors (root-owned sticky directories are allowed).
 Unsafe ownership/mode, symlinks, races, partial configuration, special files,
 short/oversized reads, malformed PEM, or unavailable OS primitives yield no
-lease and never log or return key contents. For staging token rotation that
-means `RPC_DISPATCH_LEASE_REQUIRED` before backend dispatch.
+lease and never log or return key contents. For staging token rotation and the
+production Gitea upgrade that means `RPC_DISPATCH_LEASE_REQUIRED` before backend
+dispatch.
 
 - **Key rotation.** Add the new key with `active: True` and a higher
   `key_version`; set the previous key `active: False` (keep it listed so the

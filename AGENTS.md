@@ -204,12 +204,13 @@ under the `_intent`-prefixed keys so this attribution stays correct.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
-### Two-person approval workflow (#164, #221 scoped enforcement)
+### Two-person approval workflow (#164, #221/#224 scoped enforcement)
 
 The execution aggregate carries an additive **approval-workflow** surface (the
-foundation of the P0 two-person-approval epic #163). Issue #221 activates the
-complete two-person route for
-`service.netbox.staging.rotate_backend_token`; other legacy
+foundation of the P0 two-person-approval epic #163). Issues #221 and #224
+activate the complete two-person route for
+`service.netbox.staging.rotate_backend_token` and
+`service.gitea.production.upgrade_1_27_1`; other legacy
 `approval_required` procedures retain their existing requester permission gate
 until they are migrated deliberately.
 
@@ -231,7 +232,7 @@ until they are migrated deliberately.
   still works), stores references not secrets, and `matches_current()` detects a
   snapshot-invalidating drift.
 - **Aggregate transitions** (`domain.aggregate`): `request` → `request_approval`
-  (never enqueues) → `approve` / `reject` / `expire`. The staging rotation's
+  (never enqueues) → `approve` / `reject` / `expire`. A protected procedure's
   successful `approve` atomically adds `ExecutionApproved` then
   `ExecutionQueued`, after which the application enqueues one RQ job and adds
   `JobEnqueued`. `approve`/`reject` enforce
@@ -240,14 +241,19 @@ until they are migrated deliberately.
   `select_for_update` row lock + in-transaction status recheck so
   double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
   to a single deterministic event.
+  For either protected procedure, validate the immutable backend target before
+  sending authenticated capability traffic and reuse that exact resolved target
+  through snapshot/lease/dispatch. Approval must obtain an uncached compatible
+  capability while holding the row lock; failure leaves pending state and its
+  event stream unchanged and must not enqueue.
 - **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
   `approve` / `reject` actions (`command_handlers.approve_execution` /
   `reject_execution`) — no mutable status CRUD (PUT/PATCH/DELETE stay 405).
   Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
   to the execution's procedure on top of the aggregate's segregation-of-duties
   and single-decision concurrency guards; `get_object()` already object-restricts
-  the execution row. Staging rotation uses this API in production: creation
-  requires execute permission scoped to that exact procedure and never accepts
+  the execution row. The staging rotation and production Gitea upgrade use
+  this API: creation requires execute permission scoped to the exact procedure and never accepts
   a same-request bypass; a distinct actor with approval permission scoped to
   that procedure must decide it. Other procedures are not implicitly migrated
   to this lifecycle.
@@ -263,6 +269,9 @@ until they are migrated deliberately.
   unambiguous), so enforcing the gate never rejects an already-active install;
   fresh installs keep the `enabled=False` default. Tests that create/dispatch
   executions must call `_common.enable_rpc_integration()`.
+  Once a queued execution is claimed, a resolver exception must be converted to
+  bounded `RPC_BACKEND_RESOLUTION_FAILED` and appended as `ExecutionFailed`;
+  never persist resolver text or leave the projection in `running`.
 - **Backend capability handshake (#167)**: `capabilities.py` consumes a manifest
   the paired `netbox-rpc-backend` advertises at `GET {backend_url}/capabilities`
   (per handler: `handler_id`/`version`/`effect`/`contract_hash`, plus a top-level
@@ -432,6 +441,7 @@ the agent must confirm with the user:
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 | `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
+| `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
 
 ### Other Write Procedures
 
@@ -516,14 +526,75 @@ procedure never falls back when dispatch-lease keys are absent or invalid.
 deployment provisions coordinated issuer/verifier keys; the backend is not
 called in that state.
 
+### Production Gitea 1.27.1 Upgrade
+
+`service.gitea.production.upgrade_1_27_1` is a disabled-by-default,
+destructive, approval-required procedure for the exact production `Gitea`
+`virtualization.virtualmachine` PK 170. It accepts no caller params. The server
+normalizer validates VMID 222, cluster PK 6 / `PVE-CLUSTER-02`, node device PK
+27 / `pve03`, primary IPv4 `10.0.30.96`, active status, and the production tag;
+then it pins source 1.26.2, target 1.27.1, official artifact SHA-256
+`86a7ac26e7f9c9cca0f56c4fac07fff205d5fc3bca0e54af23a204f07b833bc9`,
+and the non-secret SSH policy reference
+`target-owned-ssh:virtualization.virtualmachine:170` into normalized params and
+the command fingerprint. It also resolves exactly one enabled target-owned
+`netbox_network.DeviceService` in a single query and freezes its public
+service/identity IDs and UTC revisions, principal/method, exact management
+host/port, and pinned-known-host digest. Raw known-host and secret material are
+never persisted. Callers cannot override any of these fields.
+
+The Gitea capability hash extends the legacy command payload with
+`gitea_upgrade_contract.SEMANTIC_CAPABILITY_EXTENSION`: static target/topology,
+source/target/artifact, guest paths/unit/health URLs, handler/process budgets,
+the exact Ed25519 host-pin parser, closed caller/normalized/fingerprint
+schemas, all six result tuples, exact backend 1 at loopback URL
+`http://127.0.0.1:16005` with TLS verification disabled, and versioned
+length/SHA-256 identities for the exact 59,952-byte backend script and complete
+63,492-byte canonical fixed argv. The public Nginx vhost is not a supported
+dispatch path. The checked-in fixture is the byte-exact cross-repository
+canonical JSON and digest. Never change or reserialize only one side. Other
+handler capability hashes remain unchanged.
+
+The exact target/fingerprint, complete immutable procedure/command/schema
+policy, authoritative backend ID plus URL/TLS hash, SSH-policy
+reference, and distinct actor identities are bound into the approval snapshot
+and signed one-time dispatch lease. For Gitea only, the procedure-policy hash
+also contains the canonical semantic-extension digest; executable-, backend-,
+rollback-, or schema-only drift therefore invalidates requested, pending,
+approved, and queued work before enqueue or lease issuance. The existing signed
+lease `contract_hash` carries the same semantics; do not add a redundant caller
+or lease field. No ID-only fallback is permitted. The
+closed result has only `ok`, constant `procedure`, constant `target="Gitea"`,
+`changed`, `healthy`, and `stage`, with six exact states documented in
+[`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md).
+Schema-valid false/indeterminate states remain on failed executions; malformed
+results and all backend progress events fail closed. Capability and dispatch
+redirects are forbidden. The catalog validates the exact five-key backend wire
+envelope, discards backend `error_code`/`error_message`, and derives bounded
+durable diagnostics only from the validated result tuple; remote diagnostic
+text must never enter the event ledger or execution projection.
+
+Migration `0073` seeds `enabled=False`. Ordered activation is backend gate and
+exact capability first, then an explicit operator enables the catalog row.
+For this procedure, an absent, unreachable, or malformed capability manifest is
+not graceful: admission and the uncached worker pre-dispatch check both require
+`COMPATIBLE`.
+Rollback disables the catalog row first, reconciles in-flight work, then closes
+the backend gate. Never create, approve, enable, or dispatch this production
+procedure autonomously. Read-timeout, ambiguous HTTP, and non-JSON outcomes
+after sending are persisted as the exact closed `indeterminate` tuple. A
+post-dispatch indeterminate or committed unhealthy
+state is not safe to retry until an operator reconciles the installed binary,
+service/database health, and backup.
+
 ### Permission Invariant
 
 Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
 a human operator has explicitly granted it for a specific, bounded task. Holding
 this permission satisfies the legacy single-actor gate for most
 `approval_required` procedures — it must never be used autonomously on
-destructive procedures. It does **not** bypass staging token rotation's pending
-approval or distinct-actor check.
+destructive procedures. It does **not** bypass either protected procedure's
+pending approval or distinct-actor check.
 
 ---
 
@@ -1125,6 +1196,22 @@ approval or distinct-actor check.
   `procedure.delete()` behind an `except ProtectedError` guard, which handled the
   PROTECT case but *not* the collector's `ValueError` (a `ValueError` is not a
   `ProtectedError`) — see the historical-model rule under **CI / Testing**.
+- Production Gitea binary upgrade is seeded disabled by migration `0073` as
+  `service.gitea.production.upgrade_1_27_1` (destructive, 1800s, approval
+  required), targeting only `virtualization.virtualmachine` PK 170 (`Gitea`).
+  Its exact empty params, six-state closed result, immutable VM/topology/version/
+  artifact/credential fingerprint, concrete backend hash, two-person approval,
+  mandatory signed lease, backend-event prohibition, activation ordering, and
+  rollback rules are specified in
+  [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md).
+  The representative command is backend-orchestrated because download,
+  checksum, backup, service lifecycle, health, and rollback are one fixed
+  transaction rather than one faithful argv. Migration `0073` is intentionally
+  irreversible: its reverse raises before any catalog inspection or mutation,
+  so operator replacement, rename, or references cannot produce a falsely
+  unapplied migration with deleted, surviving, or orphaned rows. Removal or
+  repair requires a reviewed forward migration with explicit ownership
+  evidence.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve
@@ -1591,18 +1678,52 @@ Two tiers (see `docs/architecture.md` → Testing):
 
 1. **Pure-domain unit tests** (`tests/`, `pytest`) — stub Django/NetBox, no
    database. `.gitea/workflows/ci.yml` runs `py_compile` + `pytest tests/ -q` on
-   the `mirror-host` runner; the portable `.github/workflows/test.yml` `unit` job
-   mirrors it. Cover the domain logic (projection fold/rebuild, typed events,
-   aggregate invariants, value objects, queries, normalization). Add new
-   domain/CQRS logic here. Use `monkeypatch`/`SimpleNamespace` stubs as in
+   the sole scalar runner label `ci-untrusted-python312`; it must queue rather
+   than fall back to a mirror, production-deploy, generic self-hosted, or hosted
+   runner when that label is unavailable. Checkout is pinned by full action SHA,
+   uses the triggering commit SHA, and does not persist credentials. The runner
+   must pre-provision exact CPython 3.12.14 at `/usr/local/bin/python3.12` and
+   uv 0.12.5 at `/usr/local/bin/uv`; the workflow verifies those fixed
+   executables and never selects them through ambient `PATH`, downloads, or
+   bootstraps a toolchain. Dependencies come only
+   from `.gitea/ci-requirements.lock`, the canonical CPython 3.12 / x86_64 glibc
+   2.34 wheel closure, installed with hashes, wheel-only resolution, an empty
+   inherited environment, no uv config/project sources/cache, and
+   `UV_PYTHON_DOWNLOADS=never`. Syntax and tests likewise run through `env -i`
+   with Python isolated mode (`-I`) and user-site disabled. Pytest runs with a
+   reviewed, hashed `.gitea/pytest-ci.ini`, empty `PYTEST_ADDOPTS`, disabled
+   plugin autoload, and only the explicitly loaded locked `pytest-asyncio`
+   plugin, so ambient/candidate Python paths, plugins, or project options cannot
+   turn execution into a collect-only or deselected false green.
+   `tests/test_ci_workflow_security.py`
+   parses YAML with duplicate/alias/flow constructs rejected and mutation-tests
+   the complete fail-closed contract. Provisioning the dedicated runner is an
+   external workspace prerequisite; an offline runner means ordinary CI remains
+   queued, not rerouted. These candidate-side files are defense in depth, not
+   runner authority: the Gitea repository/organization runner policy must make
+   mirror and production-capable runners ineligible for pull-request jobs and
+   allow this workflow to match only the isolated label. Ordinary CI remains
+   blocked/queued until that trusted platform policy is proven. The portable
+   `.github/workflows/test.yml` `unit` job mirrors the test scope. Cover the
+   domain logic (projection fold/rebuild, typed events, aggregate invariants,
+   value objects, queries, normalization). Add new domain/CQRS logic here. Use
+   `monkeypatch`/`SimpleNamespace` stubs as in
    `tests/test_jobs_systemd_normalization.py`.
 
 2. **DB-backed integration tests** (`netbox_rpc/tests/`, `manage.py test
    netbox_rpc`) — a real NetBox + PostgreSQL test database. Cover `event_store`,
    the rebuild oracle, the append-only ledger, the command handlers, and the
-   command-only REST API. `.gitea/workflows/integration.yml` runs them against
-   the self-hosted NetBox; `.github/workflows/test.yml` `integration` job runs
-   them portably with a Postgres service against NetBox 4.5.8 and 4.6.5.
+   command-only REST API. The required canonical Gitea pull-request gate needs
+   an externally provisioned isolated untrusted runner, disposable digest-pinned
+   PostgreSQL/Redis, and an exact hash-locked NetBox 4.5.8/4.6.5 dependency
+   closure; it remains blocked until that trusted platform contract exists.
+   The GitHub `.github/workflows/test.yml` matrix is supplementary post-mirror
+   evidence, not canonical pre-merge evidence. The privileged
+   `.gitea/workflows/integration.yml` is an operator-requested,
+   canonical-`main`-only, manual non-gating diagnostic: it must never gain a
+   PR/push trigger or count as branch-protection evidence. Its candidate-visible
+   ref guard is defense in depth; trusted Gitea runner/ref eligibility remains
+   authoritative.
    Config: `tests/ci/netbox_configuration.py`.
 
    **The Gitea integration workflow must stay serialised on a repo-wide
@@ -1765,6 +1886,18 @@ from `approval_required=True` to `False` unless the user has
   reconciled by forward migration `0034_decouple_netbox_nms_fk_constraints`,
   which drops only stale PostgreSQL foreign-key constraints and preserves the
   populated integer columns and indexes.
+- A reverse data migration must not pass a historical model instance into a
+  deletion collector that can see current-plugin reverse relations. Migration
+  `0073` is deliberately irreversible because it has no durable row-ownership
+  ledger: its reverse raises before inspection or mutation, preventing an
+  operator replacement, rename, or reference from being deleted or left while
+  the migration is recorded unapplied. Use a reviewed forward repair migration
+  when catalog ownership cannot be proven durably.
+- To test the reverse callable of an older migration below an irreversible
+  migration, obtain that migration's historical project state and invoke its
+  actual `RunPython.reverse_code` directly inside an isolated database test.
+  Do not downgrade the complete graph through the later irreversible boundary;
+  that tests the boundary instead of the older reverse behavior.
 
 ## Event Sequence Integrity
 
