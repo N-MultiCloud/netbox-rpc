@@ -1294,6 +1294,30 @@ class RpcPluginSettings(NetBoxModel):
 
         return reverse("plugins:netbox_rpc:rpcpluginsettings", args=[self.pk])
 
+    def clean(self) -> None:
+        super().clean()
+        # The execution backend silently *skips* a chain entry whose capability
+        # does not match the request, so a mismatched default would degrade to
+        # "no policy" with no error anywhere. Reject it at the edit instead.
+        errors: dict[str, str] = {}
+        for field, capability in (
+            ("default_transport_driver_chain", _transport.CAPABILITY_LINUX_SHELL),
+            ("default_network_driver_chain", _transport.CAPABILITY_NETWORK_CLI),
+        ):
+            wrong = [
+                entry
+                for entry in (getattr(self, field, None) or [])
+                if _transport.driver_capability(entry) != capability
+            ]
+            if wrong:
+                errors[field] = (
+                    "These drivers do not serve the "
+                    f"{capability} capability and would be skipped: "
+                    + ", ".join(sorted(wrong))
+                )
+        if errors:
+            raise ValidationError(errors)
+
     def save(self, *args: object, **kwargs: object) -> None:
         self.singleton_key = "default"
         super().save(*args, **kwargs)

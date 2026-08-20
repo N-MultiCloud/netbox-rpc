@@ -386,6 +386,39 @@ def test_seeded_platform_map_entries_are_well_formed(policy) -> None:
             assert entry.get("become_method"), f"{slug} escalates without a method"
 
 
+def _seeded_handler_ids() -> set[str]:
+    """Every ``handler_id`` value seeded by any migration.
+
+    Resolved from the AST rather than by substring matching, for two reasons a
+    text search gets wrong: a bare quoted string also matches a procedure's
+    ``name`` (so a typo'd handler id would still "match"), and several
+    migrations assign the id to a module-level constant first, so the literal
+    ``"handler_id": "..."`` pair never appears in the source at all.
+    """
+
+    found: set[str] = set()
+    for path in sorted((ROOT / "netbox_rpc/migrations").glob("0*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            constants[target.id] = node.value.value
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if not (isinstance(key, ast.Constant) and key.value == "handler_id"):
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    found.add(value.value)
+                elif isinstance(value, ast.Name) and value.id in constants:
+                    found.add(constants[value.id])
+    return found
+
+
 def test_pinned_handler_ids_match_procedures_that_actually_exist() -> None:
     """The exclusion must name real seeded handlers.
 
@@ -396,11 +429,11 @@ def test_pinned_handler_ids_match_procedures_that_actually_exist() -> None:
     pinned = _migration_constant(POLICY_MIGRATION, "PINNED_HANDLER_IDS")
     assert pinned, "the exclusion set is empty"
 
-    migrations = (ROOT / "netbox_rpc/migrations").glob("0*.py")
-    seeded = "\n".join(path.read_text(encoding="utf-8") for path in migrations)
+    seeded = _seeded_handler_ids()
+    assert seeded, "no handler_id values were found in any migration"
     for handler_id in pinned:
-        assert f'"handler_id": "{handler_id}"' in seeded or f'"{handler_id}"' in seeded, (
-            f"{handler_id} is not seeded by any migration"
+        assert handler_id in seeded, (
+            f"{handler_id} is not seeded as a handler_id by any migration"
         )
 
 

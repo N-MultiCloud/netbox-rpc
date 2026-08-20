@@ -589,7 +589,11 @@ def _transport_policy() -> Any | None:
     try:
         from netbox_rpc.models import RpcPluginSettings
 
-        return RpcPluginSettings.get_solo()
+        # Deliberately NOT get_solo(): that is a get_or_create, i.e. a write.
+        # Normalization runs on the worker's dispatch path and must not create
+        # rows — a read-only lookup that finds nothing simply means "no
+        # estate-wide policy", which is exactly the pre-existing behaviour.
+        return RpcPluginSettings.objects.filter(singleton_key="default").first()
     except Exception:  # noqa: BLE001 - policy lookup must never break dispatch
         return None
 
