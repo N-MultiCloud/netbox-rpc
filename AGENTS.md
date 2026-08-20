@@ -633,6 +633,50 @@ pending approval or distinct-actor check.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Gitea Actions runner recovery** is seeded by migration `0073`, which adds all
+  20 `gitea-act-runner-*.service` units to `RPCLinuxServiceAllowlist` so the
+  generic Ubuntu-24 systemd procedures can control them. No new procedure or
+  backend handler — these are reference data the existing `restart_service`
+  normalizer and handler already consume.
+  - **Why.** An `act_runner` executes with `maxParallel=1` — one job at a time,
+    everything else queued behind it. If that job **hangs**, the process keeps
+    heartbeating, so Gitea still reports the runner `online` with correct
+    labels while no further job ever starts. Observed 2026-08-17 on
+    `gitea-act-runner-nmc-netbox-rpc-backend`: claimed task 18865 at 17:04:59Z,
+    logged nothing after 17:05:26Z, still holding its worker ~7 hours later with
+    ten runs queued — including a `deploy-production.yml` for an already-merged
+    `develop → main` promotion.
+  - **Uptime is not the signal.** A sibling runner started in the same second was
+    completing jobs normally. Diagnose from the journal: a runner holding a task
+    while logging nothing for hours is hung; one emitting step output is working.
+  - **Why it matters more than a crash.** A crashed runner is visibly down. A
+    wedged one looks healthy, so a promotion merges, reports success, and never
+    deploys: production keeps serving the previous build while the repository
+    says otherwise. Before `0073` there was no audited way to restart one — the
+    allowlist held only `netbox` and `netbox-rq` — and the estate rule is to
+    extend the tooling rather than SSH to the host.
+  - **Operational warning.** Restarting a runner **aborts any job it is
+    currently executing**. Check `status_service` and the repository's
+    queued/running runs before restarting one that may be mid-build.
+  - **Do not restart a runner from a job running on it.** These runners are
+    per-repository, so an Actions job that restarts its own runner kills its own
+    execution, and the restart can be reported as a failed job even when it
+    worked. Dispatch recovery with `nms rpc` against the runner **host**.
+  - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
+    `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
+    seeded set drifts from the runner **daemons** actually defined on disk.
+  - **The drift check compares daemons, not every unit matching the glob.** The
+    `gitea-act-runner-*` prefix is also used by maintenance units — currently
+    `gitea-act-runner-recycle.service`, a `Type=oneshot` job driven by
+    `gitea-act-runner-recycle.timer` that recycles idle-but-wedged runners. Those
+    are the recovery mechanism, not a recoverable target, so they are deliberately
+    **not** in the allowlist: `restart_service` on a one-shot is meaningless.
+    `_is_runner_daemon()` classifies a unit by its `ExecStart` launching
+    `gitea-runner … daemon` and not being `Type=oneshot`, and
+    `EXPECTED_NON_DAEMON_UNITS` pins the exemption set exactly — so a **new**
+    non-daemon unit fails the test and forces a deliberate decision rather than
+    silently widening it. Adding a maintenance unit under this prefix therefore
+    requires updating that set, not the seed migration.
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a
@@ -773,11 +817,17 @@ pending approval or distinct-actor check.
   backend return an arbitrarily large valid result. `procedure` is a `const`, so a
   backend cannot relabel which procedure ran.
 
-  **Reverse migration is PROTECT-safe.** `RPCExecution.procedure` is
-  `on_delete=PROTECT`, so `0072`'s reverse handles each procedure individually and
-  falls back to forcing `enabled=False` on a `ProtectedError` instead of
-  bulk-deleting — otherwise a downgrade would abort outright once either procedure
-  had run, and audited execution history must never be destroyed to allow one.
+  **Reverse migration is non-destructive.** `0072`'s reverse is a single
+  table-level `queryset.update(enabled=False)`; it never deletes. Two independent
+  reasons, both recorded in the migration's own docstring: `RPCExecution.procedure`
+  is `on_delete=PROTECT`, so deleting a procedure that has run raises
+  `ProtectedError` and aborts the downgrade — and audited execution history must
+  never be destroyed to allow one; and deleting through the historical model is
+  unsafe *even when the row is unreferenced*, because the deletion collector walks
+  related models and raises `ValueError` for a related app with no migrations
+  (this actually failed the NetBox 4.5.8 compatibility job). An `except
+  ProtectedError` guard catches only the first of those. See the historical-model
+  rule under **CI / Testing**.
 
   Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
   representative `["backend-orchestrated", …]` command row each — key-fingerprint
@@ -1139,9 +1189,13 @@ pending approval or distinct-actor check.
   schemas are enforced at admission, approval, worker claim, and pre-lease
   time. Canonical policy/schema hashes are protected by the immutable approval
   snapshot. Valid closed failure/indeterminate results remain on failed
-  executions; malformed nested results are rejected and not projected. Reverse
-  migration deletes an unreferenced seed, or preserves referenced history with
-  the procedure forced disabled when `RPCExecution.procedure` protects it.
+  executions; malformed nested results are rejected and not projected. The
+  reverse migration is non-destructive: it runs a table-level
+  `queryset.update(enabled=False)` and never deletes, so it neither destroys
+  audited history nor enters Django's deletion collector. It previously called
+  `procedure.delete()` behind an `except ProtectedError` guard, which handled the
+  PROTECT case but *not* the collector's `ValueError` (a `ValueError` is not a
+  `ProtectedError`) — see the historical-model rule under **CI / Testing**.
 - Production Gitea binary upgrade is seeded disabled by migration `0073` as
   `service.gitea.production.upgrade_1_27_1` (destructive, 1800s, approval
   required), targeting only `virtualization.virtualmachine` PK 170 (`Gitea`).
@@ -1671,6 +1725,27 @@ Two tiers (see `docs/architecture.md` → Testing):
    ref guard is defense in depth; trusted Gitea runner/ref eligibility remains
    authoritative.
    Config: `tests/ci/netbox_configuration.py`.
+
+   **The Gitea integration workflow must stay serialised on a repo-wide
+   concurrency group, and must not double-trigger.** Its compatibility matrix
+   provisions **fixed-name** databases (`test_netbox_compat_458` / `_465`) and
+   **fixed** Redis DB indexes on the runner host, so the contended resource is
+   the *host*, not the ref. Two mistakes to avoid, both of which were live
+   defects:
+   - Keying `concurrency.group` on `github.ref`. A branch push
+     (`refs/heads/<branch>`) and its pull request (`refs/pull/<n>/head`) are
+     different refs, so they landed in different groups, never cancelled each
+     other, and raced — `database "test_netbox_compat_458" is being accessed by
+     other users`, then `already exists`. Pull-ref runs passed **1 time in 8**
+     while `main` stayed green, because a `main` push has no paired PR ref.
+   - Leaving `on: push` unscoped, which triggered that second run in the first
+     place. `push` is restricted to `main`; `pull_request` already covers every
+     branch, on the ref a reviewer actually gates on.
+
+   `cancel-in-progress` is deliberately **false**: this is a gate, not a
+   preview, so a newer run waits its turn instead of killing a `main` gate that
+   is mid-flight. If the matrix is ever given run-scoped database names and
+   Redis indexes, the serialisation can be relaxed — not before.
 
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.

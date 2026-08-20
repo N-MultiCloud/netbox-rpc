@@ -221,7 +221,14 @@ def test_staging_rotation_migration_is_ordered_inline_and_command_is_safe(
     )
 
 
-def test_staging_rotation_reverse_deletes_unreferenced_seed(migration) -> None:
+def test_staging_rotation_reverse_disables_instead_of_deleting(migration) -> None:
+    """The reverse must never invoke Django's deletion collector.
+
+    ``RPCProcedure`` has inbound FKs, so ``Model.delete()`` walks related models
+    and can raise ``ValueError`` when a related app has no migrations — aborting
+    the downgrade. ``queryset.update()`` touches one table and cannot.
+    """
+
     procedures = _FakeProcedureManager()
     commands = _FakeCommandManager()
     procedures.commands = commands
@@ -229,29 +236,60 @@ def test_staging_rotation_reverse_deletes_unreferenced_seed(migration) -> None:
     _FakeRPCProcedureCommand.objects = commands
     apps = _fake_apps()
     migration.seed_staging_backend_token_rotation(apps, None)
+
+    migration.unseed_staging_backend_token_rotation(apps, None)
+
+    # The audited row survives, disabled — history is never destroyed.
+    assert procedures.rows[PROCEDURE_ID]["enabled"] is False
+    # A table-level UPDATE ran...
+    assert procedures.update_queryset_calls == 1
+    # ...and the deletion collector was never entered. Reverting the fix to
+    # ``procedure.delete()`` makes this assertion fail.
+    assert procedures.delete_calls == 0
+    # Nothing cascaded away.
+    assert commands.rows == {
+        (PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND,
+    }
+
+
+def test_staging_rotation_reverse_is_safe_when_the_seed_is_absent(migration) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    procedures.commands = commands
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+    apps = _fake_apps()
 
     migration.unseed_staging_backend_token_rotation(apps, None)
 
     assert procedures.rows == {}
-    assert commands.rows == {}
+    assert procedures.delete_calls == 0
 
 
-def test_staging_rotation_reverse_disables_protected_history(migration) -> None:
-    procedures = _FakeProcedureManager()
-    commands = _FakeCommandManager()
-    procedures.commands = commands
-    procedures.protected_error = migration.ProtectedError
-    _FakeRPCProcedure.objects = procedures
-    _FakeRPCProcedureCommand.objects = commands
-    apps = _fake_apps()
-    migration.seed_staging_backend_token_rotation(apps, None)
+def test_staging_rotation_reverse_source_uses_no_deletion_path(migration) -> None:
+    """Static guard: the reverse body must not reach for delete/ProtectedError.
 
-    migration.unseed_staging_backend_token_rotation(apps, None)
+    The fake-manager assertions above prove behaviour; this proves intent, and
+    catches a reintroduced ``except ProtectedError`` guard that would silently
+    re-open the ``ValueError`` hole it cannot catch.
+    """
 
-    assert procedures.rows[PROCEDURE_ID]["enabled"] is False
-    assert commands.rows == {
-        (PROCEDURE_ID, 1): migration._REPRESENTATIVE_COMMAND,
-    }
+    source = (
+        ROOT / "netbox_rpc/migrations/0068_seed_staging_backend_token_rotation.py"
+    ).read_text(encoding="utf-8")
+    body = source.split("def unseed_staging_backend_token_rotation", 1)[1].split(
+        "class Migration", 1
+    )[0]
+    code = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith(("#", ">"))
+    )
+    # Strip the explanatory docstring, which names both terms deliberately.
+    code = code.split('"""')[0] + code.split('"""')[-1]
+
+    assert ".delete(" not in code
+    assert "ProtectedError" not in code
+    assert ".update(" in code
+    assert "from django.db.models.deletion import ProtectedError" not in source
 
 
 def test_approver_identity_migration_follows_the_new_seed() -> None:
@@ -290,6 +328,15 @@ class _FakeProcedureQuerySet:
             return None
         return _FakeProcedureRow(self.manager, self.name)
 
+    def update(self, **fields: object) -> int:
+        """Table-level update: never walks relations, never touches commands."""
+
+        self.manager.update_queryset_calls += 1
+        if self.name not in self.manager.rows:
+            return 0
+        self.manager.rows[self.name].update(fields)
+        return 1
+
 
 class _FakeProcedureRow:
     def __init__(self, manager: _FakeProcedureManager, name: str) -> None:
@@ -298,6 +345,9 @@ class _FakeProcedureRow:
         self.enabled = bool(manager.rows[name]["enabled"])
 
     def delete(self) -> None:
+        # Records the deletion-collector path so a regression back to
+        # ``Model.delete()`` in the reverse is detectable, not silent.
+        self.manager.delete_calls += 1
         if self.manager.protected_error is not None:
             raise self.manager.protected_error("protected", [])
         self.manager.rows.pop(self.name, None)
@@ -315,6 +365,8 @@ class _FakeProcedureManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
         self.update_calls = 0
+        self.update_queryset_calls = 0
+        self.delete_calls = 0
         self.commands: _FakeCommandManager | None = None
         self.protected_error: type[Exception] | None = None
 
@@ -368,9 +420,7 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_db = types.ModuleType("django.db")
     django_db_models = types.ModuleType("django.db.models")
     django_db_models_deletion = types.ModuleType("django.db.models.deletion")
-    django_db_models_deletion.ProtectedError = type(
-        "ProtectedError", (Exception,), {}
-    )
+    django_db_models_deletion.ProtectedError = type("ProtectedError", (Exception,), {})
     django_migrations = types.ModuleType("django.db.migrations")
     django_migrations.Migration = type("Migration", (), {})
     django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
