@@ -1680,18 +1680,86 @@ normalizer, executions will fail at runtime with
 execution pipeline. **Never encode the driver inside `handler_id`** — it is its
 own model data:
 
-- `transport_driver` — the single default driver: `asyncssh` (default),
-  `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or `scrapli`, `netmiko`,
-  `napalm`, `nornir` (network CLI). AsyncSSH reproduces the legacy
-  single-/multi-command SSH behaviour.
+- `transport_driver` — the procedure's own driver: `ansible` (**default**),
+  `asyncssh`, `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or
+  `ansible-network`, `scrapli`, `netmiko`, `napalm`, `nornir` (network CLI).
+  AsyncSSH reproduces the legacy single-/multi-command SSH behaviour. The
+  vocabulary and the driver → backend-capability map live in
+  **`netbox_rpc/transport.py`**, not on the model, so the chain resolver shares
+  one source of truth with the model's choices and stays importable (and
+  testable) without Django. They mirror the capability each driver declares in
+  netbox-rpc-backend's `drivers/` registry — a **cross-repo contract**, since
+  the backend only falls back to a capability-matching driver.
 - `transport_driver_chain` — an ordered **priority + fallback chain** of the
   same driver names (index 0 tried first), configured on the `RPCProcedure`
-  page. `_apply_driver_pipeline_overrides()` injects it into
-  `normalized_params["transport_driver_chain"]` (and `command_fingerprint`)
-  **only when non-empty**, so legacy procedures keep a byte-for-byte identical
-  payload. The `netbox-rpc-backend` executor tries the drivers in order, skips
+  page. The `netbox-rpc-backend` executor tries the drivers in order, skips
   capability-mismatched entries, advances on an unavailable/connection error,
   and stops on a command-level result.
+- `transport_pinned` — excludes a procedure from the estate-wide policy below.
+- **Estate-wide Ansible-first policy (`RpcPluginSettings`).**
+  `default_transport_driver_chain` / `default_network_driver_chain` (seeded
+  `["ansible"]` / `["ansible-network"]` by migration `0075`) make Ansible the
+  default *way* to reach devices and VMs without rewriting a single procedure
+  row. `domain.normalization.resolve_driver_chain()` resolves the effective
+  chain at dispatch time, most specific first:
+
+  1. the procedure's own `transport_driver_chain` — operator intent, verbatim;
+  2. the settings default for the driver's capability, with the procedure's own
+     `transport_driver` **appended** as its fallback;
+  3. nothing — the backend uses the single `transport_driver`, then its own
+     built-in capability default.
+
+  Because it is a setting rather than a migration rewrite, **rollback is one
+  edit**: clearing the two chains restores raw-driver behaviour estate-wide with
+  no migration to undo and no per-procedure values lost.
+
+  **A chain of only Ansible drivers automatically gains the capability's raw
+  driver** (`asyncssh` / `scrapli`). Without that, making Ansible the default
+  would turn an optional dependency into a hard one — a host without
+  `ansible-core` would fail outright instead of degrading.
+
+  **`transport_pinned` procedures never reach step 2.** Two are pinned by
+  migration `0075`, and both must stay that way:
+
+  - `service.netbox.staging.rotate_backend_token` — dispatches with
+    `allow_fallback=False`, `capture_output=False`, `strict_auth=True`. The
+    backend defines its boundary as *successful AsyncSSH process creation*, and
+    `strict_auth` maps to AsyncSSH options (including trivial-auth rejection)
+    that OpenSSH has no equivalent of. The backend's Ansible driver **refuses**
+    `strict_auth` for exactly this reason, so an unpinned row would fail loudly
+    rather than weaken silently — but a refused driver is still a broken
+    procedure, and `allow_fallback=False` leaves no second chance.
+  - `os.linux.ubuntu.24.upgrade_26.run_upgrade` (live) —
+    `allow_fallback=params.dry_run`, so a live upgrade must never be
+    redispatched onto a second driver, and it streams the upgrade's terminal
+    output live, which the Ansible driver cannot provide incrementally.
+
+  The pin is a **declared property**, not a name list consulted at dispatch, so
+  a future procedure with the same requirement opts out by setting the flag.
+  Neither pinned procedure's normalized payload changes, so their approval
+  snapshots and policy hashes are unaffected.
+- **`normalized_params["_ansible"]` — NetBox Platform → Ansible connection.**
+  The execution backend has no view of what a target *is* (its SSH credential
+  carries no platform), so when the resolved chain contains an Ansible driver,
+  `_apply_ansible_context()` resolves the target device's NetBox Platform
+  through `RpcPluginSettings.ansible_platform_map` and injects
+  `{connection, network_os, become, become_method}`. The map follows the
+  official `netbox.netbox` collection's conventions and is operator-editable, so
+  the extractor drops unrecognised keys and **never raises** — an unmapped
+  platform, a malformed map, or a malformed entry all inject nothing, and the
+  backend then reports its network driver unavailable and falls back to a raw
+  driver rather than guessing a vendor CLI dialect.
+
+  Injection is **gated on the resolved chain containing an Ansible driver**, so
+  every non-Ansible procedure keeps a byte-for-byte identical
+  `normalized_params` payload — the same discipline the other pipeline overrides
+  follow.
+
+  Note: `_DEFAULT_TRANSPORT_DRIVER` in `domain/normalization.py` is still
+  `"asyncssh"` even though the *model* default is now `"ansible"`. It means "the
+  driver the backend assumes when the key is absent from the payload", which is
+  a property of netbox-rpc-backend, not of this model. Changing it to match the
+  model default would make every asyncssh procedure stop pinning its driver.
 - `output_parser` — `none` (default, raw), `auto` (native JSON/XML → jc →
   TextFSM → TTP → Genie → regex chain), or a pinned backend (`json`, `xml`,
   `jc`, `textfsm`, `ttp`, `genie`, `regex`).
