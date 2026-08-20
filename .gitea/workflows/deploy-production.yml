@@ -1,48 +1,162 @@
 name: Deploy to production
 
+# Production deploys for this plugin are **source-aware**. The host-side command
+# gateway deliberately refuses the generic plugin helper for netbox-rpc:
+#
+#   deploy-netbox-plugin: "Reject both accepted names for the production RPC
+#   plugin before locks or live-library sourcing so direct sudo cannot enter the
+#   generic plugin helper."
+#
+# so `deploy-plugin rpc <ref>` fails with
+# "rpc production accepts only fixed source-aware deploy actions". The two
+# accepted actions are:
+#
+#   deploy-netbox-rpc-package <version>   -> python-package-deploy netbox-rpc package <version>
+#   deploy-netbox-rpc-main    <40-hex-sha> -> python-package-deploy netbox-rpc git <sha>
+#
+# Note the main action takes an exact commit SHA, never a branch name.
+#
+# The prod-deploy runner runs on the target host as root and invokes the helper
+# directly; the SSH branch is only a fallback for a runner placed elsewhere.
+#
+# Configurable on the repository (Settings -> Actions -> Variables):
+#   - vars.DEPLOY_PACKAGE_BIN : local source-aware deploy helper
+#                               (default /opt/nmulticloud/deploy/bin/python-package-deploy)
+#   - vars.DEPLOY_STATUS_BIN  : local status helper
+#                               (default /opt/nmulticloud/deploy/bin/status-app)
+#   - vars.DEPLOY_SSH_HOST    : SSH alias used only when no local helper exists
+#                               (default nmc-prod-207)
+
 on:
   push:
     branches:
       - main
   workflow_dispatch:
     inputs:
-      ref:
-        description: 'Git ref to deploy (tag or branch, default: main)'
+      deploy_source:
+        description: "Immutable package by default; canonical main is an explicit override"
+        required: true
+        default: latest_package
+        type: choice
+        options:
+          - latest_package
+          - main_branch
+      package_version:
+        description: "Exact X.Y.Z[(a|b|rc)N][.postN][.devN] version (package mode only)"
         required: false
-        default: 'main'
+        default: ""
+        type: string
 
-# Deployment is environment-specific. Configure these on the repository
-# (Settings -> Actions -> Variables/Secrets) for your own infrastructure:
-#   - vars.DEPLOY_PLUGIN_BIN  : path to a local deploy script on the runner
-#                               (invoked as "<bin> rpc <ref>"), if any.
-#   - secrets.DEPLOY_SSH_HOST : SSH host/alias to run "deploy-plugin rpc <ref>"
-#                               on, used when no local deploy script is present.
-# If neither is set, the job exits with a clear configuration error.
+permissions:
+  contents: read
+
+concurrency:
+  group: netbox-rpc-production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy plugin
     runs-on: prod-deploy
+    timeout-minutes: 40
     env:
-      REF: ${{ inputs.ref || github.sha }}
-      DEPLOY_PLUGIN_BIN: ${{ vars.DEPLOY_PLUGIN_BIN }}
-      DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+      # A push to main has no inputs, and the commit that was just merged is by
+      # definition not yet published as a package — so it deploys the canonical
+      # main override. A manual dispatch honours the operator's choice, which
+      # defaults to the immutable package.
+      DEPLOY_SOURCE: ${{ inputs.deploy_source || 'main_branch' }}
+      PACKAGE_VERSION: ${{ inputs.package_version }}
+      WORKFLOW_SHA: ${{ github.sha }}
+      WORKFLOW_REF: ${{ github.ref }}
+      DEPLOY_BIN: ${{ vars.DEPLOY_PACKAGE_BIN || '/opt/nmulticloud/deploy/bin/python-package-deploy' }}
+      STATUS_BIN: ${{ vars.DEPLOY_STATUS_BIN || '/opt/nmulticloud/deploy/bin/status-app' }}
+      DEPLOY_SSH_HOST: ${{ vars.DEPLOY_SSH_HOST || 'nmc-prod-207' }}
     steps:
-      - name: Deploy plugin
+      - name: Validate source-aware deployment contract
         shell: bash
         run: |
-          # Validate ref format defensively (accepts tags, branches, and commit shas)
-          case "$REF" in
-            v[0-9]*.[0-9]*.[0-9]* | main | develop | [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*) ;;
-            *) echo "ERROR: Invalid ref format: $REF"; exit 1 ;;
+          set -euo pipefail
+
+          # Refuse anything but canonical main. Production must never be built
+          # from a side branch, and the gateway would reject the SHA anyway.
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" ]]; then
+            echo "ERROR: production deploys must run from canonical main (got $WORKFLOW_REF)" >&2
+            exit 1
+          fi
+
+          # The gateway accepts only an exact 40-hex commit for the main action.
+          if [[ ! "$WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "ERROR: expected an exact 40-hex commit sha, got '$WORKFLOW_SHA'" >&2
+            exit 1
+          fi
+
+          case "$DEPLOY_SOURCE" in
+            latest_package)
+              # Same canonical PEP 440 subset the host-side gateway enforces.
+              if [[ ${#PACKAGE_VERSION} -gt 64 ]] || \
+                 [[ ! "$PACKAGE_VERSION" =~ ^(0|[1-9][0-9]*)([.](0|[1-9][0-9]*)){2}((a|b|rc)(0|[1-9][0-9]*))?([.]post(0|[1-9][0-9]*))?([.]dev(0|[1-9][0-9]*))?$ ]]; then
+                echo "ERROR: latest_package requires an exact canonical version (got '$PACKAGE_VERSION')" >&2
+                exit 1
+              fi
+              ;;
+            main_branch)
+              if [[ -n "$PACKAGE_VERSION" ]]; then
+                echo "ERROR: package_version must be empty for main_branch" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "ERROR: deploy_source must be latest_package or main_branch (got '$DEPLOY_SOURCE')" >&2
+              exit 1
+              ;;
           esac
-          if [[ -n "$DEPLOY_PLUGIN_BIN" && -x "$DEPLOY_PLUGIN_BIN" ]]; then
-            "$DEPLOY_PLUGIN_BIN" rpc "$REF"
-          elif [[ -n "$DEPLOY_SSH_HOST" ]]; then
-            ssh -o StrictHostKeyChecking=accept-new \
+
+          echo "deploy_source=$DEPLOY_SOURCE sha=$WORKFLOW_SHA version=${PACKAGE_VERSION:-<none>}"
+
+      - name: Deploy verified package
+        if: ${{ (inputs.deploy_source || 'main_branch') == 'latest_package' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x "$DEPLOY_BIN" ]]; then
+            "$DEPLOY_BIN" netbox-rpc package "$PACKAGE_VERSION"
+          else
+            ssh -o BatchMode=yes \
+                -o StrictHostKeyChecking=yes \
                 -o ServerAliveInterval=30 \
                 -o ServerAliveCountMax=20 \
-                "$DEPLOY_SSH_HOST" -- deploy-plugin rpc "$REF"
+                "$DEPLOY_SSH_HOST" -- deploy-netbox-rpc-package "$PACKAGE_VERSION"
+          fi
+
+      - name: Deploy canonical main override
+        if: ${{ (inputs.deploy_source || 'main_branch') == 'main_branch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x "$DEPLOY_BIN" ]]; then
+            "$DEPLOY_BIN" netbox-rpc git "$WORKFLOW_SHA"
           else
-            echo "ERROR: configure vars.DEPLOY_PLUGIN_BIN or secrets.DEPLOY_SSH_HOST to deploy." >&2
-            exit 1
+            ssh -o BatchMode=yes \
+                -o StrictHostKeyChecking=yes \
+                -o ServerAliveInterval=30 \
+                -o ServerAliveCountMax=20 \
+                "$DEPLOY_SSH_HOST" -- deploy-netbox-rpc-main "$WORKFLOW_SHA"
+          fi
+
+      - name: Report deploy target status
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The deploy target is the plugin, but the *service* whose status
+          # matters is NetBox itself — and the host-side validator accepts only
+          # its known app names, of which "netbox-rpc" is not one.
+          if [[ -x "$STATUS_BIN" ]]; then
+            "$STATUS_BIN" netbox
+          else
+            ssh -o BatchMode=yes \
+                -o StrictHostKeyChecking=yes \
+                -o ServerAliveInterval=30 \
+                -o ServerAliveCountMax=20 \
+                "$DEPLOY_SSH_HOST" -- status netbox
           fi
