@@ -53,8 +53,15 @@ def test_procedure_exposes_driver_and_parser_selection_fields() -> None:
     assert "transport_driver = models.CharField" in models
     assert "output_parser = models.CharField" in models
     assert "output_schema = models.JSONField" in models
-    for driver in ("asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
-        assert f'"{driver}"' in models
+    # The driver vocabulary lives in netbox_rpc/transport.py so the chain
+    # resolver can share it without importing Django. The model must source its
+    # choices from there rather than re-declaring them, or the two can drift and
+    # a chain entry the UI offers becomes one the resolver cannot classify.
+    transport = read("netbox_rpc/transport.py")
+    assert "from . import transport as _transport" in models
+    assert "TRANSPORT_DRIVER_CHOICES = _transport.TRANSPORT_DRIVER_CHOICES" in models
+    for driver in ("ansible", "asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
+        assert f'"{driver}"' in transport
     for parser in (
         "none",
         "auto",

@@ -13,6 +13,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from netbox.models import NetBoxModel
 
+from . import transport as _transport
 from .command_contract import (
     COMMAND_RUNTIME_KEYS,
     extract_placeholders,
@@ -176,30 +177,31 @@ class RPCProcedure(NetBoxModel):
         (EFFECT_DESTRUCTIVE, "Destructive"),
     )
 
-    # Transport driver selected for the execution pipeline on nms-backend. This is
-    # explicit data on the procedure (never encoded inside handler_id). "asyncssh"
-    # is the historical default and reproduces the legacy single-/multi-command SSH
-    # behaviour; the other drivers opt into the pluggable driver layer.
-    # Linux/server SSH drivers (backend capability "linux-shell").
-    TRANSPORT_ASYNCSSH = "asyncssh"
-    TRANSPORT_PARAMIKO = "paramiko"
-    TRANSPORT_SUBPROCESS = "subprocess"
-    TRANSPORT_FABRIC = "fabric"
-    # Network CLI / orchestration drivers (backend capability "network-cli").
-    TRANSPORT_SCRAPLI = "scrapli"
-    TRANSPORT_NETMIKO = "netmiko"
-    TRANSPORT_NAPALM = "napalm"
-    TRANSPORT_NORNIR = "nornir"
-    TRANSPORT_DRIVER_CHOICES = (
-        (TRANSPORT_ASYNCSSH, "AsyncSSH (default)"),
-        (TRANSPORT_PARAMIKO, "Paramiko"),
-        (TRANSPORT_SUBPROCESS, "subprocess (OpenSSH)"),
-        (TRANSPORT_FABRIC, "Fabric"),
-        (TRANSPORT_SCRAPLI, "Scrapli"),
-        (TRANSPORT_NETMIKO, "Netmiko"),
-        (TRANSPORT_NAPALM, "NAPALM"),
-        (TRANSPORT_NORNIR, "Nornir"),
-    )
+    # Transport driver selected for the execution pipeline on netbox-rpc-backend.
+    # This is explicit data on the procedure (never encoded inside handler_id).
+    #
+    # Ansible is the default: it routes the same audited command through an
+    # Ansible control node, which brings vendor-aware connection handling and the
+    # module ecosystem. The raw drivers remain first-class and are the fallback
+    # tier — "asyncssh" reproduces the historical single-/multi-command SSH
+    # behaviour exactly.
+    #
+    # The vocabulary and the driver -> backend-capability map live in
+    # ``transport`` so the chain resolver in ``domain.normalization`` shares one
+    # source of truth with these choices and stays importable without Django.
+    TRANSPORT_ANSIBLE = _transport.TRANSPORT_ANSIBLE
+    TRANSPORT_ANSIBLE_NETWORK = _transport.TRANSPORT_ANSIBLE_NETWORK
+    TRANSPORT_ASYNCSSH = _transport.TRANSPORT_ASYNCSSH
+    TRANSPORT_PARAMIKO = _transport.TRANSPORT_PARAMIKO
+    TRANSPORT_SUBPROCESS = _transport.TRANSPORT_SUBPROCESS
+    TRANSPORT_FABRIC = _transport.TRANSPORT_FABRIC
+    TRANSPORT_SCRAPLI = _transport.TRANSPORT_SCRAPLI
+    TRANSPORT_NETMIKO = _transport.TRANSPORT_NETMIKO
+    TRANSPORT_NAPALM = _transport.TRANSPORT_NAPALM
+    TRANSPORT_NORNIR = _transport.TRANSPORT_NORNIR
+    TRANSPORT_DRIVER_CHOICES = _transport.TRANSPORT_DRIVER_CHOICES
+    LINUX_SHELL_DRIVERS = _transport.LINUX_SHELL_DRIVERS
+    NETWORK_CLI_DRIVERS = _transport.NETWORK_CLI_DRIVERS
 
     # Output parser the nms-backend pipeline applies to raw command output when the
     # driver did not already return structured data. "none" leaves output untouched
@@ -245,10 +247,24 @@ class RPCProcedure(NetBoxModel):
     transport_driver = models.CharField(
         max_length=20,
         choices=TRANSPORT_DRIVER_CHOICES,
-        default=TRANSPORT_ASYNCSSH,
+        default=TRANSPORT_ANSIBLE,
         help_text=(
-            "Transport driver the nms-backend execution pipeline uses for this "
-            "procedure. AsyncSSH preserves the legacy behaviour."
+            "Transport driver the netbox-rpc-backend execution pipeline uses for "
+            "this procedure. Ansible is the default; AsyncSSH preserves the "
+            "legacy raw-SSH behaviour."
+        ),
+    )
+    transport_pinned = models.BooleanField(
+        default=False,
+        verbose_name="Transport driver pinned",
+        help_text=(
+            "This procedure's transport driver is fixed and must not be changed "
+            "by estate-wide defaults or by driver migrations. Set it for "
+            "procedures whose backend handler depends on one specific driver — "
+            "for example one that disables fallback and relies on AsyncSSH's "
+            "credential isolation, or that streams a long-running command's "
+            "output live. Leaving the driver chain empty is not enough on its "
+            "own: the plugin-wide default chain would still apply."
         ),
     )
     transport_driver_chain = ArrayField(
@@ -1213,6 +1229,56 @@ class RpcPluginSettings(NetBoxModel):
             "single configured RPCBackend) is used instead."
         ),
     )
+    # ── Estate-wide transport policy ─────────────────────────────────────────
+    #
+    # This is what makes "Ansible is the default" an operator-visible, reversible
+    # decision rather than a constant compiled into the plugin: clearing these
+    # restores raw-driver behaviour estate-wide with no migration and no
+    # redeploy. A procedure's own chain always wins, and a procedure marked
+    # transport_pinned is never touched by either.
+    default_transport_driver_chain = ArrayField(
+        base_field=models.CharField(
+            max_length=32, choices=RPCProcedure.TRANSPORT_DRIVER_CHOICES
+        ),
+        default=list,
+        blank=True,
+        verbose_name="Default Linux driver chain",
+        help_text=(
+            "Ordered driver priority + fallback chain applied to procedures that "
+            "define no chain of their own and whose driver serves the Linux "
+            "shell capability. Leave empty to keep each procedure's single "
+            "driver. Recommended: ansible, asyncssh."
+        ),
+    )
+    default_network_driver_chain = ArrayField(
+        base_field=models.CharField(
+            max_length=32, choices=RPCProcedure.TRANSPORT_DRIVER_CHOICES
+        ),
+        default=list,
+        blank=True,
+        verbose_name="Default network CLI driver chain",
+        help_text=(
+            "Ordered driver priority + fallback chain applied to procedures that "
+            "define no chain of their own and whose driver serves the network "
+            "CLI capability. Recommended: ansible-network, scrapli."
+        ),
+    )
+    ansible_platform_map = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Ansible platform map",
+        help_text=(
+            "Maps a NetBox Platform slug to the Ansible connection settings for "
+            "devices on that platform, following the netbox.netbox collection's "
+            'conventions: {"junos": {"network_os": '
+            '"junipernetworks.junos.junos", "connection": '
+            '"ansible.netcommon.netconf"}}. Recognised keys per entry: '
+            "network_os, connection, become, become_method. A platform that is "
+            "not mapped simply gets no network OS, and the execution backend "
+            "then falls back to a raw driver instead of guessing a vendor CLI "
+            "dialect."
+        ),
+    )
     comments = models.TextField(blank=True)
 
     class Meta:
@@ -1249,3 +1315,24 @@ class RpcPluginSettings(NetBoxModel):
         if self.backend_id is not None and self.backend is not None:
             return backends._adapt_backend(self.backend)
         return backends.resolve_backend(None)
+
+    # ── Transport policy accessors ───────────────────────────────────────────
+
+    def default_chain_for(self, capability: str) -> list[str]:
+        """Estate-wide default chain for a capability, or ``[]`` when unset."""
+
+        raw = (
+            self.default_network_driver_chain
+            if capability == _transport.CAPABILITY_NETWORK_CLI
+            else self.default_transport_driver_chain
+        )
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(entry).strip() for entry in raw if str(entry).strip()]
+
+    def ansible_context_for_platform(self, platform_slug: str) -> dict:
+        """Ansible connection settings for a NetBox Platform slug, or ``{}``."""
+
+        return _transport.ansible_context_from_platform_map(
+            self.ansible_platform_map, platform_slug
+        )

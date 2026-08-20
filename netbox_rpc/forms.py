@@ -81,6 +81,7 @@ class RPCProcedureForm(NetBoxModelForm):
             "result_schema",
             "transport_driver",
             "transport_driver_chain",
+            "transport_pinned",
             "output_parser",
             "output_schema",
             "description",
@@ -369,4 +370,12 @@ class RpcPluginSettingsForm(NetBoxModelForm):
 
     class Meta:
         model = RpcPluginSettings
-        fields = ("enabled", "backend", "comments", "tags")
+        fields = (
+            "enabled",
+            "backend",
+            "default_transport_driver_chain",
+            "default_network_driver_chain",
+            "ansible_platform_map",
+            "comments",
+            "tags",
+        )
