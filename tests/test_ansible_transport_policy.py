@@ -442,3 +442,139 @@ def test_policy_migration_reverse_never_deletes() -> None:
     source = POLICY_MIGRATION.read_text(encoding="utf-8")
     assert ".delete()" not in source
     assert "def revert_policy" in source
+
+
+# -- single-read policy + hostile targets (review round 1) ----------------
+
+
+def test_the_settings_singleton_is_read_once_per_execution(policy) -> None:
+    """The chain and the platform map must come from ONE snapshot.
+
+    Two reads could pair a chain resolved before an operator's edit with a
+    platform map read after it, producing a payload that never existed as a
+    coherent policy.
+    """
+
+    reads: list[int] = []
+    fake = FakePolicy(
+        policy.transport,
+        linux=["ansible"],
+        platform_map={"linux": {"connection": "ansible.builtin.ssh"}},
+    )
+
+    def counting_policy():
+        reads.append(1)
+        return fake
+
+    policy.normalization._transport_policy = counting_policy
+
+    execution = types.SimpleNamespace(
+        procedure=procedure(),
+        assigned_object=types.SimpleNamespace(platform=types.SimpleNamespace(slug="linux")),
+    )
+    normalized: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(execution, normalized)
+
+    assert reads == [1], f"settings read {len(reads)} times"
+    assert normalized["transport_driver_chain"] == ["ansible", "asyncssh"]
+    assert normalized["_ansible"] == {"connection": "ansible.builtin.ssh"}
+    assert normalized["command_fingerprint"]["ansible_context"] == normalized["_ansible"]
+
+
+def test_non_ansible_chains_leave_the_payload_untouched(policy) -> None:
+    """The regression that matters most: every existing procedure keeps a
+    byte-for-byte identical normalized payload."""
+
+    policy.normalization._transport_policy = lambda: FakePolicy(
+        policy.transport, platform_map={"linux": {"connection": "ansible.builtin.ssh"}}
+    )
+    execution = types.SimpleNamespace(
+        procedure=procedure(),
+        assigned_object=types.SimpleNamespace(platform=types.SimpleNamespace(slug="linux")),
+    )
+    normalized: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(execution, normalized)
+
+    # Nothing is added at all: an asyncssh procedure with no resolved chain
+    # matches what the backend already assumes, so the payload is untouched.
+    assert normalized == {"command_fingerprint": {}}
+
+    # Mutation guard: a non-default driver still pins itself, so this test
+    # cannot be satisfied by an implementation that injects nothing ever.
+    other: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(
+        types.SimpleNamespace(procedure=procedure(transport_driver="paramiko")), other
+    )
+    assert other["transport_driver"] == "paramiko"
+
+
+def test_pinned_procedures_get_no_chain_and_no_ansible_context(policy) -> None:
+    """End-to-end form of the exclusion, at the payload level."""
+
+    policy.normalization._transport_policy = lambda: FakePolicy(
+        policy.transport,
+        linux=["ansible"],
+        platform_map={"linux": {"connection": "ansible.builtin.ssh"}},
+    )
+    execution = types.SimpleNamespace(
+        procedure=procedure(transport_pinned=True),
+        assigned_object=types.SimpleNamespace(platform=types.SimpleNamespace(slug="linux")),
+    )
+    normalized: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(execution, normalized)
+
+    assert "transport_driver_chain" not in normalized
+    assert "_ansible" not in normalized
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        None,
+        types.SimpleNamespace(),
+        types.SimpleNamespace(platform=None),
+        types.SimpleNamespace(platform=types.SimpleNamespace()),
+        types.SimpleNamespace(platform=types.SimpleNamespace(slug=None)),
+        types.SimpleNamespace(platform=types.SimpleNamespace(slug="")),
+        types.SimpleNamespace(platform=types.SimpleNamespace(slug="unmapped-platform")),
+    ],
+)
+def test_a_target_without_a_mapped_platform_injects_nothing(policy, target) -> None:
+    """Not every RPC target is a network device, and not every platform is mapped.
+
+    Both are normal, so both must inject nothing rather than raise — the backend
+    then falls back to a raw driver instead of guessing a CLI dialect.
+    """
+
+    policy.normalization._transport_policy = lambda: FakePolicy(
+        policy.transport,
+        linux=["ansible"],
+        platform_map={"junos": {"network_os": "junipernetworks.junos.junos"}},
+    )
+    execution = types.SimpleNamespace(procedure=procedure(), assigned_object=target)
+    normalized: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(execution, normalized)
+
+    assert "_ansible" not in normalized
+    # The chain still resolves — only the platform context is absent.
+    assert normalized["transport_driver_chain"] == ["ansible", "asyncssh"]
+
+
+def test_a_target_whose_content_type_is_gone_does_not_break_dispatch(policy) -> None:
+    """A generic FK to a removed content type raises rather than returning None."""
+
+    class Exploding:
+        @property
+        def assigned_object(self):
+            raise LookupError("content type 999 does not exist")
+
+        procedure = procedure()
+
+    policy.normalization._transport_policy = lambda: FakePolicy(
+        policy.transport, linux=["ansible"], platform_map={"linux": {"become": True}}
+    )
+    normalized: dict[str, Any] = {"command_fingerprint": {}}
+    policy.normalization._apply_driver_pipeline_overrides(Exploding(), normalized)
+
+    assert "_ansible" not in normalized
+    assert normalized["transport_driver_chain"] == ["ansible", "asyncssh"]

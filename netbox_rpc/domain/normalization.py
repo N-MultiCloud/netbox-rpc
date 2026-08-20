@@ -570,6 +570,8 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 # of netbox-rpc-backend, not of this model. Changing it to match the model
 # default would make every asyncssh procedure stop pinning its driver.
 
+_UNSET = object()
+
 from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
 from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
 from ..transport import driver_capability as _driver_capability
@@ -592,8 +594,14 @@ def _transport_policy() -> Any | None:
         return None
 
 
-def resolve_driver_chain(procedure: Any) -> list[str]:
-    """The effective driver priority + fallback chain for a procedure."""
+def resolve_driver_chain(procedure: Any, policy: Any = _UNSET) -> list[str]:
+    """The effective driver priority + fallback chain for a procedure.
+
+    ``policy`` is threaded in by the caller so one execution reads the settings
+    singleton exactly once. Reading it again for the platform map could pair a
+    chain from one snapshot with a platform map from another if an operator
+    edits the policy mid-dispatch.
+    """
 
     raw_chain = getattr(procedure, "transport_driver_chain", None) or []
     explicit = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
@@ -611,7 +619,8 @@ def resolve_driver_chain(procedure: Any) -> list[str]:
     if not capability:
         return []
 
-    policy = _transport_policy()
+    if policy is _UNSET:
+        policy = _transport_policy()
     if policy is None:
         return []
     default_chain = policy.default_chain_for(capability)
@@ -632,7 +641,10 @@ def resolve_driver_chain(procedure: Any) -> list[str]:
 
 
 def _apply_ansible_context(
-    execution: RPCExecution, normalized: dict[str, Any], chain: list[str]
+    execution: RPCExecution,
+    normalized: dict[str, Any],
+    chain: list[str],
+    policy: Any,
 ) -> None:
     """Inject the target's Ansible connection settings into the payload.
 
@@ -651,8 +663,6 @@ def _apply_ansible_context(
 
     if not any(entry in _ANSIBLE_DRIVERS for entry in chain):
         return
-
-    policy = _transport_policy()
     if policy is None:
         return
 
@@ -674,7 +684,11 @@ def _target_platform_slug(execution: RPCExecution) -> str:
     condition — not every RPC target is a network device.
     """
 
-    target = getattr(execution, "assigned_object", None)
+    try:
+        target = getattr(execution, "assigned_object", None)
+    except Exception:  # noqa: BLE001 - a stale/removed content type must not
+        # break dispatch; a missing platform simply means "no Ansible context".
+        return ""
     if target is None:
         return ""
     platform = getattr(target, "platform", None)
@@ -699,12 +713,13 @@ def _apply_driver_pipeline_overrides(
     # Ordered driver priority + fallback chain. The backend reads it from
     # normalized_params, tries the drivers in order, and falls through on
     # unavailable/connection errors.
-    chain = resolve_driver_chain(procedure)
+    policy = _transport_policy()
+    chain = resolve_driver_chain(procedure, policy)
     if chain:
         normalized["transport_driver_chain"] = chain
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver_chain"] = chain
-        _apply_ansible_context(execution, normalized, chain)
+        _apply_ansible_context(execution, normalized, chain, policy)
 
     parser = str(getattr(procedure, "output_parser", "") or "").strip()
     if parser and parser != _DEFAULT_OUTPUT_PARSER:
