@@ -108,6 +108,18 @@ def apply_policy(apps, schema_editor):
         transport_pinned=True
     )
 
+    # NOTE: this deliberately *creates* the singleton when absent, unlike
+    # migration 0050, which returns early on a fresh install. 0050 was deciding
+    # whether to flip the `enabled` opt-in gate — a policy question it must not
+    # answer for a new operator. This is only recording transport preferences,
+    # which are inert until the integration is enabled, and the row has to exist
+    # for a fresh install to inherit the Ansible-first default at all: the
+    # runtime accessor would otherwise create it later with empty chains and the
+    # feature would silently not apply to new installs.
+    #
+    # `enabled` keeps its model default (False), so seeding the policy never
+    # opts anyone in. `test_seeding_the_policy_does_not_opt_the_integration_in`
+    # pins that.
     settings_row, _created = RpcPluginSettings.objects.get_or_create(
         singleton_key="default"
     )

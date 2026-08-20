@@ -108,3 +108,26 @@ class RpcPluginSettingsValidationTests(TestCase):
         self.settings_row.default_transport_driver_chain = []
         self.settings_row.default_network_driver_chain = []
         self.settings_row.full_clean()
+
+
+class PolicySeedDoesNotChangeOptInTests(TestCase):
+    """Seeding transport preferences must not enable the integration.
+
+    Migration 0075 creates the settings singleton when absent — unlike 0050,
+    which deliberately leaves a fresh install alone because it was deciding the
+    `enabled` opt-in gate. Recording transport preferences is a different kind of
+    decision, but it shares a row with that gate, so the boundary needs a guard.
+    """
+
+    def test_seeding_the_policy_does_not_opt_the_integration_in(self):
+        settings_row = RpcPluginSettings.objects.get(singleton_key="default")
+
+        assert settings_row.enabled is False
+        assert settings_row.backend_id is None
+        # ...while the transport policy it *was* allowed to set is present.
+        assert settings_row.default_transport_driver_chain == ["ansible"]
+
+    def test_exactly_one_settings_row_exists(self):
+        """The singleton must stay a singleton after the seed."""
+
+        assert RpcPluginSettings.objects.count() == 1
