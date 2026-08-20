@@ -2,8 +2,157 @@
 
 `netbox-rpc` is the Remote Command Policy bounded context. It owns procedure
 policy, execution audit state, normalization, and backend dispatch selection. It
-does not own SSH drivers or device protocol implementations; those remain in
-backend services such as `nms-backend`.
+does not own transport drivers or device protocol implementations; those live in
+the paired executor, [`netbox-rpc-backend`](https://git.nmulti.cloud/N-MultiCloud/netbox-rpc-backend).
+
+## System Architecture
+
+The estate splits cleanly in two: **NetBox is the source of truth and the audit
+boundary; the backend is the execution engine.** Ansible is the default way to
+reach a target, but it is one driver tier among several rather than a hard
+dependency.
+
+```mermaid
+flowchart TB
+    subgraph NB["NetBox &mdash; netbox-rpc plugin (policy, catalog, audit)"]
+        CAT["RPCProcedure / RPCProcedureCommand<br/>RPCIntent &middot; RPCLinuxServiceAllowlist"]
+        SET["RpcPluginSettings (singleton)<br/>default chains &middot; ansible_platform_map"]
+        AGG["RPCExecution (aggregate)<br/>RPCApprovalRequest"]
+        LED[("RPCExecutionEvent<br/>append-only ledger")]
+        JOB["RQ worker<br/>normalize + dispatch"]
+        CAT --> JOB
+        SET --> JOB
+        AGG --> JOB
+        AGG --- LED
+    end
+
+    subgraph BE["netbox-rpc-backend (execution)"]
+        API["POST /rpc/executions/{id}/run"]
+        RES["run_with_fallback()<br/>capability-matched chain walk"]
+        subgraph ANS["Ansible control node (optional extra)"]
+            AD["ansible<br/>linux_shell"]
+            AN["ansible-network<br/>network_cli"]
+        end
+        subgraph RAW["Raw driver tier"]
+            RL["asyncssh &middot; paramiko<br/>subprocess &middot; fabric"]
+            RN["scrapli &middot; netmiko<br/>napalm &middot; nornir"]
+        end
+        API --> RES
+        RES --> AD & AN & RL & RN
+    end
+
+    TGT["Managed targets<br/>Linux hosts / VMs &middot; network devices"]
+
+    JOB -- "1. POST id only" --> API
+    API -- "2. pull execution + normalized_params" --> AGG
+    AD & AN -- "ansible-playbook subprocess" --> TGT
+    RL & RN -- "SSH / vendor CLI" --> TGT
+    API -- "3. result envelope (HTTP response)" --> JOB
+    JOB -- "4. validate vs result_schema, append event" --> LED
+```
+
+**Dispatch is ID-only and pull-based.** The RQ worker POSTs
+`/rpc/executions/{id}/run` carrying no payload (or a signed dispatch lease); the
+backend then reads the execution — including `normalized_params` — back from the
+NetBox API. Nothing about *what to run* travels in the request body.
+
+### Execution lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as API / UI client
+    participant H as command_handlers
+    participant W as RQ worker
+    participant B as netbox-rpc-backend
+    participant D as Driver chain
+    participant T as Target
+
+    C->>H: create RPCExecution
+    Note over H: admission gates — integration enabled<br/>· code gate · procedure enabled · approval<br/>· params_schema · capability handshake
+    H->>W: enqueue (job_timeout from procedure)
+    W->>W: normalize_execution_params()
+    Note over W: resolve driver chain · inject _ansible<br/>context · fingerprint — all gated on<br/>non-default values
+    W->>B: POST /rpc/executions/{id}/run
+    B->>W: GET execution (pull normalized_params)
+    B->>D: run_with_fallback(capability, credentials, command)
+    D->>T: execute
+    T-->>D: stdout / stderr / exit status
+    D-->>B: DriverResult
+    B-->>W: result envelope
+    W->>W: validate raw result vs result_schema
+    W->>W: append ExecutionSucceeded / ExecutionFailed
+```
+
+Status never changes by direct mutation: it folds from the append-only stream
+through `projection.apply()`. See [CQRS](#cqrs) and [Projection Fold](#projection-fold).
+
+### Driver chain resolution and fallback
+
+Ansible is the **default**, not a requirement. Two mechanisms keep it from
+becoming a hard dependency: netbox-rpc appends a raw driver to any all-Ansible
+chain, and the backend skips drivers it cannot use.
+
+```mermaid
+flowchart TD
+    A["resolve_driver_chain(procedure, policy)"] --> B{"explicit<br/>transport_driver_chain?"}
+    B -- yes --> C["use it verbatim"]
+    B -- no --> D{"transport_pinned?"}
+    D -- yes --> E["[] &mdash; backend uses its own default"]
+    D -- no --> F["settings default chain for capability<br/>+ procedure's own driver"]
+    F --> G{"chain is<br/>all-Ansible?"}
+    G -- yes --> H["append RAW_CAPABILITY_DEFAULT<br/>(asyncssh / scrapli)"]
+    G -- no --> I["chain as-is"]
+    C & E & H & I --> J["run_with_fallback() walks the chain"]
+    J --> K{"allow_fallback<br/>= False?"}
+    K -- yes --> L["truncate to first entry"]
+    K -- no --> M["full chain"]
+    L & M --> N{"per driver"}
+    N -- "not registered / wrong capability" --> O["skip &rarr; next"]
+    N -- "host-key fingerprint pinned<br/>and driver is not asyncssh" --> O
+    N -- "unavailable or connection error" --> O
+    N -- "outcome unknown" --> P["re-raise immediately &mdash;<br/>never retry a possibly-executed command"]
+    N -- "ran" --> Q["DriverResult &mdash; stop"]
+```
+
+The **outcome-unknown** branch is the safety-critical one. If a driver loses the
+connection after the remote process may already have started, advancing the
+chain could execute a destructive command twice, so
+`DriverCommandOutcomeUnknownError` propagates instead of falling back.
+
+### Who decides what Ansible needs to know
+
+The backend has no view of what a target *is* — an SSH credential carries no
+platform. NetBox does, so **netbox-rpc resolves the Ansible connection settings**
+and passes them down: the target's Platform slug maps through
+`RpcPluginSettings.ansible_platform_map` to the `netbox.netbox`-conventional
+`ansible_network_os` / `ansible_connection` pair, injected as
+`normalized_params["_ansible"]` and recorded in the command fingerprint.
+
+An unmapped platform injects nothing. The backend then reports its network
+driver unavailable and falls back to a raw driver, which is far better than
+guessing a vendor CLI dialect.
+
+Injection is **gated on non-default values** throughout — driver, chain, parser,
+schema, and `_ansible` are written only when they differ from the default — so
+every legacy procedure keeps a byte-for-byte identical `normalized_params`
+payload and an unchanged fingerprint.
+
+### Boundary rules
+
+- netbox-rpc never opens a connection to a target. It selects policy; the
+  backend transports.
+- The render context and captured output are substituted into commands by the
+  executor, so the backend must shell-quote every rendered token and re-validate
+  captured values. netbox-rpc must never store or accept arbitrary shell text.
+- Ansible is invoked as a **subprocess** (`ansible-playbook`), never imported as
+  a library — its Python API is explicitly unstable and the licence boundary
+  matters.
+
+For per-procedure authoring choices — which driver and parser to pick, parser
+availability in production, and deploy ordering — see
+[`transport-and-parsing-selection.md`](transport-and-parsing-selection.md). This
+document covers the structure; that one covers the decisions.
 
 ## Domain Model
 
