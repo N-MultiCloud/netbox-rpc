@@ -69,6 +69,7 @@ from ..constants import (
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
     OOKLA_PROCEDURE_NAMES,
+    OPENBAO_1_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
     PASSBOLT_CLEANUP,
     PASSBOLT_EXPORT_SECRETS,
@@ -456,6 +457,38 @@ _AKVORADO_AUTHORIZATION_RE = re.compile(
 )
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
+)
+
+# The paired backend currently has an identity-checked OpenBao SSH credential
+# resolver only for dcim.device. Do not advertise or normalize VM targets until
+# the backend has an equivalent identity-checked VM resolver.
+_OPENBAO_TARGET_MODEL_LABELS = frozenset({"dcim.device"})
+_OPENBAO_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_OPENBAO_MOUNT_PATH_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+    r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?$"
+)
+_OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+_OPENBAO_INTERNAL_PARAM_KEYS = frozenset(
+    {"_intent", "_intent_name", "_timeout_seconds_snapshot"}
+)
+_OPENBAO_AUTH_TYPES = frozenset(
+    {"approle", "cert", "jwt", "kubernetes", "ldap", "oidc", "userpass"}
+)
+_OPENBAO_ENGINE_TYPES = frozenset(
+    {"database", "kv", "pki", "ssh", "transit", "totp"}
+)
+_OPENBAO_AUDIT_TYPES = frozenset({"file", "syslog"})
+_OPENBAO_SERVICE_ACTIONS = frozenset(
+    {"start", "stop", "restart", "reload", "enable", "disable"}
 )
 # Samba/AD user and group identifiers (issue #160). The first character must
 # be a safe alphanumeric/underscore so a value can never be read as a
@@ -985,6 +1018,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES:
         return _normalize_influxdb3_debian13_execution(execution, target)
 
+    if procedure_name in OPENBAO_1_PROCEDURE_NAMES:
+        return _normalize_openbao_1_execution(execution, target)
+
     if procedure_name in AKVORADO_1_PROCEDURE_NAMES:
         return _normalize_akvorado_1_execution(execution)
 
@@ -1401,6 +1437,223 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
         f"Procedure {procedure_name!r} has no NetBox normalizer.",
         code="RPC_PROCEDURE_NOT_NORMALIZABLE",
     )
+
+
+def _normalize_openbao_1_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the closed OpenBao catalog against its audited target.
+
+    OpenBao resolves its SSH service and credential from the execution's NetBox
+    object identity downstream.  Only schema-declared operation fields are
+    forwarded here: no caller ``rpc_ssh_*`` key can enter ``normalized_params``
+    or its command fingerprint.  This family-specific boundary mirrors the
+    Proxmox systemctl normalizer; estate-wide SSH-override enforcement is tracked
+    separately.
+    """
+
+    params = execution.params or {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "OpenBao params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    procedure_name = execution.procedure.name
+    handler_id = execution.procedure.handler_id
+    operation = procedure_name.removeprefix("service.openbao.1.")
+    allowed_by_operation = {
+        "inspect": frozenset(),
+        "seal_status": frozenset(),
+        "health": frozenset(),
+        "policies_list": frozenset(),
+        "auth_list": frozenset(),
+        "secrets_list": frozenset(),
+        "audit_list": frozenset(),
+        "raft_list_peers": frozenset(),
+        "raft_autopilot_state": frozenset(),
+        "snapshots_list": frozenset(),
+        "auth_enable": frozenset({"auth_type", "mount_path"}),
+        "secrets_enable": frozenset(
+            {"engine_type", "mount_path", "kv_version"}
+        ),
+        "audit_enable": frozenset({"audit_type", "mount_path"}),
+        "snapshot_create": frozenset({"snapshot_name"}),
+        "service_action": frozenset({"action"}),
+        "seal": frozenset(),
+        "step_down": frozenset(),
+        "raft_remove_peer": frozenset({"peer_id"}),
+        "policy_delete": frozenset({"policy_name"}),
+        "auth_disable": frozenset({"mount_path"}),
+        "secrets_disable": frozenset({"mount_path"}),
+        "audit_disable": frozenset({"mount_path"}),
+    }
+    allowed = allowed_by_operation.get(operation)
+    if allowed is None:
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+
+    supplied_overrides = sorted(
+        set(params) & _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS
+    )
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for OpenBao; the "
+            "execution backend resolves SSH from the assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(set(params) - allowed - _OPENBAO_INTERNAL_PARAM_KEYS)
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        target_model not in _OPENBAO_TARGET_MODEL_LABELS
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "OpenBao procedures require an existing assigned dcim.device.",
+            code="RPC_TARGET_INVALID",
+        )
+    if (
+        not isinstance(target, str)
+        or not target
+        or len(target) > 255
+        or any(ord(character) < 32 or ord(character) == 127 for character in target)
+    ):
+        raise RPCExecutionError(
+            "The assigned OpenBao target has an invalid display name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_object = {"content_type": target_model, "object_id": object_id}
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": handler_id,
+            # The backend's OpenBao metadata model uses the registration-id
+            # namespace for this optional field, not the dotted catalog name.
+            "procedure": handler_id,
+            "target": target,
+            "target_object": target_object,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+    def required_string(key: str, pattern: re.Pattern[str]) -> str:
+        value = params.get(key)
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            raise RPCExecutionError(
+                f"{key} has an invalid or unsupported value.",
+                code="RPC_PARAM_INVALID",
+            )
+        return value
+
+    def optional_mount_path() -> str | None:
+        if "mount_path" not in params or params.get("mount_path") is None:
+            return None
+        return required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
+
+    if operation == "policy_delete":
+        policy_name = required_string("policy_name", _OPENBAO_NAME_RE)
+        normalized["policy_name"] = policy_name
+        normalized["command_fingerprint"]["policy_name"] = policy_name
+
+    if operation == "auth_enable":
+        auth_type = params.get("auth_type")
+        if not isinstance(auth_type, str) or auth_type not in _OPENBAO_AUTH_TYPES:
+            raise RPCExecutionError(
+                "auth_type is not a supported OpenBao authentication method.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["auth_type"] = auth_type
+        normalized["command_fingerprint"]["auth_type"] = auth_type
+
+    if operation == "secrets_enable":
+        engine_type = params.get("engine_type")
+        if (
+            not isinstance(engine_type, str)
+            or engine_type not in _OPENBAO_ENGINE_TYPES
+        ):
+            raise RPCExecutionError(
+                "engine_type is not a supported OpenBao secrets engine.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["engine_type"] = engine_type
+        normalized["command_fingerprint"]["engine_type"] = engine_type
+        if "kv_version" in params and params.get("kv_version") is not None:
+            kv_version = params.get("kv_version")
+            if (
+                isinstance(kv_version, bool)
+                or not isinstance(kv_version, int)
+                or kv_version not in {1, 2}
+                or engine_type != "kv"
+            ):
+                raise RPCExecutionError(
+                    "kv_version must be 1 or 2 and is supported only for kv.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["kv_version"] = kv_version
+            normalized["command_fingerprint"]["kv_version"] = kv_version
+
+    if operation == "audit_enable":
+        audit_type = params.get("audit_type")
+        if not isinstance(audit_type, str) or audit_type not in _OPENBAO_AUDIT_TYPES:
+            raise RPCExecutionError(
+                "audit_type must be file or syslog.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["audit_type"] = audit_type
+        normalized["command_fingerprint"]["audit_type"] = audit_type
+
+    if operation in {
+        "auth_enable",
+        "secrets_enable",
+        "audit_enable",
+    }:
+        mount_path = optional_mount_path()
+        if mount_path is not None:
+            normalized["mount_path"] = mount_path
+            normalized["command_fingerprint"]["mount_path"] = mount_path
+
+    if operation in {"auth_disable", "secrets_disable", "audit_disable"}:
+        mount_path = required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip(
+            "/"
+        )
+        normalized["mount_path"] = mount_path
+        normalized["command_fingerprint"]["mount_path"] = mount_path
+
+    if operation == "snapshot_create" and params.get("snapshot_name") is not None:
+        snapshot_name = required_string("snapshot_name", _OPENBAO_NAME_RE)
+        normalized["snapshot_name"] = snapshot_name
+        normalized["command_fingerprint"]["snapshot_name"] = snapshot_name
+
+    if operation == "service_action":
+        action = params.get("action")
+        if not isinstance(action, str) or action not in _OPENBAO_SERVICE_ACTIONS:
+            raise RPCExecutionError(
+                "action is not a supported OpenBao service action.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["action"] = action
+        normalized["command_fingerprint"]["action"] = action
+
+    if operation == "raft_remove_peer":
+        peer_id = required_string("peer_id", _OPENBAO_NAME_RE)
+        normalized["peer_id"] = peer_id
+        normalized["command_fingerprint"]["peer_id"] = peer_id
+
+    return normalized
 
 
 def _normalize_influxdb_1_execution(

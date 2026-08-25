@@ -63,16 +63,14 @@ fan-out in one outer transaction would risk RQ jobs left dangling against rows
 a later sibling's failure rolled back). Cancel an unwanted stray child
 individually via the existing `cancel` command.
 
-**Origin marker.** After a child is created — deliberately *after*
-`params_schema` validation has already run against the caller's `params`
-unmodified, since many seeded procedures set
-`"additionalProperties": false` and would reject an unexpected key — the
-underscore-prefixed `_intent` / `_intent_name` keys are patched into the
-child's stored `params`. This is a plain-field update, not part of the
-event-sourced projection (only `normalized_params` is), so it does not touch
-the aggregate or its event stream. The [Procedure Runs
-tab](../AGENTS.md#procedure-runs-tab-query-side) then attributes the run as
-`Intent: <name>` instead of `Direct`.
+**Origin relation.** `create_execution()` writes the child execution's
+read-only `source_intent` foreign key in the same insert as its caller params.
+Attribution never enters or mutates `params`, so schemas with
+`"additionalProperties": false` remain valid and family-specific final-payload
+guards cannot be bypassed by a later update. The [Procedure Runs
+tab](../AGENTS.md#procedure-runs-tab-query-side) resolves that relation and
+attributes the run as `Intent: <name>` instead of `Direct`. Legacy `_intent` /
+`_intent_name` params markers remain readable for historical rows only.
 
 ## Seeded intents
 

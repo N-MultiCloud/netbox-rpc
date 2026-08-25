@@ -325,9 +325,8 @@ class RPCIntentRunSerializer(serializers.Serializer):
 
     Not a ``ModelSerializer`` — this is a command input shape, not a stored
     row. ``params`` (optional) is applied to every fanned-out child exactly as
-    supplied; the intent executor stamps the ``_intent``/``_intent_name``
-    origin marker onto each child's stored params *after* creation (see
-    ``command_handlers.execute_intent``), never into this input.
+    supplied. Intent origin is stored separately on each child's read-only
+    ``source_intent`` relation, never mixed into this input or persisted params.
     """
 
     assigned_object_type = ContentTypeField(queryset=ContentType.objects.all())
@@ -391,6 +390,7 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "display",
             "procedure",
             "procedure_id",
+            "source_intent",
             "assigned_object_type",
             "assigned_object_id",
             "assigned_object",
@@ -421,6 +421,7 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "last_updated",
         )
         read_only_fields = (
+            "source_intent",
             "requested_by",
             "requested_by_id",
             "approved_by",

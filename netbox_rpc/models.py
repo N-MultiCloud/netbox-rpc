@@ -723,6 +723,15 @@ class RPCExecution(NetBoxModel):
         on_delete=models.PROTECT,
         related_name="executions",
     )
+    source_intent = models.ForeignKey(
+        "RPCIntent",
+        on_delete=models.SET_NULL,
+        related_name="source_executions",
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Intent that created this execution; null for direct runs.",
+    )
     assigned_object_type = models.ForeignKey(
         ContentType,
         on_delete=models.PROTECT,
@@ -782,6 +791,33 @@ class RPCExecution(NetBoxModel):
     def __str__(self) -> str:
         return f"{self.procedure.name} #{self.pk}"
 
+    def save(self, *args, **kwargs) -> None:
+        """Enforce OpenBao secret ingress on every final ORM payload write.
+
+        The application command validates before it reaches the ORM so API
+        callers receive a DRF validation error. This model boundary covers
+        script/job code that constructs an execution directly and any future
+        save path that changes ``params``. QuerySet updates intentionally do
+        not run model methods; production code therefore never updates
+        execution params after creation.
+        """
+
+        update_fields = kwargs.get("update_fields")
+        if self._state.adding or update_fields is None or "params" in update_fields:
+            from .openbao_validation import (
+                OpenBaoSecretIngressError,
+                validate_openbao_params_for_persistence,
+            )
+
+            try:
+                validate_openbao_params_for_persistence(
+                    self.procedure.name,
+                    self.params,
+                )
+            except OpenBaoSecretIngressError as exc:
+                raise ValidationError({"params": str(exc)}) from exc
+        super().save(*args, **kwargs)
+
     def get_absolute_url(self) -> str:
         from django.urls import reverse
 
@@ -808,11 +844,9 @@ class RPCExecution(NetBoxModel):
             return f"{self.target_model_label}:{self.assigned_object_id}"
         return str(getattr(target, "name", None) or target)
 
-    # Underscore-prefixed internal keys the intent executor
-    # (``command_handlers.execute_intent()``, issue #130) stamps into ``params``
-    # to record that a run originated from an ``RPCIntent`` rather than a
-    # direct API/UI request. Prefixed to avoid colliding with a procedure's own
-    # declared parameters.
+    # Legacy origin keys remain readable for executions created before
+    # ``source_intent`` moved attribution out of params. New executions never
+    # write either key.
     _INTENT_PARAM_KEYS = ("_intent_name", "_intent")
 
     # Underscore-prefixed internal key command_handlers.create_execution()
@@ -831,12 +865,12 @@ class RPCExecution(NetBoxModel):
         """Best-effort intent name when this run was dispatched via an intent.
 
         A run created directly (API/UI ``RPCExecution`` POST) has no marker and
-        this returns ``None``. A run created by the intent executor (see
-        ``AGENTS.md`` → Intents and ``docs/intents.md``) has its origin
-        recorded in ``params`` under one of ``_INTENT_PARAM_KEYS`` after
-        creation, so this surfaces the intent name and the procedure Runs tab
-        can attribute the run to it.
+        this returns ``None``. New intent runs use the structured
+        ``source_intent`` relation; the legacy params markers are a read-only
+        compatibility fallback for rows created before that relation existed.
         """
+        if self.source_intent_id is not None:
+            return str(self.source_intent.name)
         params = self.params or {}
         for key in self._INTENT_PARAM_KEYS:
             value = params.get(key)

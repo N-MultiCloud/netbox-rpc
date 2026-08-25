@@ -305,6 +305,44 @@ EXEMPT_HANDLER_RATIONALE = {
         "single fixed argv row."
     ),
 }
+
+# Every OpenBao command is mediated by backend-owned credential resolution,
+# bounded output scrubbing, and (for bao subcommands) a fixed remote helper that
+# reads the host-side token without placing it in argv.  The representative
+# command rows advertise that orchestration without pretending the public row
+# is the executable command contract.
+EXEMPT_HANDLER_RATIONALE.update(
+    {
+        f"service.openbao_1.{operation}": (
+            "Uses backend-owned target credential resolution and bounded OpenBao "
+            "orchestration that cannot be represented safely as one public argv row."
+        )
+        for operation in (
+            "inspect",
+            "seal_status",
+            "health",
+            "policies_list",
+            "auth_list",
+            "secrets_list",
+            "audit_list",
+            "raft_list_peers",
+            "raft_autopilot_state",
+            "snapshots_list",
+            "auth_enable",
+            "secrets_enable",
+            "audit_enable",
+            "snapshot_create",
+            "service_action",
+            "seal",
+            "step_down",
+            "raft_remove_peer",
+            "policy_delete",
+            "auth_disable",
+            "secrets_disable",
+            "audit_disable",
+        )
+    }
+)
 EXEMPT_HANDLER_IDS = frozenset(EXEMPT_HANDLER_RATIONALE)
 
 

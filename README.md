@@ -250,8 +250,8 @@ The procedure object page has a **Runs** tab
 (`/plugins/rpc/procedures/<pk>/runs/`) listing every `RPCExecution` for that
 procedure, newest first, with a badge of the run count. Each row shows the run's
 user owner (`requested_by`), how it was issued (**Source** — `Direct`, or
-`Intent: <name>` when the intent executor stamped an `_intent_name`/`_intent`
-marker into `params`, see **Intents** below), status, target, backend, and
+`Intent: <name>` through the read-only `source_intent` relation; intent names are
+never copied into `params`, see **Intents** below), status, target, backend, and
 timing, and links to the execution detail. The execution detail additionally renders a **Command Output**
 card built from `result.steps[]` — the exact command(s) issued on the target and
 each command's stdout/stderr/exit code — so a run's issued commands and their
@@ -1079,6 +1079,104 @@ parser selection without accepting executable text:
 
 Their normalizers emit only validated semantic params and credential references;
 nms-backend handlers build the runtime actions server-side.
+
+## OpenBao Procedure Catalogue (`service.openbao.1.*`)
+
+Twenty-two OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
+procedures + command rows), targeting **`dcim.device` only**. The paired
+backend's strict OpenBao credential lookup currently rejects VM identities;
+`virtualization.virtualmachine` must not be advertised until the backend has an
+equivalent identity-checked VM credential resolver. Their handlers live in `netbox-rpc-backend`
+(`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
+dotted-catalogue-name / underscored-handler-id convention.
+
+The seeded subset is ten reads (`inspect`, `seal_status`, `health`,
+`policies_list`, `auth_list`, `secrets_list`, `audit_list`, `raft_list_peers`,
+`raft_autopilot_state`, `snapshots_list`), five writes (`auth_enable`,
+`secrets_enable`, `audit_enable`, `snapshot_create`, `service_action`), and
+seven destructive procedures (`seal`, `step_down`, `raft_remove_peer`,
+`policy_delete`, `auth_disable`, `secrets_disable`, `audit_disable`).
+
+Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
+(`openbao` → `openbao.service`), which makes the **existing** generic
+`os.linux.ubuntu.24.*_service` and `journal_tail` procedures work against an
+OpenBao host with no new procedure, normalizer, or handler — the same mechanism
+as the `netbox` / `netbox-rq` rows in `0058`. The OpenBao-specific
+`service_action` mixes restart with the generic catalogue's approval-gated
+start/stop/reload/enable/disable actions, so the whole procedure is
+`approval_required=True`; an execute-only caller cannot use it to stop or
+disable `openbao.service`.
+
+Both seed migrations fail forward on a pre-existing canonical procedure name or
+allowlist slug instead of adopting operator-owned state. Both are explicitly
+irreversible: after use, `RPCExecution.procedure` protects catalogue history,
+and neither migration has a durable ownership ledger that could safely restore
+or delete an operator-edited row. Removal or repair requires a reviewed forward
+migration.
+
+### Eight procedures are deliberately NOT seeded
+
+`config_deploy`, `rekey`, `config_read`, `policy_read`, `initialize`, `unseal`,
+and `snapshot_restore` each carry an unresolved defect in the execution backend:
+ownership loss on activation,
+commit-before-durable-capture, a digest that verifies a low-entropy credential
+offline, a truncated share retained below its pattern's length floor, a writable
+parent allowing the initialisation output to be replaced, and missing
+accept-once dispatch respectively. `policy_write` is the eighth withheld
+procedure. It was the only seeded procedure accepting free-form text, where
+shape detection cannot guarantee that encoded, split, or homoglyph-obscured
+secrets will never be persisted without also rejecting legitimate content.
+Withholding it means no seeded procedure accepts free-form text, making the
+no-secret-persistence guarantee structural rather than signature-dependent.
+The replacement free-form content design and the other backend defects are
+tracked in `netbox-rpc-backend` **#80**.
+
+**Withholding the row is the control.** `RPCExecution` has a foreign key to
+`RPCProcedure`, and the backend executes only what this plugin dispatches, so a
+handler with no row cannot be invoked through the sanctioned path.
+`tests/test_openbao_catalog.py` asserts all eight stay absent, so a later
+migration cannot reintroduce one before #80 closes.
+
+State the limit honestly: this is an operational hold, not a code-level lock. An
+operator holding `add_rpcprocedure` could hand-create a row pointing at one of
+them. That is an explicit, audited act rather than ambient exposure — but it is
+not impossible.
+
+### This plugin is the primary control for connection overrides
+
+OpenBao `params_schema` rows declare **no** `rpc_ssh_*` property and set
+`"additionalProperties": false`, and the normalizer emits none. **This
+deliberately differs from the InfluxDB precedent**, which merges shared
+`_SSH_PROPERTIES` into every schema — do not "restore consistency" by copying
+that here.
+
+The reason is ordering: caller-supplied host-key entries were the vector for two
+separate key-material bypasses in the backend, and the backend refuses them now
+— but this plugin persists `RPCExecution.params` **before** the backend ever
+validates them. So the backend's refusal is layer two; declining to declare the
+fields here is the layer that actually prevents persistence. Estate-wide
+enforcement for every other procedure family is tracked in **#253**.
+
+`openbao_validation.validate_openbao_params_for_persistence()` is the primary
+secret-ingress control. `create_execution()` runs it after schema validation and
+all platform-owned parameter stamps, immediately before `serializer.save()`, for
+every `service.openbao.1.*` procedure. `RPCExecution.save()` repeats it over the
+final ORM payload for direct script/job creation and params-save paths. All nested
+dictionary keys and values are
+classified by field name and by secret shape (OpenBao token prefixes, long
+base64, long hex, private keys, authorization material, and credential-bearing
+URLs). Accepted JSON documents are parsed and their decoded keys/values are
+walked; HCL-style quoted strings are lexically decoded before assignment
+classification, and escaped assignment identifiers are refused. This closes
+escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
+enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
+procedures. Top-level schema-declared identifiers (`policy_name`, `mount_path`,
+`peer_id`, `snapshot_name`) distinguish low-entropy operational names from
+high-entropy base64/base64url material, so realistic names up to 128 characters
+remain usable while provider tokens, high-entropy base64, and long hex are still
+refused. Every scanned string is capped at 1 MiB of **UTF-8 bytes** before the
+more expensive classifiers run. The seeded schemas impose much narrower typed
+and enum-constrained limits; none accepts free-form text.
 
 ## Procedure Naming
 

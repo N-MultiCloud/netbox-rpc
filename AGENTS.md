@@ -151,18 +151,18 @@ three read-only `RPCExecution` presentation properties:
 - `source_label` / `intent_reference` — how the run was issued. A run created
   directly (API/UI `RPCExecution` POST) reads as `Direct`. A run created by the
   intent executor (`command_handlers.execute_intent()`, see **Intents** above)
-  reads as `Intent: <name>`, because `execute_intent()` stamps the
-  underscore-prefixed `_intent_name`/`_intent` marker into that child's stored
-  `params` after creation. Do **not** reuse a bare `intent` params key for a
-  procedure's own parameter — only the underscore-prefixed internal keys are
-  treated as origin markers.
+  reads as `Intent: <name>` through the execution's read-only `source_intent`
+  foreign key. Intent attribution is persisted in the original execution insert
+  and never mixed into caller `params`. The underscore-prefixed `_intent_name` /
+  `_intent` keys remain a read-only compatibility fallback for historical rows;
+  new execution paths must not write them.
 - `result_steps` — returns `result.steps[]` (empty when absent/malformed). The
   execution detail template renders it as a **Command Output** card (command,
   operation, exit code, stdout, stderr). Keep this output bounded/redacted per the
   event-data rule above; never surface secrets or unbounded raw output.
 
-Any future intent executor that records an origin marker in `params` must keep it
-under the `_intent`-prefixed keys so this attribution stays correct.
+Any future intent executor must use `source_intent`; post-creation `params`
+mutation is forbidden because it can bypass family-specific persistence guards.
 
 ## DDD / CQRS / Event Sourcing
 
@@ -371,9 +371,10 @@ done; the procedures (with their commands) declare *how*. See
   never bypass approval on a destructive procedure. `sequential` and `parallel`
   both fan out synchronously in sequence order today (v1); the mode distinction
   for true concurrent/chained dispatch is a documented future enhancement, not
-  required by this safety contract. A successful child is stamped with the
-  underscore-prefixed `_intent`/`_intent_name` origin marker in `params` *after*
-  creation (so it never collides with `params_schema` validation) — see
+  required by this safety contract. A successful child stores the intent in the
+  read-only `RPCExecution.source_intent` foreign key in the same insert as the
+  rest of the execution; attribution never enters or mutates `params`, so closed
+  `params_schema` validation remains intact — see
   "Procedure Runs Tab" below and `docs/intents.md` → "Running an intent" for
   the full request/response contract. Seeded by additive migration `0039_rpcintent` (depends on the
   `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
@@ -753,9 +754,9 @@ pending approval or distinct-actor check.
   the same string the operator read. A dot **inside** a segment
   (`/etc/influxdb3/tls/server.crt`) stays legal. `tls_cert`/`tls_key` are
   both-or-neither absolute paths on *both* procedures. Unknown parameters are
-  rejected here as well as by
-  `additionalProperties: false`, tolerating only the platform-stamped
-  `_intent`/`_intent_name`/`_timeout_seconds_snapshot` keys. Most importantly the
+  rejected here as well as by `additionalProperties: false`, tolerating the
+  platform-stamped `_timeout_seconds_snapshot` key plus legacy `_intent` /
+  `_intent_name` markers on historical executions. Most importantly the
   normalizer reproduces the installer's own security gate: **a remote
   `http_bind` with no TLS is refused** (`RPC_PARAM_INVALID`) unless the caller
   explicitly sets `allow_plaintext_remote=true`; an omitted `http_bind` is
@@ -1782,6 +1783,105 @@ through `nms-cli`** (`nms rpc` for host operations, `nms virt`/`nms cloud` for
 Proxmox/Proxbox data and lifecycle) — never ad-hoc `ssh`/`pvesh`/`qm` or direct
 NetBox/Proxmox API calls. This mirrors the estate-wide policy in
 `/root/personal-context/CLAUDE.md`.
+
+## OpenBao Procedure Catalogue (`service.openbao.1.*`)
+
+Twenty-two OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
+procedures + command rows), targeting **`dcim.device` only**. The paired
+backend's strict OpenBao credential lookup currently rejects VM identities;
+`virtualization.virtualmachine` must not be advertised until the backend has an
+equivalent identity-checked VM credential resolver. Their handlers live in `netbox-rpc-backend`
+(`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
+dotted-catalogue-name / underscored-handler-id convention.
+
+The seeded subset is ten reads (`inspect`, `seal_status`, `health`,
+`policies_list`, `auth_list`, `secrets_list`, `audit_list`, `raft_list_peers`,
+`raft_autopilot_state`, `snapshots_list`), five writes (`auth_enable`,
+`secrets_enable`, `audit_enable`, `snapshot_create`, `service_action`), and
+seven destructive procedures (`seal`, `step_down`, `raft_remove_peer`,
+`policy_delete`, `auth_disable`, `secrets_disable`, `audit_disable`).
+
+Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
+(`openbao` → `openbao.service`), which makes the **existing** generic
+`os.linux.ubuntu.24.*_service` and `journal_tail` procedures work against an
+OpenBao host with no new procedure, normalizer, or handler — the same mechanism
+as the `netbox` / `netbox-rq` rows in `0058`. The OpenBao-specific
+`service_action` mixes restart with the generic catalogue's approval-gated
+start/stop/reload/enable/disable actions, so the whole procedure is
+`approval_required=True`; an execute-only caller cannot use it to stop or
+disable `openbao.service`.
+
+Both seed migrations fail forward on a pre-existing canonical procedure name or
+allowlist slug instead of adopting operator-owned state. Both are explicitly
+irreversible: after use, `RPCExecution.procedure` protects catalogue history,
+and neither migration has a durable ownership ledger that could safely restore
+or delete an operator-edited row. Removal or repair requires a reviewed forward
+migration.
+
+### Eight procedures are deliberately NOT seeded
+
+`config_deploy`, `rekey`, `config_read`, `policy_read`, `initialize`, `unseal`,
+and `snapshot_restore` each carry an unresolved defect in the execution backend:
+ownership loss on activation,
+commit-before-durable-capture, a digest that verifies a low-entropy credential
+offline, a truncated share retained below its pattern's length floor, a writable
+parent allowing the initialisation output to be replaced, and missing
+accept-once dispatch respectively. `policy_write` is the eighth withheld
+procedure. It was the only seeded procedure accepting free-form text, where
+shape detection cannot guarantee that encoded, split, or homoglyph-obscured
+secrets will never be persisted without also rejecting legitimate content.
+Withholding it means no seeded procedure accepts free-form text, making the
+no-secret-persistence guarantee structural rather than signature-dependent.
+The replacement free-form content design and the other backend defects are
+tracked in `netbox-rpc-backend` **#80**.
+
+**Withholding the row is the control.** `RPCExecution` has a foreign key to
+`RPCProcedure`, and the backend executes only what this plugin dispatches, so a
+handler with no row cannot be invoked through the sanctioned path.
+`tests/test_openbao_catalog.py` asserts all eight stay absent, so a later
+migration cannot reintroduce one before #80 closes.
+
+State the limit honestly: this is an operational hold, not a code-level lock. An
+operator holding `add_rpcprocedure` could hand-create a row pointing at one of
+them. That is an explicit, audited act rather than ambient exposure — but it is
+not impossible.
+
+### This plugin is the primary control for connection overrides
+
+OpenBao `params_schema` rows declare **no** `rpc_ssh_*` property and set
+`"additionalProperties": false`, and the normalizer emits none. **This
+deliberately differs from the InfluxDB precedent**, which merges shared
+`_SSH_PROPERTIES` into every schema — do not "restore consistency" by copying
+that here.
+
+The reason is ordering: caller-supplied host-key entries were the vector for two
+separate key-material bypasses in the backend, and the backend refuses them now
+— but this plugin persists `RPCExecution.params` **before** the backend ever
+validates them. So the backend's refusal is layer two; declining to declare the
+fields here is the layer that actually prevents persistence. Estate-wide
+enforcement for every other procedure family is tracked in **#253**.
+
+`openbao_validation.validate_openbao_params_for_persistence()` is the primary
+secret-ingress control. `create_execution()` runs it after schema validation and
+all platform-owned parameter stamps, immediately before `serializer.save()`, for
+every `service.openbao.1.*` procedure. `RPCExecution.save()` repeats it over the
+final ORM payload for direct script/job creation and params-save paths. All nested
+dictionary keys and values are
+classified by field name and by secret shape (OpenBao token prefixes, long
+base64, long hex, private keys, authorization material, and credential-bearing
+URLs). Accepted JSON documents are parsed and their decoded keys/values are
+walked; HCL-style quoted strings are lexically decoded before assignment
+classification, and escaped assignment identifiers are refused. This closes
+escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
+enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
+procedures. For top-level schema-declared identifier fields (`policy_name`,
+`mount_path`, `peer_id`, `snapshot_name`), length plus the base64 alphabet is not
+sufficient evidence: low-entropy operational identifiers up to the advertised
+128-character limit are accepted, while provider tokens, high-entropy
+base64/base64url, and long hex remain refused. Every scanned string is capped
+at 1 MiB of **UTF-8 bytes** before the more expensive classifiers run. The
+seeded schemas impose much narrower typed and enum-constrained limits; none
+accepts free-form text.
 
 ## Adding New Procedures
 

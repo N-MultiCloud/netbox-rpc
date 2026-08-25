@@ -305,6 +305,36 @@ AKVORADO_1_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# OpenBao 1 host-management catalog.  The backend registration uses an
+# underscored family (service.openbao_1.*); these are the dotted NetBox
+# procedure names used for normalization and authorization.
+OPENBAO_1_PROCEDURE_NAMES = frozenset(
+    {
+        "service.openbao.1.inspect",
+        "service.openbao.1.seal_status",
+        "service.openbao.1.health",
+        "service.openbao.1.policies_list",
+        "service.openbao.1.auth_list",
+        "service.openbao.1.secrets_list",
+        "service.openbao.1.audit_list",
+        "service.openbao.1.raft_list_peers",
+        "service.openbao.1.raft_autopilot_state",
+        "service.openbao.1.snapshots_list",
+        "service.openbao.1.auth_enable",
+        "service.openbao.1.secrets_enable",
+        "service.openbao.1.audit_enable",
+        "service.openbao.1.snapshot_create",
+        "service.openbao.1.service_action",
+        "service.openbao.1.seal",
+        "service.openbao.1.step_down",
+        "service.openbao.1.raft_remove_peer",
+        "service.openbao.1.policy_delete",
+        "service.openbao.1.auth_disable",
+        "service.openbao.1.secrets_disable",
+        "service.openbao.1.audit_disable",
+    }
+)
+
 # Declarative fileserver.samba intents (issue #160) — reference-data grouping
 # names only; no live import elsewhere (seed migration inlines the strings).
 FILESERVER_SAMBA_COLLECT_STATE = "fileserver.samba.collect_state"
