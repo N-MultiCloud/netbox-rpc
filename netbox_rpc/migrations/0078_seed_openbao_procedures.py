@@ -1,8 +1,11 @@
 """Seed the callable OpenBao 1 procedure catalog and representative commands.
 
-Seven backend handlers remain deliberately absent until netbox-rpc-backend #80
-closes their durability, disclosure, filesystem-race, and replay gaps.  The 23
-rows below are the complete callable subset reviewed for issue #252.
+Eight backend handlers remain deliberately absent. Seven await durability,
+disclosure, filesystem-race, and replay fixes tracked in netbox-rpc-backend #80.
+``policy_write`` is also withheld because its free-form input prevents a
+structural no-secret-persistence guarantee; its replacement design is tracked
+in the same issue. The 22 rows below are the complete callable subset reviewed
+for issue #252, and none accepts free-form text.
 
 OpenBao SSH credentials are resolved by the execution backend from the audited
 NetBox target identity.  Unlike the older InfluxDB catalog, these closed input
@@ -28,7 +31,6 @@ _HANDLER_IDS = (
     "service.openbao_1.raft_list_peers",
     "service.openbao_1.raft_autopilot_state",
     "service.openbao_1.snapshots_list",
-    "service.openbao_1.policy_write",
     "service.openbao_1.auth_enable",
     "service.openbao_1.secrets_enable",
     "service.openbao_1.audit_enable",
@@ -42,72 +44,10 @@ _HANDLER_IDS = (
     "service.openbao_1.secrets_disable",
     "service.openbao_1.audit_disable",
 )
-_MAX_CONTENT = 1024 * 1024
 _NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?![\s\S])"
 _MOUNT_PATH_PATTERN = (
     r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?(?![\s\S])"
-)
-_NON_EMPTY_NON_NUL_PATTERN = r"^(?=[\s\S]*\S)(?![\s\S]*\x00)[\s\S]*(?![\s\S])"
-_ASSIGNMENT_VALUE_PATTERN = (
-    r'(?:"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\'|'
-    r"Bearer\s+[^\s,}\]]+|[^\s,}\]]+)"
-)
-_NORMALIZED_SEPARATOR_PATTERN = r"(?:_|[.-]+)"
-_FIELD_COMPONENT_PATTERN = r"[A-Za-z0-9]+"
-_SENSITIVE_COMPONENT_PATTERN = (
-    r"(?:authorization|credential|credentials|passphrase|passwd|password|pin|"
-    r"secret|secrets|token|tokens|unseal)"
-)
-_SENSITIVE_KEY_PREFIX_PATTERN = (
-    r"(?:access|account|api|client|current|previous|private|root|shared)"
-)
-_NON_SECRET_FIELD_PATTERN = (
-    rf"(?:key{_NORMALIZED_SEPARATOR_PATTERN}(?:id|label|name)|"
-    rf"tls{_NORMALIZED_SEPARATOR_PATTERN}key{_NORMALIZED_SEPARATOR_PATTERN}file|"
-    rf"token{_NORMALIZED_SEPARATOR_PATTERN}label)"
-)
-_SENSITIVE_COMPONENT_ASSIGNMENT_PATTERN = (
-    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
-    rf"(?!{_NON_SECRET_FIELD_PATTERN}[\"']?\s*[:=])"
-    rf"[_.-]*(?:{_FIELD_COMPONENT_PATTERN}[_.-]+)*"
-    rf"{_SENSITIVE_COMPONENT_PATTERN}"
-    rf"(?:[_.-]+{_FIELD_COMPONENT_PATTERN})*[_.-]*"
-    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
-)
-_SPECIAL_KEY_ASSIGNMENT_PATTERN = (
-    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
-    rf"(?:auth{_NORMALIZED_SEPARATOR_PATTERN}info|"
-    rf"connection{_NORMALIZED_SEPARATOR_PATTERN}(?:string|url)|keys?)"
-    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
-)
-_PREFIXED_KEY_ASSIGNMENT_PATTERN = (
-    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
-    rf"[_.-]*(?:{_FIELD_COMPONENT_PATTERN}[_.-]+)*"
-    rf"{_SENSITIVE_KEY_PREFIX_PATTERN}[_.-]+keys?"
-    rf"(?:[_.-]+{_FIELD_COMPONENT_PATTERN})*[_.-]*"
-    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
-)
-_SECRET_CONTENT_PATTERNS = (
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    _SENSITIVE_COMPONENT_ASSIGNMENT_PATTERN,
-    _SPECIAL_KEY_ASSIGNMENT_PATTERN,
-    _PREFIXED_KEY_ASSIGNMENT_PATTERN,
-    r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
-    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
-    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
-    r"(?i)\b(?:hvs|hvb|s)\.[A-Za-z0-9_-]{8,}\b",
-    (
-        r"(?<![A-Za-z0-9+/_=-])"
-        r"(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_=-]))"
-        r"(?=[A-Za-z0-9+/_-]*[G-Zg-z+/_-])"
-        r"[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_=-])"
-    ),
-    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64,}(?![0-9A-Fa-f])",
-    (
-        r"(?im)^\s*(?:unseal\s+key(?:\s+\d+)?|initial\s+root\s+token|"
-        r"root\s+token)\s*[=:]\s*.*$"
-    ),
 )
 
 
@@ -137,14 +77,6 @@ _MOUNT_PATH = {
 }
 _OPTIONAL_MOUNT_PATH = {**_MOUNT_PATH, "type": ["string", "null"]}
 _OPTIONAL_NAME = {**_NAME, "type": ["string", "null"]}
-_CONTENT = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": _MAX_CONTENT,
-    "pattern": _NON_EMPTY_NON_NUL_PATTERN,
-    "allOf": [{"not": {"pattern": pattern}} for pattern in _SECRET_CONTENT_PATTERNS],
-    "description": "Non-secret content delivered to the backend through stdin.",
-}
 
 _TEXT = {"type": "string"}
 _ERROR = {"type": "string", "maxLength": 1000}
@@ -415,21 +347,6 @@ _PROCEDURES = (
                 },
                 "error": _ERROR,
             },
-        },
-    ),
-    _row(
-        "policy_write",
-        effect="write",
-        approval_required=False,
-        timeout_seconds=60,
-        description="Write one named non-secret OpenBao policy through backend stdin.",
-        params_schema=_params(
-            ("policy_name", "policy_content"),
-            {"policy_name": _NAME, "policy_content": _CONTENT},
-        ),
-        result_schema={
-            "required": ("policy_name", "error"),
-            "properties": {"policy_name": _TEXT, "error": _ERROR},
         },
     ),
     _row(

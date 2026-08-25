@@ -468,59 +468,6 @@ _OPENBAO_MOUNT_PATH_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?$"
 )
-_OPENBAO_MAX_CONTENT_BYTES = 1024 * 1024
-_OPENBAO_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<prefix>(?<![A-Za-z0-9_.-])"
-    r"(?P<key>[\"']?[A-Za-z0-9_.-]+[\"']?)\s*[:=]\s*)"
-    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
-    r"Bearer\s+[^\s,}\]]+|[^\s,}\]]+)"
-)
-_OPENBAO_SENSITIVE_FIELD_COMPONENTS = frozenset(
-    {
-        "authorization",
-        "credential",
-        "credentials",
-        "passphrase",
-        "passwd",
-        "password",
-        "pin",
-        "secret",
-        "secrets",
-        "token",
-        "tokens",
-        "unseal",
-    }
-)
-_OPENBAO_SENSITIVE_KEY_PREFIXES = frozenset(
-    {
-        "access",
-        "account",
-        "api",
-        "client",
-        "current",
-        "previous",
-        "private",
-        "root",
-        "shared",
-    }
-)
-_OPENBAO_NON_SECRET_FIELD_NAMES = frozenset(
-    {"key_id", "key_label", "key_name", "tls_key_file", "token_label"}
-)
-_OPENBAO_TOKEN_LITERAL_RE = re.compile(r"(?i)\b(?:hvs|hvb|s)\.[A-Za-z0-9_-]{8,}\b")
-_OPENBAO_BASE64_MATERIAL_RE = re.compile(
-    r"(?<![A-Za-z0-9+/_=-])"
-    r"(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_=-]))"
-    r"(?=[A-Za-z0-9+/_-]*[G-Zg-z+/_-])"
-    r"[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_=-])"
-)
-_OPENBAO_HEX_MATERIAL_RE = re.compile(
-    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64,}(?![0-9A-Fa-f])"
-)
-_OPENBAO_KEY_MATERIAL_LINE_RE = re.compile(
-    r"(?im)^\s*(?:unseal\s+key(?:\s+\d+)?|initial\s+root\s+token|"
-    r"root\s+token)\s*[=:]\s*.*$"
-)
 _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
     {
         "rpc_ssh_credential_pk",
@@ -1527,7 +1474,6 @@ def _normalize_openbao_1_execution(
         "raft_list_peers": frozenset(),
         "raft_autopilot_state": frozenset(),
         "snapshots_list": frozenset(),
-        "policy_write": frozenset({"policy_name", "policy_content"}),
         "auth_enable": frozenset({"auth_type", "mount_path"}),
         "secrets_enable": frozenset(
             {"engine_type", "mount_path", "kv_version"}
@@ -1618,20 +1564,10 @@ def _normalize_openbao_1_execution(
             return None
         return required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
 
-    if operation in {"policy_write", "policy_delete"}:
+    if operation == "policy_delete":
         policy_name = required_string("policy_name", _OPENBAO_NAME_RE)
         normalized["policy_name"] = policy_name
         normalized["command_fingerprint"]["policy_name"] = policy_name
-
-    if operation == "policy_write":
-        policy_content = _normalize_openbao_content(params.get("policy_content"))
-        normalized["policy_content"] = policy_content
-        normalized["command_fingerprint"].update(
-            {
-                "policy_content_sha256": _hash_text(policy_content),
-                "policy_content_bytes": len(policy_content.encode("utf-8")),
-            }
-        )
 
     if operation == "auth_enable":
         auth_type = params.get("auth_type")
@@ -1718,72 +1654,6 @@ def _normalize_openbao_1_execution(
         normalized["command_fingerprint"]["peer_id"] = peer_id
 
     return normalized
-
-
-def _normalize_openbao_content(raw_content: object) -> str:
-    if not isinstance(raw_content, str) or not raw_content.strip():
-        raise RPCExecutionError(
-            "policy_content must be a non-empty string.",
-            code="RPC_PARAM_INVALID",
-        )
-    if (
-        "\x00" in raw_content
-        or len(raw_content.encode("utf-8")) > _OPENBAO_MAX_CONTENT_BYTES
-    ):
-        raise RPCExecutionError(
-            "policy_content is oversized or contains NUL bytes.",
-            code="RPC_PARAM_INVALID",
-        )
-    if _openbao_has_sensitive_assignment(raw_content) or any(
-        pattern.search(raw_content)
-        for pattern in (
-            _INFLUXDB_PRIVATE_KEY_RE,
-            _INFLUXDB_AUTHORIZATION_RE,
-            _INFLUXDB_URL_CREDENTIAL_RE,
-            _OPENBAO_TOKEN_LITERAL_RE,
-            _OPENBAO_BASE64_MATERIAL_RE,
-            _OPENBAO_HEX_MATERIAL_RE,
-            _OPENBAO_KEY_MATERIAL_LINE_RE,
-        )
-    ):
-        raise RPCExecutionError(
-            "policy_content contains secret-shaped material.",
-            code="RPC_PARAM_SECRET_FORBIDDEN",
-        )
-    return raw_content
-
-
-def _openbao_sensitive_field_name(value: str) -> bool:
-    """Mirror the backend's OpenBao credential-field classifier exactly."""
-
-    normalized = re.sub(r"[.-]+", "_", value.strip("\"'").lower())
-    if normalized in _OPENBAO_NON_SECRET_FIELD_NAMES:
-        return False
-    components = tuple(part for part in normalized.split("_") if part)
-    if not components:
-        return False
-    if any(part in _OPENBAO_SENSITIVE_FIELD_COMPONENTS for part in components):
-        return True
-    if normalized in {
-        "auth_info",
-        "connection_string",
-        "connection_url",
-        "key",
-        "keys",
-    }:
-        return True
-    return any(
-        components[index] in _OPENBAO_SENSITIVE_KEY_PREFIXES
-        and components[index + 1] in {"key", "keys"}
-        for index in range(len(components) - 1)
-    )
-
-
-def _openbao_has_sensitive_assignment(value: str) -> bool:
-    return any(
-        _openbao_sensitive_field_name(match.group("key"))
-        for match in _OPENBAO_ASSIGNMENT_RE.finditer(value)
-    )
 
 
 def _normalize_influxdb_1_execution(

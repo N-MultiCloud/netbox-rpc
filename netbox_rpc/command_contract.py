@@ -328,7 +328,6 @@ EXEMPT_HANDLER_RATIONALE.update(
             "raft_list_peers",
             "raft_autopilot_state",
             "snapshots_list",
-            "policy_write",
             "auth_enable",
             "secrets_enable",
             "audit_enable",

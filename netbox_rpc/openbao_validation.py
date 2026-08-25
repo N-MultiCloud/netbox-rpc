@@ -17,7 +17,7 @@ from typing import Any
 
 
 OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
-OPENBAO_MAX_POLICY_CONTENT_BYTES = 1024 * 1024
+OPENBAO_MAX_STRING_BYTES = 1024 * 1024
 
 
 class OpenBaoSecretIngressError(ValueError):
@@ -62,8 +62,8 @@ _IDENTIFIER_FIELD_NAMES = frozenset(
 # Operational identifiers are schema-bounded to 128 characters. A long run of
 # base64-alphabet characters is not enough evidence that one is a credential:
 # realistic hyphenated names and timestamped snapshots have exactly that shape.
-# High-entropy base64/base64url remains forbidden in these fields, while
-# free-form fields retain the existing match-on-shape behavior unchanged.
+# High-entropy base64/base64url remains forbidden in these fields, while all
+# other strings retain the full match-on-shape behavior.
 _BASE64_IDENTIFIER_MIN_ENTROPY_BITS = 4.5
 _ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<prefix>(?<![A-Za-z0-9_.-])"
@@ -158,15 +158,6 @@ def _scan_value(
                 _scan_text(key, decode_documents=decode_documents)
                 if _sensitive_field_name(key):
                     _raise_secret_ingress()
-                if (
-                    key == "policy_content"
-                    and isinstance(child, str)
-                    and len(child.encode("utf-8"))
-                    > OPENBAO_MAX_POLICY_CONTENT_BYTES
-                ):
-                    raise OpenBaoSecretIngressError(
-                        "policy_content exceeds the 1 MiB UTF-8 byte limit."
-                    )
             _scan_value(
                 child,
                 decode_documents=decode_documents,
@@ -200,6 +191,10 @@ def _scan_text(
     decode_documents: bool,
     identifier_field: str | None = None,
 ) -> None:
+    if len(value.encode("utf-8")) > OPENBAO_MAX_STRING_BYTES:
+        raise OpenBaoSecretIngressError(
+            "OpenBao params contain a string exceeding the 1 MiB UTF-8 byte limit."
+        )
     _reject_secret_shapes(value, identifier_field=identifier_field)
     _reject_sensitive_assignments(value)
 

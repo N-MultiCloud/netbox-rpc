@@ -1082,13 +1082,20 @@ nms-backend handlers build the runtime actions server-side.
 
 ## OpenBao Procedure Catalogue (`service.openbao.1.*`)
 
-Twenty-three OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
+Twenty-two OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
 procedures + command rows), targeting **`dcim.device` only**. The paired
 backend's strict OpenBao credential lookup currently rejects VM identities;
 `virtualization.virtualmachine` must not be advertised until the backend has an
 equivalent identity-checked VM credential resolver. Their handlers live in `netbox-rpc-backend`
 (`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
 dotted-catalogue-name / underscored-handler-id convention.
+
+The seeded subset is ten reads (`inspect`, `seal_status`, `health`,
+`policies_list`, `auth_list`, `secrets_list`, `audit_list`, `raft_list_peers`,
+`raft_autopilot_state`, `snapshots_list`), five writes (`auth_enable`,
+`secrets_enable`, `audit_enable`, `snapshot_create`, `service_action`), and
+seven destructive procedures (`seal`, `step_down`, `raft_remove_peer`,
+`policy_delete`, `auth_disable`, `secrets_disable`, `audit_disable`).
 
 Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
 (`openbao` → `openbao.service`), which makes the **existing** generic
@@ -1107,20 +1114,27 @@ and neither migration has a durable ownership ledger that could safely restore
 or delete an operator-edited row. Removal or repair requires a reviewed forward
 migration.
 
-### Seven procedures are deliberately NOT seeded
+### Eight procedures are deliberately NOT seeded
 
 `config_deploy`, `rekey`, `config_read`, `policy_read`, `initialize`, `unseal`,
-and `snapshot_restore` each carry an unresolved defect in the execution backend,
-tracked in `netbox-rpc-backend` **#80** — ownership loss on activation,
+and `snapshot_restore` each carry an unresolved defect in the execution backend:
+ownership loss on activation,
 commit-before-durable-capture, a digest that verifies a low-entropy credential
 offline, a truncated share retained below its pattern's length floor, a writable
 parent allowing the initialisation output to be replaced, and missing
-accept-once dispatch respectively.
+accept-once dispatch respectively. `policy_write` is the eighth withheld
+procedure. It was the only seeded procedure accepting free-form text, where
+shape detection cannot guarantee that encoded, split, or homoglyph-obscured
+secrets will never be persisted without also rejecting legitimate content.
+Withholding it means no seeded procedure accepts free-form text, making the
+no-secret-persistence guarantee structural rather than signature-dependent.
+The replacement free-form content design and the other backend defects are
+tracked in `netbox-rpc-backend` **#80**.
 
 **Withholding the row is the control.** `RPCExecution` has a foreign key to
 `RPCProcedure`, and the backend executes only what this plugin dispatches, so a
 handler with no row cannot be invoked through the sanctioned path.
-`tests/test_openbao_catalog.py` asserts all seven stay absent, so a later
+`tests/test_openbao_catalog.py` asserts all eight stay absent, so a later
 migration cannot reintroduce one before #80 closes.
 
 State the limit honestly: this is an operational hold, not a code-level lock. An
@@ -1160,14 +1174,9 @@ procedures. Top-level schema-declared identifiers (`policy_name`, `mount_path`,
 `peer_id`, `snapshot_name`) distinguish low-entropy operational names from
 high-entropy base64/base64url material, so realistic names up to 128 characters
 remain usable while provider tokens, high-entropy base64, and long hex are still
-refused. Free-form `policy_content` keeps its existing full shape scan unchanged.
-
-The existing `policy_content` schema exclusions and normalizer field-name/shape
-checks remain as defense in depth. Public metadata such as `key_id`,
-`token_label`, and `tls_key_file` remains allowed. `policy_content` is capped at
-1 MiB of **UTF-8 bytes**, both in the pre-persistence scanner and the normalizer;
-the schema's character limit is only an additional coarse bound and is not the
-byte-limit authority.
+refused. Every scanned string is capped at 1 MiB of **UTF-8 bytes** before the
+more expensive classifiers run. The seeded schemas impose much narrower typed
+and enum-constrained limits; none accepts free-form text.
 
 ## Procedure Naming
 

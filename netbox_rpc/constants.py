@@ -320,7 +320,6 @@ OPENBAO_1_PROCEDURE_NAMES = frozenset(
         "service.openbao.1.raft_list_peers",
         "service.openbao.1.raft_autopilot_state",
         "service.openbao.1.snapshots_list",
-        "service.openbao.1.policy_write",
         "service.openbao.1.auth_enable",
         "service.openbao.1.secrets_enable",
         "service.openbao.1.audit_enable",

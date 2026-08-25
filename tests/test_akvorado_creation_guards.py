@@ -14,8 +14,6 @@ import pytest
 
 
 OPENBAO_DECLARED_STRING_FIELDS = (
-    ("policy_write", "policy_name"),
-    ("policy_write", "policy_content"),
     ("auth_enable", "auth_type"),
     ("auth_enable", "mount_path"),
     ("secrets_enable", "engine_type"),
@@ -38,10 +36,10 @@ OPENBAO_SECRET_SHAPES = (
 OPENBAO_HIGH_ENTROPY_BASE64 = "X7J3qP9mZv1KcR8sTy4NbW6LdA2HgU0eFo5IiE_aBcD"
 OPENBAO_OPERATIONAL_IDENTIFIER_CASES = (
     (
-        "policy_write",
+        "policy_delete",
         "policy_name",
         "production-kubernetes-authentication-read-only-policy",
-        {"policy_content": 'path "kv/data/production/*" { capabilities = ["read"] }'},
+        {},
     ),
     (
         "auth_enable",
@@ -983,7 +981,7 @@ def test_openbao_secret_shape_is_rejected_in_every_declared_string_field_before_
 
 
 @pytest.mark.parametrize(
-    ("case_name", "policy_content"),
+    ("case_name", "identifier"),
     [
         ("json-unicode-key", r'{"pass\u0077ord":"hunter2"}'),
         (
@@ -1004,18 +1002,15 @@ def test_openbao_secret_shape_is_rejected_in_every_declared_string_field_before_
         ),
     ],
 )
-def test_openbao_decodes_adversarial_policy_content_before_persistence(
+def test_openbao_decodes_adversarial_identifier_before_persistence(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
     case_name: str,
-    policy_content: str,
+    identifier: str,
 ) -> None:
     command_handlers, ValidationError, _ = command_handlers_module
-    procedure = _openbao_procedure("policy_write")
-    params = {"policy_name": "decode-oracle", "policy_content": policy_content}
-    # The legacy raw-text schema patterns intentionally remain as defense in
-    # depth, but these inputs demonstrate their escaped-text blind spot.
-    command_handlers.jsonschema.validate(params, procedure.params_schema)
+    procedure = _openbao_procedure("policy_delete", permissive_schema=True)
+    params = {"policy_name": identifier}
     serializer = _CreationSerializer(procedure, params)
     monkeypatch.setattr(
         command_handlers,
@@ -1075,24 +1070,24 @@ def test_openbao_scanner_walks_nested_dictionary_keys_and_values_before_save(
 
 
 @pytest.mark.parametrize(
-    ("accepted", "policy_content"),
+    ("accepted", "snapshot_name"),
     [
         (True, "🙂" * 262_144),
         (False, "🙂" * 262_144 + "x"),
     ],
     ids=("exactly-1-mib", "one-byte-over"),
 )
-def test_openbao_policy_content_creation_limit_is_utf8_bytes_not_characters(
+def test_openbao_scanner_string_limit_is_utf8_bytes_not_characters(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
     accepted: bool,
-    policy_content: str,
+    snapshot_name: str,
 ) -> None:
     command_handlers, ValidationError, _ = command_handlers_module
-    procedure = _openbao_procedure("policy_write")
+    procedure = _openbao_procedure("snapshot_create", permissive_schema=True)
     serializer = _CreationSerializer(
         procedure,
-        {"policy_name": "byte-boundary", "policy_content": policy_content},
+        {"snapshot_name": snapshot_name},
     )
     _allow_creation_to_persist(command_handlers, monkeypatch)
     user = SimpleNamespace(has_perm=lambda permission: True)
@@ -1101,17 +1096,17 @@ def test_openbao_policy_content_creation_limit_is_utf8_bytes_not_characters(
         execution = command_handlers.create_execution(serializer=serializer, user=user)
         assert execution is not None
         assert serializer.saved is True
-        assert len(policy_content.encode("utf-8")) == 1_048_576
+        assert len(snapshot_name.encode("utf-8")) == 1_048_576
     else:
         with pytest.raises(ValidationError) as caught:
             command_handlers.create_execution(serializer=serializer, user=user)
         assert set(caught.value.detail) == {"params"}
         assert serializer.saved is False
-        assert len(policy_content) < 1_048_576
-        assert len(policy_content.encode("utf-8")) == 1_048_577
+        assert len(snapshot_name) < 1_048_576
+        assert len(snapshot_name.encode("utf-8")) == 1_048_577
 
 
-def test_legitimate_openbao_names_paths_and_real_policy_body_still_persist(
+def test_legitimate_openbao_names_and_paths_still_persist(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1120,15 +1115,8 @@ def test_legitimate_openbao_names_paths_and_real_policy_body_still_persist(
     user = SimpleNamespace(has_perm=lambda permission: True)
     cases = (
         (
-            _openbao_procedure("policy_write"),
-            {
-                "policy_name": "ops-read",
-                "policy_content": (
-                    'path "kv/data/operations/*" {\n'
-                    '  capabilities = ["read", "list"]\n'
-                    "}"
-                ),
-            },
+            _openbao_procedure("policy_delete"),
+            {"policy_name": "retired-ops-read"},
         ),
         (
             _openbao_procedure("auth_enable"),
@@ -1216,20 +1204,19 @@ def test_secret_material_in_openbao_identifier_fields_is_refused_at_creation(
     assert serializer.saved is False
 
 
-def test_identifier_entropy_exception_does_not_change_free_form_scanning(
+def test_identifier_entropy_exception_is_limited_to_top_level_identifier_fields(
     command_handlers_module,
 ) -> None:
     command_handlers, _, _ = command_handlers_module
     long_identifier_shape = "production-kubernetes-authentication-backend"
 
+    command_handlers.validate_openbao_params_for_persistence(
+        "service.openbao.1.auth_enable",
+        {"mount_path": long_identifier_shape},
+    )
     with pytest.raises(command_handlers.OpenBaoSecretIngressError):
         command_handlers.validate_openbao_params_for_persistence(
-            "service.openbao.1.policy_write",
-            {"policy_content": long_identifier_shape},
-        )
-    with pytest.raises(command_handlers.OpenBaoSecretIngressError):
-        command_handlers.validate_openbao_params_for_persistence(
-            "service.openbao.1.inspect",
+            "service.openbao.1.auth_enable",
             {"nested": {"mount_path": long_identifier_shape}},
         )
 
@@ -1331,7 +1318,7 @@ def test_openbao_scanner_does_not_change_non_openbao_creation(
 
 
 @pytest.mark.parametrize(
-    "policy_content",
+    "identifier",
     [
         '  client_secret = "hunter2!"\npath "kv/*" {}',
         '  connection_url =\n    "opaque-credential"\ntelemetry {}',
@@ -1340,26 +1327,15 @@ def test_openbao_scanner_does_not_change_non_openbao_creation(
 def test_openbao_sensitive_assignment_is_rejected_before_serializer_save(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
-    policy_content: str,
+    identifier: str,
 ) -> None:
     command_handlers, ValidationError, _ = command_handlers_module
-    migration_name = "netbox_rpc.migrations.0078_seed_openbao_procedures"
-    sys.modules.pop(migration_name, None)
-    migration = importlib.import_module(migration_name)
-    row = next(
-        item
-        for item in migration._PROCEDURES
-        if item["name"] == "service.openbao.1.policy_write"
-    )
-    procedure = SimpleNamespace(**row, version=1, enabled=True)
+    procedure = _openbao_procedure("policy_delete", permissive_schema=True)
 
     class Serializer:
         validated_data = {
             "procedure": procedure,
-            "params": {
-                "policy_name": "must-not-persist",
-                "policy_content": policy_content,
-            },
+            "params": {"policy_name": identifier},
         }
         saved = False
 
@@ -1371,9 +1347,7 @@ def test_openbao_sensitive_assignment_is_rejected_before_serializer_save(
             return SimpleNamespace()
 
     serializer = Serializer()
-    user = SimpleNamespace(
-        has_perm=lambda permission: permission == "netbox_rpc.execute_rpcprocedure"
-    )
+    user = SimpleNamespace(has_perm=lambda permission: True)
     monkeypatch.setattr(
         command_handlers,
         "_require_enabled_and_authoritative_backend",

@@ -33,7 +33,6 @@ READS = {
     "service.openbao.1.snapshots_list",
 }
 WRITES = {
-    "service.openbao.1.policy_write",
     "service.openbao.1.auth_enable",
     "service.openbao.1.secrets_enable",
     "service.openbao.1.audit_enable",
@@ -50,6 +49,7 @@ DESTRUCTIVE = {
     "service.openbao.1.audit_disable",
 }
 WITHHELD = {
+    "service.openbao.1.policy_write",
     "service.openbao.1.config_deploy",
     "service.openbao.1.rekey",
     "service.openbao.1.config_read",
@@ -60,18 +60,6 @@ WITHHELD = {
 }
 EXPECTED_NAMES = READS | WRITES | DESTRUCTIVE
 APPROVAL_REQUIRED = DESTRUCTIVE | {"service.openbao.1.service_action"}
-BACKEND_SENSITIVE_FIELD_ORACLE = (
-    "access_key",
-    "account_key",
-    "auth_password",
-    "circonus_api_token",
-    "client_key",
-    "connection_url",
-    "current_key",
-    "previous_key",
-    "secret_key",
-    "shared_key",
-)
 FORBIDDEN_SSH_OVERRIDES = {
     "rpc_ssh_credential_pk",
     "rpc_ssh_host",
@@ -91,7 +79,9 @@ def test_seed_is_exact_and_all_withheld_procedures_are_absent(
 ) -> None:
     _, procedures, commands = _run_procedure_seed(monkeypatch)
 
+    assert len(procedures.rows) == 22
     assert set(procedures.rows) == EXPECTED_NAMES
+    assert len(WITHHELD) == 8
     for withheld_name in WITHHELD:
         assert withheld_name not in procedures.rows
     all_migration_source = "\n".join(
@@ -99,7 +89,13 @@ def test_seed_is_exact_and_all_withheld_procedures_are_absent(
         for path in sorted((ROOT / "netbox_rpc/migrations").glob("0*.py"))
     )
     for withheld_name in WITHHELD:
+        withheld_handler_id = _handler_id(withheld_name)
         assert withheld_name not in all_migration_source
+        assert withheld_handler_id not in all_migration_source
+        assert all(
+            row["handler_id"] != withheld_handler_id
+            for row in procedures.rows.values()
+        )
     assert set(commands.rows) == {(name, 1) for name in EXPECTED_NAMES}
 
 
@@ -145,7 +141,7 @@ def test_no_seeded_openbao_procedure_advertises_a_virtual_machine_target(
 ) -> None:
     _, procedures, _ = _run_procedure_seed(monkeypatch)
 
-    assert len(procedures.rows) == 23
+    assert len(procedures.rows) == 22
     assert all(
         row["target_models"] == ["dcim.device"]
         and "virtualization.virtualmachine" not in row["target_models"]
@@ -160,10 +156,6 @@ def test_every_params_schema_is_closed_and_declares_no_ssh_override(
 
     valid_params = {
         **{name: {} for name in READS},
-        "service.openbao.1.policy_write": {
-            "policy_name": "ops-read",
-            "policy_content": 'path "kv/data/*" { capabilities = ["read"] }',
-        },
         "service.openbao.1.auth_enable": {
             "auth_type": "approle",
             "mount_path": "machine-auth",
@@ -195,80 +187,23 @@ def test_every_params_schema_is_closed_and_declares_no_ssh_override(
         assert not (set(schema["properties"]) & FORBIDDEN_SSH_OVERRIDES)
         assert not any(key.startswith("rpc_ssh_") for key in schema["properties"])
         assert "rpc_ssh_" not in json.dumps(schema, sort_keys=True)
+        for property_schema in schema["properties"].values():
+            declared_type = property_schema.get("type")
+            if declared_type == "string" or (
+                isinstance(declared_type, list) and "string" in declared_type
+            ):
+                assert "enum" in property_schema or (
+                    "pattern" in property_schema
+                    and property_schema.get("maxLength", 129) <= 128
+                )
         validate(params, schema)
 
     # Mirrors OpenBao's Pydantic cross-field contract: kv_version is meaningful
-    # only for the kv engine, while public HSM token labels are metadata rather
-    # than persisted token material.
-    validate(
-        {
-            "policy_name": "hsm-policy",
-            "policy_content": 'token_label = "OpenBao"',
-        },
-        procedures.rows["service.openbao.1.policy_write"]["params_schema"],
-    )
-    public_metadata = "\n".join(
-        (
-            'key_id = "0x1234"',
-            'key_label = "bao-root-key"',
-            'key_name = "root-key"',
-            'tls_key_file = "/etc/openbao/tls.key"',
-            'token_label = "OpenBao"',
-        )
-    )
-    validate(
-        {"policy_name": "public-metadata", "policy_content": public_metadata},
-        procedures.rows["service.openbao.1.policy_write"]["params_schema"],
-    )
+    # only for the kv engine.
     with pytest.raises(ValidationError):
         validate(
             {"engine_type": "database", "kv_version": 2},
             procedures.rows["service.openbao.1.secrets_enable"]["params_schema"],
-        )
-
-
-@pytest.mark.parametrize(
-    "policy_content",
-    [
-        '  client_secret = "hunter2!"\npath "kv/*" {}',
-        '  connection_url =\n    "opaque-credential"\ntelemetry {}',
-        'seal "pkcs11" { enabled = true }\n    pin:\n      "4321"',
-    ],
-)
-def test_policy_schema_rejects_indented_and_multiline_sensitive_assignments(
-    monkeypatch: pytest.MonkeyPatch,
-    policy_content: str,
-) -> None:
-    """The schema is the creation-time gate, before RPCExecution persistence."""
-
-    _, procedures, _ = _run_procedure_seed(monkeypatch)
-    schema = procedures.rows["service.openbao.1.policy_write"]["params_schema"]
-
-    with pytest.raises(ValidationError):
-        validate(
-            {"policy_name": "must-not-persist", "policy_content": policy_content},
-            schema,
-        )
-
-
-@pytest.mark.parametrize(
-    "field_name",
-    BACKEND_SENSITIVE_FIELD_ORACLE,
-)
-def test_policy_schema_matches_the_backend_sensitive_field_oracle(
-    monkeypatch: pytest.MonkeyPatch,
-    field_name: str,
-) -> None:
-    _, procedures, _ = _run_procedure_seed(monkeypatch)
-    schema = procedures.rows["service.openbao.1.policy_write"]["params_schema"]
-
-    with pytest.raises(ValidationError):
-        validate(
-            {
-                "policy_name": "field-classifier",
-                "policy_content": f'block {{\n  {field_name} = "credential-value"\n}}',
-            },
-            schema,
         )
 
 
@@ -327,7 +262,6 @@ def test_result_schemas_accept_the_actual_handler_envelopes(
             ],
             "error": "",
         },
-        "policy_write": {"policy_name": "ops-read", "error": ""},
         "auth_enable": {"auth_type": "approle", "mount_path": "approle", "error": ""},
         "secrets_enable": {
             "engine_type": "kv",
@@ -503,94 +437,6 @@ def test_openbao_normalizer_rejects_every_ssh_override(
     with pytest.raises(jobs_module.RPCExecutionError) as caught:
         jobs_module.normalize_execution_params(execution)
     assert caught.value.code == "RPC_PARAM_INVALID"
-
-
-@pytest.mark.parametrize(
-    "policy_content",
-    [
-        '  client_secret = "hunter2!"\npath "kv/*" {}',
-        '  connection_url =\n    "opaque-credential"\ntelemetry {}',
-        'seal "pkcs11" { enabled = true }\n    pin:\n      "4321"',
-    ],
-)
-def test_openbao_normalizer_rejects_indented_and_multiline_sensitive_assignments(
-    jobs_module,
-    policy_content: str,
-) -> None:
-    execution = SimpleNamespace(
-        procedure=SimpleNamespace(
-            name="service.openbao.1.policy_write",
-            handler_id="service.openbao_1.policy_write",
-        ),
-        params={"policy_name": "must-not-persist", "policy_content": policy_content},
-        target_display="bao01",
-        target_model_label="dcim.device",
-        assigned_object_id=871,
-    )
-
-    with pytest.raises(jobs_module.RPCExecutionError) as caught:
-        jobs_module.normalize_execution_params(execution)
-    assert caught.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
-
-
-@pytest.mark.parametrize("field_name", BACKEND_SENSITIVE_FIELD_ORACLE)
-def test_openbao_normalizer_matches_the_backend_sensitive_field_oracle(
-    jobs_module,
-    field_name: str,
-) -> None:
-    execution = SimpleNamespace(
-        procedure=SimpleNamespace(
-            name="service.openbao.1.policy_write",
-            handler_id="service.openbao_1.policy_write",
-        ),
-        params={
-            "policy_name": "field-classifier",
-            "policy_content": f'block {{\n  {field_name} = "credential-value"\n}}',
-        },
-        target_display="bao01",
-        target_model_label="dcim.device",
-        assigned_object_id=871,
-    )
-
-    with pytest.raises(jobs_module.RPCExecutionError) as caught:
-        jobs_module.normalize_execution_params(execution)
-    assert caught.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
-
-
-@pytest.mark.parametrize(
-    ("accepted", "policy_content"),
-    [
-        (True, "🙂" * 262_144),
-        (False, "🙂" * 262_144 + "x"),
-    ],
-    ids=("exactly-1-mib", "one-byte-over"),
-)
-def test_openbao_normalizer_policy_content_limit_is_utf8_bytes(
-    jobs_module,
-    accepted: bool,
-    policy_content: str,
-) -> None:
-    execution = SimpleNamespace(
-        procedure=SimpleNamespace(
-            name="service.openbao.1.policy_write",
-            handler_id="service.openbao_1.policy_write",
-        ),
-        params={"policy_name": "byte-boundary", "policy_content": policy_content},
-        target_display="bao01",
-        target_model_label="dcim.device",
-        assigned_object_id=871,
-    )
-
-    if accepted:
-        normalized = jobs_module.normalize_execution_params(execution)
-        assert normalized["policy_content"] == policy_content
-        assert normalized["command_fingerprint"]["policy_content_bytes"] == 1_048_576
-    else:
-        with pytest.raises(jobs_module.RPCExecutionError) as caught:
-            jobs_module.normalize_execution_params(execution)
-        assert caught.value.code == "RPC_PARAM_INVALID"
-        assert len(policy_content) < 1_048_576
-        assert len(policy_content.encode("utf-8")) == 1_048_577
 
 
 def test_openbao_normalizer_rejects_virtual_machine_target(jobs_module) -> None:
