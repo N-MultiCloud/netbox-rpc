@@ -1846,13 +1846,25 @@ validates them. So the backend's refusal is layer two; declining to declare the
 fields here is the layer that actually prevents persistence. Estate-wide
 enforcement for every other procedure family is tracked in **#253**.
 
-`policy_content` also rejects secret-shaped assignments at that pre-persistence
-schema gate, including ordinary indentation and values continued onto a later
-line. The normalizer repeats the same fixed field-name policy as defense in
-depth: credential components such as `password`, `pin`, `secret`, and `token`,
-the backend's special connection fields, and its prefixed `*_key` families are
-rejected, while public metadata such as `key_id`, `token_label`, and
-`tls_key_file` remains allowed.
+`openbao_validation.validate_openbao_params_for_persistence()` is the primary
+secret-ingress control. `create_execution()` runs it after schema validation and
+before `serializer.save()` for every `service.openbao.1.*` procedure, over the
+complete caller params object: all nested dictionary keys and values are
+classified by field name and by secret shape (OpenBao token prefixes, long
+base64, long hex, private keys, authorization material, and credential-bearing
+URLs). Accepted JSON documents are parsed and their decoded keys/values are
+walked; HCL-style quoted strings are lexically decoded before assignment
+classification, and escaped assignment identifiers are refused. This closes
+escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
+enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
+procedures.
+
+The existing `policy_content` schema exclusions and normalizer field-name/shape
+checks remain as defense in depth. Public metadata such as `key_id`,
+`token_label`, and `tls_key_file` remains allowed. `policy_content` is capped at
+1 MiB of **UTF-8 bytes**, both in the pre-persistence scanner and the normalizer;
+the schema's character limit is only an additional coarse bound and is not the
+byte-limit authority.
 
 ## Adding New Procedures
 

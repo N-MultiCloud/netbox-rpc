@@ -5,10 +5,35 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from itertools import product
 from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
+
+
+OPENBAO_DECLARED_STRING_FIELDS = (
+    ("policy_write", "policy_name"),
+    ("policy_write", "policy_content"),
+    ("auth_enable", "auth_type"),
+    ("auth_enable", "mount_path"),
+    ("secrets_enable", "engine_type"),
+    ("secrets_enable", "mount_path"),
+    ("audit_enable", "audit_type"),
+    ("audit_enable", "mount_path"),
+    ("snapshot_create", "snapshot_name"),
+    ("service_action", "action"),
+    ("raft_remove_peer", "peer_id"),
+    ("policy_delete", "policy_name"),
+    ("auth_disable", "mount_path"),
+    ("secrets_disable", "mount_path"),
+    ("audit_disable", "mount_path"),
+)
+OPENBAO_SECRET_SHAPES = (
+    ("provider-token", "hvs.ABCDEFGH1234"),
+    ("base64", "QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQtbW9yZS1tYXRlcmlhbA=="),
+    ("hex", "a" * 64),
+)
 
 
 @pytest.fixture()
@@ -136,6 +161,86 @@ class _RestrictedManager:
         self.restricted_user = user
         self.restricted_action = action
         return self.queryset
+
+
+def _openbao_procedure(operation: str, *, permissive_schema: bool = False):
+    migration_name = "netbox_rpc.migrations.0078_seed_openbao_procedures"
+    sys.modules.pop(migration_name, None)
+    migration = importlib.import_module(migration_name)
+    row = next(
+        item
+        for item in migration._PROCEDURES
+        if item["name"] == f"service.openbao.1.{operation}"
+    )
+    values = {**row, "version": 1, "enabled": True}
+    if permissive_schema:
+        values["params_schema"] = {"type": "object"}
+    return SimpleNamespace(**values)
+
+
+class _CreationSerializer:
+    def __init__(
+        self,
+        procedure: object,
+        params: dict[str, object],
+    ) -> None:
+        self.validated_data = {"procedure": procedure, "params": params}
+        self.saved = False
+        self.persisted_params: dict[str, object] | None = None
+
+    def is_valid(self, *, raise_exception: bool) -> None:
+        assert raise_exception is True
+
+    def save(self, **kwargs):
+        self.saved = True
+        self.persisted_params = dict(self.validated_data["params"])
+        return SimpleNamespace(
+            pk=901,
+            procedure=self.validated_data["procedure"],
+            params=self.validated_data["params"],
+            **kwargs,
+        )
+
+
+def _allow_creation_to_persist(
+    command_handlers: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Aggregate:
+        def __init__(self, execution: object) -> None:
+            self.execution = execution
+
+        def queue(self) -> None:
+            return None
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: None,
+    )
 
 
 def test_akvorado_target_lookup_uses_user_restricted_queryset(
@@ -782,6 +887,256 @@ def test_unsafe_config_content_is_rejected_before_serializer_save(
 
     assert set(caught.value.detail) == {"params"}
     assert serializer.saved is False
+
+
+def test_openbao_string_field_oracle_covers_the_complete_seeded_catalogue(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    migration_name = "netbox_rpc.migrations.0078_seed_openbao_procedures"
+    sys.modules.pop(migration_name, None)
+    migration = importlib.import_module(migration_name)
+    actual = set()
+    for row in migration._PROCEDURES:
+        operation = row["name"].removeprefix("service.openbao.1.")
+        for field, schema in row["params_schema"]["properties"].items():
+            declared_type = schema.get("type")
+            if declared_type == "string" or (
+                isinstance(declared_type, list) and "string" in declared_type
+            ):
+                actual.add((operation, field))
+
+    assert actual == set(OPENBAO_DECLARED_STRING_FIELDS)
+    # Prove this oracle observes the production scanner imported by the
+    # creation command rather than a test-local imitation.
+    assert command_handlers.validate_openbao_params_for_persistence.__module__ == (
+        "netbox_rpc.openbao_validation"
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "field", "shape_label", "material"),
+    [
+        (operation, field, shape_label, material)
+        for (operation, field), (shape_label, material) in product(
+            OPENBAO_DECLARED_STRING_FIELDS,
+            OPENBAO_SECRET_SHAPES,
+        )
+    ],
+)
+def test_openbao_secret_shape_is_rejected_in_every_declared_string_field_before_save(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    field: str,
+    shape_label: str,
+    material: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = _openbao_procedure(operation, permissive_schema=True)
+    serializer = _CreationSerializer(procedure, {field: material})
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+    assert set(caught.value.detail) == {"params"}, shape_label
+    assert "secret-shaped material" in caught.value.detail["params"]
+    assert serializer.saved is False
+
+
+@pytest.mark.parametrize(
+    ("case_name", "policy_content"),
+    [
+        ("json-unicode-key", r'{"pass\u0077ord":"hunter2"}'),
+        (
+            "json-unicode-value",
+            r'{"description":"hvs.\u0041BCDEFGH1234"}',
+        ),
+        ("escaped-hcl-key", r'"pass\u0077ord" = "hunter2"'),
+        ("comment", r'# {"pass\u0077ord":"hunter2"}'),
+        (
+            "heredoc",
+            "description = <<EOF\n"
+            + r'{"note":"hvs.\u0041BCDEFGH1234"}'
+            + "\nEOF",
+        ),
+        (
+            "unicode-separators",
+            '"pass\\u0077ord"\u2028=\u2029"hunter2"',
+        ),
+    ],
+)
+def test_openbao_decodes_adversarial_policy_content_before_persistence(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    policy_content: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = _openbao_procedure("policy_write")
+    params = {"policy_name": "decode-oracle", "policy_content": policy_content}
+    # The legacy raw-text schema patterns intentionally remain as defense in
+    # depth, but these inputs demonstrate their escaped-text blind spot.
+    command_handlers.jsonschema.validate(params, procedure.params_schema)
+    serializer = _CreationSerializer(procedure, params)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+    assert set(caught.value.detail) == {"params"}, case_name
+    assert serializer.saved is False
+
+
+@pytest.mark.parametrize(
+    ("case_name", "params"),
+    [
+        ("decoded-dictionary-key", {"outer": [{"password": "hunter2"}]}),
+        ("secret-shaped-key", {"outer": {"a" * 64: "ordinary"}}),
+        ("nested-provider-value", {"outer": [{"label": "hvs.ABCDEFGH1234"}]}),
+        (
+            "nested-base64-value",
+            {
+                "outer": [
+                    "QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQtbW9yZS1tYXRlcmlhbA=="
+                ]
+            },
+        ),
+    ],
+)
+def test_openbao_scanner_walks_nested_dictionary_keys_and_values_before_save(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    params: dict[str, object],
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = _openbao_procedure("inspect", permissive_schema=True)
+    serializer = _CreationSerializer(procedure, params)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+    assert set(caught.value.detail) == {"params"}, case_name
+    assert serializer.saved is False
+
+
+@pytest.mark.parametrize(
+    ("accepted", "policy_content"),
+    [
+        (True, "🙂" * 262_144),
+        (False, "🙂" * 262_144 + "x"),
+    ],
+    ids=("exactly-1-mib", "one-byte-over"),
+)
+def test_openbao_policy_content_creation_limit_is_utf8_bytes_not_characters(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted: bool,
+    policy_content: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = _openbao_procedure("policy_write")
+    serializer = _CreationSerializer(
+        procedure,
+        {"policy_name": "byte-boundary", "policy_content": policy_content},
+    )
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    user = SimpleNamespace(has_perm=lambda permission: True)
+
+    if accepted:
+        execution = command_handlers.create_execution(serializer=serializer, user=user)
+        assert execution is not None
+        assert serializer.saved is True
+        assert len(policy_content.encode("utf-8")) == 1_048_576
+    else:
+        with pytest.raises(ValidationError) as caught:
+            command_handlers.create_execution(serializer=serializer, user=user)
+        assert set(caught.value.detail) == {"params"}
+        assert serializer.saved is False
+        assert len(policy_content) < 1_048_576
+        assert len(policy_content.encode("utf-8")) == 1_048_577
+
+
+def test_legitimate_openbao_names_paths_and_real_policy_body_still_persist(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    user = SimpleNamespace(has_perm=lambda permission: True)
+    cases = (
+        (
+            _openbao_procedure("policy_write"),
+            {
+                "policy_name": "ops-read",
+                "policy_content": (
+                    'path "kv/data/operations/*" {\n'
+                    '  capabilities = ["read", "list"]\n'
+                    "}"
+                ),
+            },
+        ),
+        (
+            _openbao_procedure("auth_enable"),
+            {"auth_type": "approle", "mount_path": "machine/auth"},
+        ),
+    )
+
+    for procedure, params in cases:
+        serializer = _CreationSerializer(procedure, params)
+        command_handlers.create_execution(serializer=serializer, user=user)
+        assert serializer.saved is True
+        assert all(serializer.persisted_params[key] == value for key, value in params.items())
+
+
+def test_openbao_scanner_does_not_change_non_openbao_creation(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    procedure = SimpleNamespace(
+        name="service.example.1.write",
+        handler_id="service.example_1.write",
+        enabled=True,
+        approval_required=False,
+        params_schema={"type": "object"},
+        timeout_seconds=60,
+    )
+    params = {"public_reference": "hvs.ABCDEFGH1234"}
+    serializer = _CreationSerializer(procedure, params)
+
+    command_handlers.create_execution(
+        serializer=serializer,
+        user=SimpleNamespace(has_perm=lambda permission: True),
+    )
+
+    assert serializer.saved is True
+    assert serializer.persisted_params["public_reference"] == params["public_reference"]
 
 
 @pytest.mark.parametrize(

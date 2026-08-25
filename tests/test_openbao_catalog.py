@@ -557,6 +557,42 @@ def test_openbao_normalizer_matches_the_backend_sensitive_field_oracle(
     assert caught.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
 
 
+@pytest.mark.parametrize(
+    ("accepted", "policy_content"),
+    [
+        (True, "🙂" * 262_144),
+        (False, "🙂" * 262_144 + "x"),
+    ],
+    ids=("exactly-1-mib", "one-byte-over"),
+)
+def test_openbao_normalizer_policy_content_limit_is_utf8_bytes(
+    jobs_module,
+    accepted: bool,
+    policy_content: str,
+) -> None:
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.openbao.1.policy_write",
+            handler_id="service.openbao_1.policy_write",
+        ),
+        params={"policy_name": "byte-boundary", "policy_content": policy_content},
+        target_display="bao01",
+        target_model_label="dcim.device",
+        assigned_object_id=871,
+    )
+
+    if accepted:
+        normalized = jobs_module.normalize_execution_params(execution)
+        assert normalized["policy_content"] == policy_content
+        assert normalized["command_fingerprint"]["policy_content_bytes"] == 1_048_576
+    else:
+        with pytest.raises(jobs_module.RPCExecutionError) as caught:
+            jobs_module.normalize_execution_params(execution)
+        assert caught.value.code == "RPC_PARAM_INVALID"
+        assert len(policy_content) < 1_048_576
+        assert len(policy_content.encode("utf-8")) == 1_048_577
+
+
 def test_openbao_normalizer_rejects_virtual_machine_target(jobs_module) -> None:
     execution = SimpleNamespace(
         procedure=SimpleNamespace(

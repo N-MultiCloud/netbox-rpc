@@ -26,6 +26,10 @@ from ..domain.normalization import (
     validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
+from ..openbao_validation import (
+    OpenBaoSecretIngressError,
+    validate_openbao_params_for_persistence,
+)
 from .. import staging_rotation_contract as staging_contract
 from .. import gitea_upgrade_contract as gitea_contract
 
@@ -346,6 +350,15 @@ def create_execution(*, serializer: Any, user: object) -> object:
             jsonschema.validate(params, procedure.params_schema)
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
+
+    # OpenBao params are persisted before the execution backend can apply its
+    # own recursive scanner.  Scan the complete caller-supplied object here,
+    # including nested dictionary keys and decoded structured string content,
+    # so no secret-shaped value can enter RPCExecution.params even transiently.
+    try:
+        validate_openbao_params_for_persistence(procedure.name, params)
+    except OpenBaoSecretIngressError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
 
     _require_viewable_assigned_object(serializer.validated_data, procedure, user)
     _require_staging_rotation_assigned_object(

@@ -468,7 +468,7 @@ _OPENBAO_MOUNT_PATH_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?$"
 )
-_OPENBAO_MAX_CONTENT_LEN = 1024 * 1024
+_OPENBAO_MAX_CONTENT_BYTES = 1024 * 1024
 _OPENBAO_ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<prefix>(?<![A-Za-z0-9_.-])"
     r"(?P<key>[\"']?[A-Za-z0-9_.-]+[\"']?)\s*[:=]\s*)"
@@ -1726,7 +1726,10 @@ def _normalize_openbao_content(raw_content: object) -> str:
             "policy_content must be a non-empty string.",
             code="RPC_PARAM_INVALID",
         )
-    if "\x00" in raw_content or len(raw_content) > _OPENBAO_MAX_CONTENT_LEN:
+    if (
+        "\x00" in raw_content
+        or len(raw_content.encode("utf-8")) > _OPENBAO_MAX_CONTENT_BYTES
+    ):
         raise RPCExecutionError(
             "policy_content is oversized or contains NUL bytes.",
             code="RPC_PARAM_INVALID",
