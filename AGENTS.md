@@ -151,18 +151,18 @@ three read-only `RPCExecution` presentation properties:
 - `source_label` / `intent_reference` — how the run was issued. A run created
   directly (API/UI `RPCExecution` POST) reads as `Direct`. A run created by the
   intent executor (`command_handlers.execute_intent()`, see **Intents** above)
-  reads as `Intent: <name>`, because `execute_intent()` stamps the
-  underscore-prefixed `_intent_name`/`_intent` marker into that child's stored
-  `params` after creation. Do **not** reuse a bare `intent` params key for a
-  procedure's own parameter — only the underscore-prefixed internal keys are
-  treated as origin markers.
+  reads as `Intent: <name>` through the execution's read-only `source_intent`
+  foreign key. Intent attribution is persisted in the original execution insert
+  and never mixed into caller `params`. The underscore-prefixed `_intent_name` /
+  `_intent` keys remain a read-only compatibility fallback for historical rows;
+  new execution paths must not write them.
 - `result_steps` — returns `result.steps[]` (empty when absent/malformed). The
   execution detail template renders it as a **Command Output** card (command,
   operation, exit code, stdout, stderr). Keep this output bounded/redacted per the
   event-data rule above; never surface secrets or unbounded raw output.
 
-Any future intent executor that records an origin marker in `params` must keep it
-under the `_intent`-prefixed keys so this attribution stays correct.
+Any future intent executor must use `source_intent`; post-creation `params`
+mutation is forbidden because it can bypass family-specific persistence guards.
 
 ## DDD / CQRS / Event Sourcing
 
@@ -371,9 +371,10 @@ done; the procedures (with their commands) declare *how*. See
   never bypass approval on a destructive procedure. `sequential` and `parallel`
   both fan out synchronously in sequence order today (v1); the mode distinction
   for true concurrent/chained dispatch is a documented future enhancement, not
-  required by this safety contract. A successful child is stamped with the
-  underscore-prefixed `_intent`/`_intent_name` origin marker in `params` *after*
-  creation (so it never collides with `params_schema` validation) — see
+  required by this safety contract. A successful child stores the intent in the
+  read-only `RPCExecution.source_intent` foreign key in the same insert as the
+  rest of the execution; attribution never enters or mutates `params`, so closed
+  `params_schema` validation remains intact — see
   "Procedure Runs Tab" below and `docs/intents.md` → "Running an intent" for
   the full request/response contract. Seeded by additive migration `0039_rpcintent` (depends on the
   `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
@@ -753,9 +754,9 @@ pending approval or distinct-actor check.
   the same string the operator read. A dot **inside** a segment
   (`/etc/influxdb3/tls/server.crt`) stays legal. `tls_cert`/`tls_key` are
   both-or-neither absolute paths on *both* procedures. Unknown parameters are
-  rejected here as well as by
-  `additionalProperties: false`, tolerating only the platform-stamped
-  `_intent`/`_intent_name`/`_timeout_seconds_snapshot` keys. Most importantly the
+  rejected here as well as by `additionalProperties: false`, tolerating the
+  platform-stamped `_timeout_seconds_snapshot` key plus legacy `_intent` /
+  `_intent_name` markers on historical executions. Most importantly the
   normalizer reproduces the installer's own security gate: **a remote
   `http_bind` with no TLS is refused** (`RPC_PARAM_INVALID`) unless the caller
   explicitly sets `allow_plaintext_remote=true`; an omitted `http_bind` is
@@ -1848,8 +1849,10 @@ enforcement for every other procedure family is tracked in **#253**.
 
 `openbao_validation.validate_openbao_params_for_persistence()` is the primary
 secret-ingress control. `create_execution()` runs it after schema validation and
-before `serializer.save()` for every `service.openbao.1.*` procedure, over the
-complete caller params object: all nested dictionary keys and values are
+all platform-owned parameter stamps, immediately before `serializer.save()`, for
+every `service.openbao.1.*` procedure. `RPCExecution.save()` repeats it over the
+final ORM payload for direct script/job creation and params-save paths. All nested
+dictionary keys and values are
 classified by field name and by secret shape (OpenBao token prefixes, long
 base64, long hex, private keys, authorization material, and credential-bearing
 URLs). Accepted JSON documents are parsed and their decoded keys/values are
@@ -1857,7 +1860,12 @@ walked; HCL-style quoted strings are lexically decoded before assignment
 classification, and escaped assignment identifiers are refused. This closes
 escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
 enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
-procedures.
+procedures. For top-level schema-declared identifier fields (`policy_name`,
+`mount_path`, `peer_id`, `snapshot_name`), length plus the base64 alphabet is not
+sufficient evidence: low-entropy operational identifiers up to the advertised
+128-character limit are accepted, while provider tokens, high-entropy
+base64/base64url, and long hex remain refused. Free-form `policy_content` keeps
+its existing full shape scan unchanged.
 
 The existing `policy_content` schema exclusions and normalizer field-name/shape
 checks remain as defense in depth. Public metadata such as `key_id`,

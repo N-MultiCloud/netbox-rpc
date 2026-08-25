@@ -15,15 +15,23 @@ from django.urls import reverse
 from netbox_rpc import tables
 from netbox_rpc.models import RPCExecution
 
-from ._common import device_ct, make_execution, make_procedure, make_user
+from ._common import device_ct, make_execution, make_intent, make_procedure, make_user
 
 
-def _make_execution(procedure, *, params=None, result=None, user=None):
+def _make_execution(
+    procedure,
+    *,
+    params=None,
+    result=None,
+    user=None,
+    source_intent=None,
+):
     return RPCExecution.objects.create(
         procedure=procedure,
         assigned_object_type=device_ct(),
         assigned_object_id=1,
         requested_by=user,
+        source_intent=source_intent,
         params=params or {},
         result=result or {},
     )
@@ -36,13 +44,14 @@ class ExecutionPresentationHelperTests(TestCase):
         assert ex.intent_reference is None
         assert ex.source_label == "Direct"
 
-    def test_intent_marker_in_params_is_surfaced(self):
+    def test_source_intent_relation_is_surfaced(self):
         proc = make_procedure("os.linux.test.intent")
-        ex = _make_execution(proc, params={"_intent_name": "deploy.dns.stack"})
+        intent = make_intent("deploy.dns.stack")
+        ex = _make_execution(proc, source_intent=intent)
         assert ex.intent_reference == "deploy.dns.stack"
         assert ex.source_label == "Intent: deploy.dns.stack"
 
-    def test_intent_marker_alternate_key(self):
+    def test_legacy_intent_marker_alternate_key(self):
         proc = make_procedure("os.linux.test.intent2")
         ex = _make_execution(proc, params={"_intent": "grouped.run"})
         assert ex.intent_reference == "grouped.run"
@@ -76,7 +85,8 @@ class ExecutionTableSourceColumnTests(TestCase):
     def test_source_column_renders_direct_and_intent(self):
         proc = make_procedure("os.linux.test.table")
         direct = _make_execution(proc)
-        intent = _make_execution(proc, params={"_intent_name": "batch.job"})
+        source_intent = make_intent("batch.job")
+        intent = _make_execution(proc, source_intent=source_intent)
         table = tables.RPCExecutionTable(RPCExecution.objects.all())
         rendered = {row.record.pk: row.get_cell("source") for row in table.rows}
         assert rendered[direct.pk] == "Direct"
@@ -107,7 +117,11 @@ class ProcedureRunsTabViewTests(TestCase):
     def test_runs_tab_renders_owner_and_source(self):
         proc = make_procedure("os.linux.test.runs.render")
         _make_execution(proc, user=self.user)
-        _make_execution(proc, user=self.user, params={"_intent_name": "batch.job"})
+        _make_execution(
+            proc,
+            user=self.user,
+            source_intent=make_intent("batch.job"),
+        )
 
         url = reverse("plugins:netbox_rpc:rpcprocedure_runs", args=[proc.pk])
         html = self.client.get(url).content.decode()
@@ -165,6 +179,10 @@ class ExecutionDetailCommandOutputTests(TestCase):
 
     def test_detail_shows_intent_source(self):
         proc = make_procedure("os.linux.test.detail.intent")
-        ex = _make_execution(proc, user=self.user, params={"_intent_name": "grouped.run"})
+        ex = _make_execution(
+            proc,
+            user=self.user,
+            source_intent=make_intent("grouped.run"),
+        )
         html = self._detail_html(ex)
         assert "grouped.run" in html

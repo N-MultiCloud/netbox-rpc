@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from itertools import product
@@ -33,6 +34,33 @@ OPENBAO_SECRET_SHAPES = (
     ("provider-token", "hvs.ABCDEFGH1234"),
     ("base64", "QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQtbW9yZS1tYXRlcmlhbA=="),
     ("hex", "a" * 64),
+)
+OPENBAO_HIGH_ENTROPY_BASE64 = "X7J3qP9mZv1KcR8sTy4NbW6LdA2HgU0eFo5IiE_aBcD"
+OPENBAO_OPERATIONAL_IDENTIFIER_CASES = (
+    (
+        "policy_write",
+        "policy_name",
+        "production-kubernetes-authentication-read-only-policy",
+        {"policy_content": 'path "kv/data/production/*" { capabilities = ["read"] }'},
+    ),
+    (
+        "auth_enable",
+        "mount_path",
+        "production-kubernetes-authentication-backend",
+        {"auth_type": "kubernetes"},
+    ),
+    (
+        "raft_remove_peer",
+        "peer_id",
+        "openbao-production-eu-west-peer-identifier-000001",
+        {},
+    ),
+    (
+        "snapshot_create",
+        "snapshot_name",
+        "openbao-production-snapshot-20260825T120000Z",
+        {},
+    ),
 )
 
 
@@ -187,6 +215,7 @@ class _CreationSerializer:
         self.validated_data = {"procedure": procedure, "params": params}
         self.saved = False
         self.persisted_params: dict[str, object] | None = None
+        self.persisted_kwargs: dict[str, object] | None = None
 
     def is_valid(self, *, raise_exception: bool) -> None:
         assert raise_exception is True
@@ -194,6 +223,7 @@ class _CreationSerializer:
     def save(self, **kwargs):
         self.saved = True
         self.persisted_params = dict(self.validated_data["params"])
+        self.persisted_kwargs = dict(kwargs)
         return SimpleNamespace(
             pk=901,
             procedure=self.validated_data["procedure"],
@@ -1111,6 +1141,167 @@ def test_legitimate_openbao_names_paths_and_real_policy_body_still_persist(
         command_handlers.create_execution(serializer=serializer, user=user)
         assert serializer.saved is True
         assert all(serializer.persisted_params[key] == value for key, value in params.items())
+
+
+@pytest.mark.parametrize(
+    ("operation", "field", "identifier", "companion_params"),
+    OPENBAO_OPERATIONAL_IDENTIFIER_CASES,
+)
+def test_long_operational_openbao_identifiers_are_accepted_at_creation(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    field: str,
+    identifier: str,
+    companion_params: dict[str, object],
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    if field == "mount_path":
+        boundary_identifier = identifier + "/" + ("r" * 64)
+        boundary_identifier += "/" + ("r" * (128 - len(boundary_identifier) - 1))
+    else:
+        boundary_identifier = (identifier + "-" + ("regional-archive-" * 16))[:128]
+
+    for accepted_identifier in (identifier, boundary_identifier):
+        params = {**companion_params, field: accepted_identifier}
+        serializer = _CreationSerializer(_openbao_procedure(operation), params)
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+        assert 40 <= len(accepted_identifier) <= 128
+        assert serializer.saved is True
+        assert serializer.persisted_params[field] == accepted_identifier
+    assert len(boundary_identifier) == 128
+
+
+@pytest.mark.parametrize(
+    ("operation", "field", "_identifier", "companion_params"),
+    OPENBAO_OPERATIONAL_IDENTIFIER_CASES,
+)
+@pytest.mark.parametrize(
+    "secret_material",
+    (
+        "hvs.ABCDEFGH1234",
+        OPENBAO_HIGH_ENTROPY_BASE64,
+        "a" * 64,
+    ),
+    ids=("provider-token", "high-entropy-base64url", "hex"),
+)
+def test_secret_material_in_openbao_identifier_fields_is_refused_at_creation(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    field: str,
+    _identifier: str,
+    companion_params: dict[str, object],
+    secret_material: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    serializer = _CreationSerializer(
+        _openbao_procedure(operation),
+        {**companion_params, field: secret_material},
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(has_perm=lambda permission: True),
+        )
+
+    assert set(caught.value.detail) == {"params"}
+    assert serializer.saved is False
+
+
+def test_identifier_entropy_exception_does_not_change_free_form_scanning(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    long_identifier_shape = "production-kubernetes-authentication-backend"
+
+    with pytest.raises(command_handlers.OpenBaoSecretIngressError):
+        command_handlers.validate_openbao_params_for_persistence(
+            "service.openbao.1.policy_write",
+            {"policy_content": long_identifier_shape},
+        )
+    with pytest.raises(command_handlers.OpenBaoSecretIngressError):
+        command_handlers.validate_openbao_params_for_persistence(
+            "service.openbao.1.inspect",
+            {"nested": {"mount_path": long_identifier_shape}},
+        )
+
+
+def test_openbao_source_intent_is_persisted_separately_from_final_params(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    _allow_creation_to_persist(command_handlers, monkeypatch)
+    token_shaped_name = "hvs.ABCDEFGH1234"
+    source_intent = SimpleNamespace(pk=77, name=token_shaped_name)
+    serializer = _CreationSerializer(_openbao_procedure("inspect"), {})
+
+    execution = command_handlers.create_execution(
+        serializer=serializer,
+        user=SimpleNamespace(has_perm=lambda permission: True),
+        source_intent=source_intent,
+    )
+
+    assert serializer.saved is True
+    assert serializer.persisted_kwargs["source_intent"] is source_intent
+    assert execution.source_intent is source_intent
+    assert token_shaped_name not in json.dumps(serializer.persisted_params)
+    assert "_intent" not in serializer.persisted_params
+    assert "_intent_name" not in serializer.persisted_params
+
+
+def test_intent_fan_out_never_mutates_openbao_params_after_creation(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = _openbao_procedure("inspect")
+    procedure.pk = 901
+    token_shaped_name = "hvs.ABCDEFGH1234"
+    intent = SimpleNamespace(
+        pk=78,
+        name=token_shaped_name,
+        enabled=True,
+        ordered_intent_procedures=[SimpleNamespace(procedure=procedure)],
+    )
+    serializer_module = types.ModuleType("netbox_rpc.api.serializers")
+
+    class Serializer:
+        def __init__(self, *, data: dict[str, object]) -> None:
+            self.initial_data = data
+
+    serializer_module.RPCExecutionSerializer = Serializer
+    monkeypatch.setitem(sys.modules, "netbox_rpc.api.serializers", serializer_module)
+    persisted: list[SimpleNamespace] = []
+
+    def persist(*, serializer, user, source_intent=None):
+        row = SimpleNamespace(
+            params=dict(serializer.initial_data["params"]),
+            source_intent=source_intent,
+        )
+        persisted.append(row)
+        return row
+
+    monkeypatch.setattr(command_handlers, "create_execution", persist)
+    [execution] = command_handlers.execute_intent(
+        intent,
+        SimpleNamespace(has_perm=lambda permission: True),
+        assigned_object_type=SimpleNamespace(app_label="dcim", model="device"),
+        assigned_object_id=32,
+    )
+
+    assert persisted == [execution]
+    assert execution.source_intent is intent
+    assert token_shaped_name not in json.dumps(execution.params)
+    assert execution.params == {}
 
 
 def test_openbao_scanner_does_not_change_non_openbao_creation(

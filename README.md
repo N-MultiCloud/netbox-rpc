@@ -250,8 +250,8 @@ The procedure object page has a **Runs** tab
 (`/plugins/rpc/procedures/<pk>/runs/`) listing every `RPCExecution` for that
 procedure, newest first, with a badge of the run count. Each row shows the run's
 user owner (`requested_by`), how it was issued (**Source** — `Direct`, or
-`Intent: <name>` when the intent executor stamped an `_intent_name`/`_intent`
-marker into `params`, see **Intents** below), status, target, backend, and
+`Intent: <name>` through the read-only `source_intent` relation; intent names are
+never copied into `params`, see **Intents** below), status, target, backend, and
 timing, and links to the execution detail. The execution detail additionally renders a **Command Output**
 card built from `result.steps[]` — the exact command(s) issued on the target and
 each command's stdout/stderr/exit code — so a run's issued commands and their
@@ -1145,8 +1145,10 @@ enforcement for every other procedure family is tracked in **#253**.
 
 `openbao_validation.validate_openbao_params_for_persistence()` is the primary
 secret-ingress control. `create_execution()` runs it after schema validation and
-before `serializer.save()` for every `service.openbao.1.*` procedure, over the
-complete caller params object: all nested dictionary keys and values are
+all platform-owned parameter stamps, immediately before `serializer.save()`, for
+every `service.openbao.1.*` procedure. `RPCExecution.save()` repeats it over the
+final ORM payload for direct script/job creation and params-save paths. All nested
+dictionary keys and values are
 classified by field name and by secret shape (OpenBao token prefixes, long
 base64, long hex, private keys, authorization material, and credential-bearing
 URLs). Accepted JSON documents are parsed and their decoded keys/values are
@@ -1154,7 +1156,11 @@ walked; HCL-style quoted strings are lexically decoded before assignment
 classification, and escaped assignment identifiers are refused. This closes
 escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
 enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
-procedures.
+procedures. Top-level schema-declared identifiers (`policy_name`, `mount_path`,
+`peer_id`, `snapshot_name`) distinguish low-entropy operational names from
+high-entropy base64/base64url material, so realistic names up to 128 characters
+remain usable while provider tokens, high-entropy base64, and long hex are still
+refused. Free-form `policy_content` keeps its existing full shape scan unchanged.
 
 The existing `policy_content` schema exclusions and normalizer field-name/shape
 checks remain as defense in depth. Public metadata such as `key_id`,

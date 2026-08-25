@@ -8,8 +8,10 @@ params object before ``RPCExecution`` persistence.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 import json
+import math
 import re
 from typing import Any
 
@@ -54,6 +56,15 @@ _SENSITIVE_KEY_PREFIXES = frozenset(
 _NON_SECRET_FIELD_NAMES = frozenset(
     {"key_id", "key_label", "key_name", "tls_key_file", "token_label"}
 )
+_IDENTIFIER_FIELD_NAMES = frozenset(
+    {"mount_path", "peer_id", "policy_name", "snapshot_name"}
+)
+# Operational identifiers are schema-bounded to 128 characters. A long run of
+# base64-alphabet characters is not enough evidence that one is a credential:
+# realistic hyphenated names and timestamped snapshots have exactly that shape.
+# High-entropy base64/base64url remains forbidden in these fields, while
+# free-form fields retain the existing match-on-shape behavior unchanged.
+_BASE64_IDENTIFIER_MIN_ENTROPY_BITS = 4.5
 _ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<prefix>(?<![A-Za-z0-9_.-])"
     r"(?P<key>[\"']?[A-Za-z0-9_.-]+[\"']?)\s*[:=]\s*)"
@@ -97,7 +108,6 @@ _SECRET_SHAPE_PATTERNS = (
     _AUTHORIZATION_RE,
     _URL_CREDENTIAL_RE,
     _TOKEN_LITERAL_RE,
-    _BASE64_MATERIAL_RE,
     _HEX_MATERIAL_RE,
     _KEY_MATERIAL_LINE_RE,
 )
@@ -117,11 +127,12 @@ def validate_openbao_params_for_persistence(
 ) -> None:
     """Reject secret ingress anywhere in an OpenBao params object.
 
-    Dictionary keys and values are both scanned recursively.  String values
-    are checked by secret shape regardless of their field name.  Accepted JSON
-    documents are decoded and walked, while HCL-style quoted strings are
-    lexically decoded before assignment classification so escaped field names
-    and values cannot hide from the scanner.
+    Dictionary keys and values are both scanned recursively. String values are
+    checked by secret shape; schema-declared identifier fields apply the narrow
+    entropy distinction documented below. Accepted JSON documents are decoded
+    and walked, while HCL-style quoted strings are lexically decoded before
+    assignment classification so escaped field names and values cannot hide
+    from the scanner.
 
     Non-OpenBao procedures return immediately and retain their existing
     admission behavior.
@@ -131,10 +142,16 @@ def validate_openbao_params_for_persistence(
         return
     if not isinstance(params, Mapping):
         raise OpenBaoSecretIngressError("OpenBao params must be an object.")
-    _scan_value(params, decode_documents=True)
+    _scan_value(params, decode_documents=True, allow_identifier_fields=True)
 
 
-def _scan_value(value: object, *, decode_documents: bool) -> None:
+def _scan_value(
+    value: object,
+    *,
+    decode_documents: bool,
+    identifier_field: str | None = None,
+    allow_identifier_fields: bool = False,
+) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if isinstance(key, str):
@@ -150,7 +167,17 @@ def _scan_value(value: object, *, decode_documents: bool) -> None:
                     raise OpenBaoSecretIngressError(
                         "policy_content exceeds the 1 MiB UTF-8 byte limit."
                     )
-            _scan_value(child, decode_documents=decode_documents)
+            _scan_value(
+                child,
+                decode_documents=decode_documents,
+                identifier_field=(
+                    key
+                    if allow_identifier_fields
+                    and isinstance(key, str)
+                    and key in _IDENTIFIER_FIELD_NAMES
+                    else None
+                ),
+            )
         return
     if isinstance(value, Sequence) and not isinstance(
         value,
@@ -160,11 +187,20 @@ def _scan_value(value: object, *, decode_documents: bool) -> None:
             _scan_value(child, decode_documents=decode_documents)
         return
     if isinstance(value, str):
-        _scan_text(value, decode_documents=decode_documents)
+        _scan_text(
+            value,
+            decode_documents=decode_documents,
+            identifier_field=identifier_field,
+        )
 
 
-def _scan_text(value: str, *, decode_documents: bool) -> None:
-    _reject_secret_shapes(value)
+def _scan_text(
+    value: str,
+    *,
+    decode_documents: bool,
+    identifier_field: str | None = None,
+) -> None:
+    _reject_secret_shapes(value, identifier_field=identifier_field)
     _reject_sensitive_assignments(value)
 
     if decode_documents:
@@ -252,9 +288,34 @@ def _decode_hcl_escapes(value: str) -> str:
     return "".join(decoded)
 
 
-def _reject_secret_shapes(value: str) -> None:
+def _reject_secret_shapes(
+    value: str,
+    *,
+    identifier_field: str | None = None,
+) -> None:
     if any(pattern.search(value) for pattern in _SECRET_SHAPE_PATTERNS):
         _raise_secret_ingress()
+    base64_matches = tuple(_BASE64_MATERIAL_RE.finditer(value))
+    if not base64_matches:
+        return
+    if identifier_field in _IDENTIFIER_FIELD_NAMES and all(
+        match.span() == (0, len(value))
+        and _shannon_entropy_bits(match.group(0).rstrip("="))
+        < _BASE64_IDENTIFIER_MIN_ENTROPY_BITS
+        for match in base64_matches
+    ):
+        return
+    _raise_secret_ingress()
+
+
+def _shannon_entropy_bits(value: str) -> float:
+    if not value:
+        return 0.0
+    length = len(value)
+    return -sum(
+        (count / length) * math.log2(count / length)
+        for count in Counter(value).values()
+    )
 
 
 def _reject_sensitive_assignments(value: str) -> None:

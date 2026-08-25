@@ -183,8 +183,8 @@ class IntentExecutorFanOutTests(TestCase):
 
 
 class IntentExecutorOriginMarkerTests(TestCase):
-    """Requirement (c): the ``_intent``/``_intent_name`` origin marker lands in
-    child params and the Runs-tab attribution reads ``Intent: <name>``."""
+    """Requirement (c): origin is a relation, never child params, and the Runs
+    tab attribution still reads ``Intent: <name>``."""
 
     def setUp(self):
         enable_rpc_integration()
@@ -195,7 +195,7 @@ class IntentExecutorOriginMarkerTests(TestCase):
         "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
     )
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
-    def test_origin_marker_lands_in_child_params_and_runs_tab_label(
+    def test_origin_relation_is_persisted_without_mutating_child_params(
         self, enqueue, _fetch
     ):
         enqueue.return_value = mock.Mock(pk=1)
@@ -210,8 +210,9 @@ class IntentExecutorOriginMarkerTests(TestCase):
         )
 
         child.refresh_from_db()
-        assert child.params["_intent"] == intent.pk
-        assert child.params["_intent_name"] == intent.name
+        assert child.source_intent_id == intent.pk
+        assert "_intent" not in child.params
+        assert "_intent_name" not in child.params
         assert child.intent_reference == intent.name
         assert child.source_label == f"Intent: {intent.name}"
 
@@ -219,13 +220,12 @@ class IntentExecutorOriginMarkerTests(TestCase):
         "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
     )
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
-    def test_caller_params_survive_schema_validation_and_marker_is_added_after(
+    def test_caller_params_survive_closed_schema_with_separate_origin_relation(
         self, enqueue, _fetch
     ):
         # additionalProperties: false is the common shape of seeded procedure
-        # schemas -- proves the marker is stamped AFTER create_execution()'s
-        # jsonschema.validate() call, not merged into the params it validates
-        # (which would 400 for any real procedure using this schema shape).
+        # schemas -- proves attribution is not merged into the params validated
+        # by create_execution() (which would 400 for this real schema shape).
         enqueue.return_value = mock.Mock(pk=1)
         proc = make_procedure(
             "os.linux.test.intent.schema",
@@ -247,8 +247,39 @@ class IntentExecutorOriginMarkerTests(TestCase):
 
         child.refresh_from_db()
         assert child.params["foo"] == "bar"
-        assert child.params["_intent_name"] == intent.name
-        assert child.params["_intent"] == intent.pk
+        assert set(child.params) == {"foo", "_timeout_seconds_snapshot"}
+        assert child.source_intent_id == intent.pk
+
+    @mock.patch(
+        "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None
+    )
+    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
+    def test_token_shaped_openbao_intent_name_never_enters_persisted_params(
+        self, enqueue, _fetch
+    ):
+        enqueue.return_value = mock.Mock(pk=1)
+        proc = make_procedure(
+            "service.openbao.1.inspect",
+            params_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+        intent = make_intent("hvs.ABCDEFGH1234", procedures=[proc])
+
+        [child] = command_handlers.execute_intent(
+            intent,
+            self.user,
+            assigned_object_type=device_ct(),
+            assigned_object_id=self.device.pk,
+        )
+
+        child.refresh_from_db()
+        assert child.source_intent_id == intent.pk
+        assert intent.name not in str(child.params)
+        assert "_intent" not in child.params
+        assert "_intent_name" not in child.params
 
 
 class IntentExecutorGateRefireTests(TestCase):
@@ -461,7 +492,9 @@ class IntentExecutorHttpTests(TestCase):
             proc_b.pk,
         ]
         for row in resp.data:
-            assert row["params"]["_intent_name"] == intent.name
+            assert row["source_intent"] == intent.pk
+            assert "_intent" not in row["params"]
+            assert "_intent_name" not in row["params"]
 
     @mock.patch(
         "netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None

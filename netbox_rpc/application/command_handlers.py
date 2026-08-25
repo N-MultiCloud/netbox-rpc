@@ -293,7 +293,12 @@ def _resolve_validated_protected_backend_target(
     return target
 
 
-def create_execution(*, serializer: Any, user: object) -> object:
+def create_execution(
+    *,
+    serializer: Any,
+    user: object,
+    source_intent: object | None = None,
+) -> object:
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
     serializer.is_valid(raise_exception=True)
@@ -351,10 +356,9 @@ def create_execution(*, serializer: Any, user: object) -> object:
         except jsonschema.ValidationError as exc:
             raise drf_serializers.ValidationError({"params": exc.message}) from exc
 
-    # OpenBao params are persisted before the execution backend can apply its
-    # own recursive scanner.  Scan the complete caller-supplied object here,
-    # including nested dictionary keys and decoded structured string content,
-    # so no secret-shaped value can enter RPCExecution.params even transiently.
+    # Reject caller-supplied OpenBao secret material before target lookups or
+    # capability work. A second scan immediately before persistence below
+    # covers the complete payload after platform-owned stamps.
     try:
         validate_openbao_params_for_persistence(procedure.name, params)
     except OpenBaoSecretIngressError as exc:
@@ -401,10 +405,9 @@ def create_execution(*, serializer: Any, user: object) -> object:
     # atomic block, or nothing does -- mirrors how _scrub_password_param()
     # already mutates `params` in place before save. Stamped after
     # params_schema validation above, so a schema declaring
-    # additionalProperties: false never rejects the injected key (the same
-    # reason the intent origin marker is stamped post-creation instead --
-    # execute_intent() only learns the child execution's pk after
-    # create_execution() returns it, so that marker cannot be folded in here).
+    # additionalProperties: false never rejects the injected key.
+    # ``source_intent`` attribution is a separate model relation and never
+    # enters this schema-governed payload.
     # RPCExecutionJob.enqueue() below and jobs._call_backend() at dispatch
     # time both read this SAME frozen value, so a later edit to
     # procedure.timeout_seconds while this execution sits queued can never let
@@ -414,11 +417,24 @@ def create_execution(*, serializer: Any, user: object) -> object:
     timeout_seconds_snapshot = procedure.timeout_seconds
     params[RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY] = timeout_seconds_snapshot
 
+    # Scan the COMPLETE final object immediately before the atomic insert,
+    # after every platform-owned params mutation. RPCExecution.save() repeats
+    # this family-scoped check at the ORM boundary so script/job-created rows
+    # cannot bypass it. The intent relation is persisted separately below.
+    try:
+        validate_openbao_params_for_persistence(procedure.name, params)
+    except OpenBaoSecretIngressError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+
     with transaction.atomic():
         # #166: a normal requester cannot select an arbitrary backend — the
         # authoritative selected backend from RPC settings always wins over any
         # client-supplied ``backend_id``.
-        execution = serializer.save(requested_by=user, backend=authoritative_backend_id)
+        execution = serializer.save(
+            requested_by=user,
+            backend=authoritative_backend_id,
+            source_intent=source_intent,
+        )
         aggregate = RPCExecutionAggregate(execution)
         if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
             try:
@@ -1380,20 +1396,12 @@ def execute_intent(
     behaviour is identical for both; true concurrent/chained dispatch is a
     future enhancement, not required for the safety contract in issue #130).
 
-    Origin marker: after a child is successfully created (i.e. *after*
-    ``params_schema`` validation has already run against the caller-supplied
-    ``params`` unmodified — stamping the marker beforehand would break any
-    procedure whose schema sets ``"additionalProperties": false``, the common
-    case for seeded procedures), the underscore-prefixed ``_intent`` /
-    ``_intent_name`` keys (``RPCExecution._INTENT_PARAM_KEYS``) are patched
-    into the child's stored ``params`` so the Runs tab attributes it as
-    ``Intent: <name>`` (see AGENTS.md "Procedure Runs Tab"). ``params`` is a
-    plain field, not part of the event-sourced projection (only
-    ``normalized_params`` is — see ``domain/projection.py``), so patching it
-    after creation does not touch the aggregate/event stream.
+    Origin attribution: ``create_execution()`` persists a structured
+    ``source_intent`` foreign-key reference in the child's original insert.
+    Intent names never enter ``params``, and there is no post-creation params
+    mutation. This preserves closed ``params_schema`` validation while the
+    Runs tab can still render ``Intent: <name>`` through the relation.
     """
-    from ..models import RPCExecution
-
     if not user.has_perm("netbox_rpc.execute_rpcintent"):
         raise PermissionDenied("execute_rpcintent permission is required.")
     if not intent.enabled:
@@ -1440,15 +1448,11 @@ def execute_intent(
         # approval_required, ValidationError for params/capability/etc.)
         # propagates unmodified out of execute_intent(), exactly as it would
         # from a direct RPCExecution create — this IS the no-bypass proof.
-        execution = create_execution(serializer=serializer, user=user)
-
-        stamped_params = {
-            **(execution.params or {}),
-            "_intent": intent.pk,
-            "_intent_name": intent.name,
-        }
-        RPCExecution.objects.filter(pk=execution.pk).update(params=stamped_params)
-        execution.params = stamped_params
+        execution = create_execution(
+            serializer=serializer,
+            user=user,
+            source_intent=intent,
+        )
         children.append(execution)
 
     return children

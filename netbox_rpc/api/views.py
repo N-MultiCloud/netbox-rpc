@@ -222,6 +222,7 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "assigned_object_type",
         "requested_by",
         "approved_by",
+        "source_intent",
     ).prefetch_related("procedure__commands", "tags")
     serializer_class = RPCExecutionSerializer
     filterset_class = filtersets.RPCExecutionFilterSet

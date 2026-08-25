@@ -1,3 +1,4 @@
+import ast
 import runpy
 from pathlib import Path
 
@@ -10,6 +11,58 @@ def read(path: str) -> str:
 
 def load_constants() -> dict:
     return runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
+
+
+def test_execution_params_have_no_post_creation_mutation_path() -> None:
+    def is_params_attribute(target: ast.AST) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "params"
+        ) or (
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Attribute)
+            and target.value.attr == "params"
+        )
+
+    violations = []
+    for path in sorted((ROOT / "netbox_rpc").rglob("*.py")):
+        if "migrations" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if any(is_params_attribute(target) for target in targets):
+                    violations.append((path.name, node.lineno, "attribute assignment"))
+            if not isinstance(node, ast.Call):
+                continue
+            method = getattr(node.func, "attr", "")
+            if method == "update" and any(
+                keyword.arg == "params" for keyword in node.keywords
+            ):
+                violations.append((path.name, node.lineno, "queryset update"))
+            if method == "save" and any(
+                keyword.arg == "update_fields"
+                and isinstance(keyword.value, (ast.List, ast.Tuple, ast.Set))
+                and any(
+                    isinstance(item, ast.Constant) and item.value == "params"
+                    for item in keyword.value.elts
+                )
+                for keyword in node.keywords
+            ):
+                violations.append((path.name, node.lineno, "params-only save"))
+
+    assert violations == []
+
+    models = read("netbox_rpc/models.py")
+    handler = read("netbox_rpc/application/command_handlers.py")
+    migration = read("netbox_rpc/migrations/0079_rpcexecution_source_intent.py")
+    assert 'source_intent = models.ForeignKey(' in models
+    assert "validate_openbao_params_for_persistence(" in models
+    assert "source_intent=source_intent" in handler
+    assert '("netbox_rpc", "0078_seed_openbao_procedures")' in migration
 
 
 def test_plugin_uses_rpc_base_url_without_required_netbox_nms() -> None:
