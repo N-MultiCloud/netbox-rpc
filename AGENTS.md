@@ -1783,6 +1783,56 @@ Proxmox/Proxbox data and lifecycle) — never ad-hoc `ssh`/`pvesh`/`qm` or direc
 NetBox/Proxmox API calls. This mirrors the estate-wide policy in
 `/root/personal-context/CLAUDE.md`.
 
+## OpenBao Procedure Catalogue (`service.openbao.1.*`)
+
+Twenty-three OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
+procedures + command rows), targeting `dcim.device` and
+`virtualization.virtualmachine`. Their handlers live in `netbox-rpc-backend`
+(`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
+dotted-catalogue-name / underscored-handler-id convention.
+
+Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
+(`openbao` → `openbao.service`), which makes the **existing** generic
+`os.linux.ubuntu.24.*_service` and `journal_tail` procedures work against an
+OpenBao host with no new procedure, normalizer, or handler — the same mechanism
+as the `netbox` / `netbox-rq` rows in `0058`.
+
+### Seven procedures are deliberately NOT seeded
+
+`config_deploy`, `rekey`, `config_read`, `policy_read`, `initialize`, `unseal`,
+and `snapshot_restore` each carry an unresolved defect in the execution backend,
+tracked in `netbox-rpc-backend` **#80** — ownership loss on activation,
+commit-before-durable-capture, a digest that verifies a low-entropy credential
+offline, a truncated share retained below its pattern's length floor, a writable
+parent allowing the initialisation output to be replaced, and missing
+accept-once dispatch respectively.
+
+**Withholding the row is the control.** `RPCExecution` has a foreign key to
+`RPCProcedure`, and the backend executes only what this plugin dispatches, so a
+handler with no row cannot be invoked through the sanctioned path.
+`tests/test_openbao_catalog.py` asserts all seven stay absent, so a later
+migration cannot reintroduce one before #80 closes.
+
+State the limit honestly: this is an operational hold, not a code-level lock. An
+operator holding `add_rpcprocedure` could hand-create a row pointing at one of
+them. That is an explicit, audited act rather than ambient exposure — but it is
+not impossible.
+
+### This plugin is the primary control for connection overrides
+
+OpenBao `params_schema` rows declare **no** `rpc_ssh_*` property and set
+`"additionalProperties": false`, and the normalizer emits none. **This
+deliberately differs from the InfluxDB precedent**, which merges shared
+`_SSH_PROPERTIES` into every schema — do not "restore consistency" by copying
+that here.
+
+The reason is ordering: caller-supplied host-key entries were the vector for two
+separate key-material bypasses in the backend, and the backend refuses them now
+— but this plugin persists `RPCExecution.params` **before** the backend ever
+validates them. So the backend's refusal is layer two; declining to declare the
+fields here is the layer that actually prevents persistence. Estate-wide
+enforcement for every other procedure family is tracked in **#253**.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in
