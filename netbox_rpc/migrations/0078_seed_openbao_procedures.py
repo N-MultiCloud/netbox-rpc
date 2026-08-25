@@ -10,9 +10,13 @@ schemas intentionally expose no caller-supplied ``rpc_ssh_*`` override.
 """
 
 from django.db import migrations
+from django.db.migrations.exceptions import IrreversibleError
 
 
-_TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
+# The paired backend's strict OpenBao credential resolver currently accepts
+# only dcim.device. VM support needs an identity-checked VM credential resolver
+# in the backend before this catalogue may advertise it.
+_TARGET_MODELS = ["dcim.device"]
 _HANDLER_IDS = (
     "service.openbao_1.inspect",
     "service.openbao_1.seal_status",
@@ -45,22 +49,50 @@ _MOUNT_PATH_PATTERN = (
     r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?(?![\s\S])"
 )
 _NON_EMPTY_NON_NUL_PATTERN = r"^(?=[\s\S]*\S)(?![\s\S]*\x00)[\s\S]*(?![\s\S])"
+_ASSIGNMENT_VALUE_PATTERN = (
+    r'(?:"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\'|'
+    r"Bearer\s+[^\s,}\]]+|[^\s,}\]]+)"
+)
+_NORMALIZED_SEPARATOR_PATTERN = r"(?:_|[.-]+)"
+_FIELD_COMPONENT_PATTERN = r"[A-Za-z0-9]+"
+_SENSITIVE_COMPONENT_PATTERN = (
+    r"(?:authorization|credential|credentials|passphrase|passwd|password|pin|"
+    r"secret|secrets|token|tokens|unseal)"
+)
+_SENSITIVE_KEY_PREFIX_PATTERN = (
+    r"(?:access|account|api|client|current|previous|private|root|shared)"
+)
+_NON_SECRET_FIELD_PATTERN = (
+    rf"(?:key{_NORMALIZED_SEPARATOR_PATTERN}(?:id|label|name)|"
+    rf"tls{_NORMALIZED_SEPARATOR_PATTERN}key{_NORMALIZED_SEPARATOR_PATTERN}file|"
+    rf"token{_NORMALIZED_SEPARATOR_PATTERN}label)"
+)
+_SENSITIVE_COMPONENT_ASSIGNMENT_PATTERN = (
+    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
+    rf"(?!{_NON_SECRET_FIELD_PATTERN}[\"']?\s*[:=])"
+    rf"[_.-]*(?:{_FIELD_COMPONENT_PATTERN}[_.-]+)*"
+    rf"{_SENSITIVE_COMPONENT_PATTERN}"
+    rf"(?:[_.-]+{_FIELD_COMPONENT_PATTERN})*[_.-]*"
+    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
+)
+_SPECIAL_KEY_ASSIGNMENT_PATTERN = (
+    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
+    rf"(?:auth{_NORMALIZED_SEPARATOR_PATTERN}info|"
+    rf"connection{_NORMALIZED_SEPARATOR_PATTERN}(?:string|url)|keys?)"
+    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
+)
+_PREFIXED_KEY_ASSIGNMENT_PATTERN = (
+    r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
+    rf"[_.-]*(?:{_FIELD_COMPONENT_PATTERN}[_.-]+)*"
+    rf"{_SENSITIVE_KEY_PREFIX_PATTERN}[_.-]+keys?"
+    rf"(?:[_.-]+{_FIELD_COMPONENT_PATTERN})*[_.-]*"
+    rf"[\"']?\s*[:=]\s*{_ASSIGNMENT_VALUE_PATTERN}"
+)
 _SECRET_CONTENT_PATTERNS = (
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    (
-        r"(?im)(?:^|[,{]\s*|-\s+)[\"']?"
-        r"(?!(?:key_id|key_label|key_name|tls_key_file|token_label)[\"']?\s*[:=])"
-        r"[A-Za-z0-9_.-]*"
-        r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
-        r"access[-_]?key|private[-_]?key|credential)"
-        r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?(?!/)[^\s\"']+"
-    ),
-    (
-        r"(?im)(?:^|[,{]\s*|-\s+)[\"']?"
-        r"(?:auth_info|connection_string|connection_url|key|keys|"
-        r"(?:access|account|api|client|current|previous|private|root|shared)"
-        r"[_.-]+keys?)[\"']?\s*[:=]\s*[\"']?[^\s\"']+"
-    ),
+    _SENSITIVE_COMPONENT_ASSIGNMENT_PATTERN,
+    _SPECIAL_KEY_ASSIGNMENT_PATTERN,
+    _PREFIXED_KEY_ASSIGNMENT_PATTERN,
     r"(?im)\b(?:authorization|bearer)\s*[:=]\s*[\"']?[^\s\"']+",
     r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
@@ -491,7 +523,10 @@ _PROCEDURES = (
     _row(
         "service_action",
         effect="write",
-        approval_required=False,
+        # The generic Ubuntu systemd catalogue gates start/stop/reload/enable/
+        # disable and leaves only restart ungated. Because this procedure mixes
+        # those actions, the whole route must use the established gated policy.
+        approval_required=True,
         timeout_seconds=90,
         description="Run an enum-constrained action on openbao.service and read final state.",
         params_schema=_params(
@@ -614,6 +649,16 @@ def _seed(apps, schema_editor):
     RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
     if {row["handler_id"] for row in _PROCEDURES} != set(_HANDLER_IDS):
         raise RuntimeError("OpenBao seed handler inventory is inconsistent")
+    procedure_names = [row["name"] for row in _PROCEDURES]
+    # Ownership is all-or-nothing. update_or_create would silently adopt and
+    # overwrite an operator-owned canonical name, while no reverse-time check
+    # could later distinguish that row from migration-owned data.
+    if RPCProcedure.objects.filter(name__in=procedure_names).exists():
+        raise RuntimeError(
+            "Migration 0078 cannot seed the OpenBao catalogue because an RPC "
+            "procedure with a canonical name already exists; preserve and "
+            "reconcile the operator-owned row before retrying."
+        )
     for row in _PROCEDURES:
         defaults = {
             **{key: value for key, value in row.items() if key != "name"},
@@ -621,21 +666,31 @@ def _seed(apps, schema_editor):
             "enabled": True,
             "target_models": _TARGET_MODELS,
         }
-        procedure, _ = RPCProcedure.objects.update_or_create(
-            name=row["name"], defaults=defaults
+        procedure = RPCProcedure.objects.create(
+            name=row["name"], **defaults
         )
-        RPCProcedureCommand.objects.update_or_create(
+        RPCProcedureCommand.objects.create(
             procedure=procedure,
             sequence=1,
-            defaults=_command(row["handler_id"], row["description"]),
+            **_command(row["handler_id"], row["description"]),
         )
 
 
 def _remove(apps, schema_editor):
-    RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
-    RPCProcedure.objects.filter(
-        name__in=[row["name"] for row in _PROCEDURES]
-    ).delete()
+    """Abort before inspecting or mutating catalogue state.
+
+    Procedure rows and their commands are operator-mutable, and executions
+    protect their procedure through an on-delete PROTECT foreign key. Without a
+    durable ownership ledger, reverse cannot safely delete, restore, or even
+    identify every row created here after the catalogue has been used.
+    """
+
+    raise IrreversibleError(
+        "Migration 0078 is intentionally irreversible because OpenBao "
+        "catalogue ownership cannot be proven after operator mutation and "
+        "execution history protects used procedures; keep the migration "
+        "applied and use a reviewed forward repair migration."
+    )
 
 
 class Migration(migrations.Migration):

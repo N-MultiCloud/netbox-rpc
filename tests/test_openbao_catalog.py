@@ -6,6 +6,7 @@ import importlib
 import json
 import sys
 import types
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -58,6 +59,19 @@ WITHHELD = {
     "service.openbao.1.snapshot_restore",
 }
 EXPECTED_NAMES = READS | WRITES | DESTRUCTIVE
+APPROVAL_REQUIRED = DESTRUCTIVE | {"service.openbao.1.service_action"}
+BACKEND_SENSITIVE_FIELD_ORACLE = (
+    "access_key",
+    "account_key",
+    "auth_password",
+    "circonus_api_token",
+    "client_key",
+    "connection_url",
+    "current_key",
+    "previous_key",
+    "secret_key",
+    "shared_key",
+)
 FORBIDDEN_SSH_OVERRIDES = {
     "rpc_ssh_credential_pk",
     "rpc_ssh_host",
@@ -101,7 +115,7 @@ def test_handler_ids_effects_and_approval_match_the_fixed_classification(
             procedures.rows[name]["approval_required"],
         ) == expected
     for name in WRITES:
-        expected = ("write", False)
+        expected = ("write", name in APPROVAL_REQUIRED)
         assert (
             procedures.rows[name]["effect"],
             procedures.rows[name]["approval_required"],
@@ -118,15 +132,25 @@ def test_handler_ids_effects_and_approval_match_the_fixed_classification(
         assert row["handler_id"] == _handler_id(name)
         assert row["version"] == 1
         assert row["enabled"] is True
-        assert row["target_models"] == [
-            "dcim.device",
-            "virtualization.virtualmachine",
-        ]
+        assert row["target_models"] == ["dcim.device"]
         command = commands.rows[(name, 1)]
         assert command["argv"] == [
             "backend-orchestrated",
             "openbao-" + name.rsplit(".", 1)[1].replace("_", "-"),
         ]
+
+
+def test_no_seeded_openbao_procedure_advertises_a_virtual_machine_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, procedures, _ = _run_procedure_seed(monkeypatch)
+
+    assert len(procedures.rows) == 23
+    assert all(
+        row["target_models"] == ["dcim.device"]
+        and "virtualization.virtualmachine" not in row["target_models"]
+        for row in procedures.rows.values()
+    )
 
 
 def test_every_params_schema_is_closed_and_declares_no_ssh_override(
@@ -183,10 +207,68 @@ def test_every_params_schema_is_closed_and_declares_no_ssh_override(
         },
         procedures.rows["service.openbao.1.policy_write"]["params_schema"],
     )
+    public_metadata = "\n".join(
+        (
+            'key_id = "0x1234"',
+            'key_label = "bao-root-key"',
+            'key_name = "root-key"',
+            'tls_key_file = "/etc/openbao/tls.key"',
+            'token_label = "OpenBao"',
+        )
+    )
+    validate(
+        {"policy_name": "public-metadata", "policy_content": public_metadata},
+        procedures.rows["service.openbao.1.policy_write"]["params_schema"],
+    )
     with pytest.raises(ValidationError):
         validate(
             {"engine_type": "database", "kv_version": 2},
             procedures.rows["service.openbao.1.secrets_enable"]["params_schema"],
+        )
+
+
+@pytest.mark.parametrize(
+    "policy_content",
+    [
+        '  client_secret = "hunter2!"\npath "kv/*" {}',
+        '  connection_url =\n    "opaque-credential"\ntelemetry {}',
+        'seal "pkcs11" { enabled = true }\n    pin:\n      "4321"',
+    ],
+)
+def test_policy_schema_rejects_indented_and_multiline_sensitive_assignments(
+    monkeypatch: pytest.MonkeyPatch,
+    policy_content: str,
+) -> None:
+    """The schema is the creation-time gate, before RPCExecution persistence."""
+
+    _, procedures, _ = _run_procedure_seed(monkeypatch)
+    schema = procedures.rows["service.openbao.1.policy_write"]["params_schema"]
+
+    with pytest.raises(ValidationError):
+        validate(
+            {"policy_name": "must-not-persist", "policy_content": policy_content},
+            schema,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    BACKEND_SENSITIVE_FIELD_ORACLE,
+)
+def test_policy_schema_matches_the_backend_sensitive_field_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    _, procedures, _ = _run_procedure_seed(monkeypatch)
+    schema = procedures.rows["service.openbao.1.policy_write"]["params_schema"]
+
+    with pytest.raises(ValidationError):
+        validate(
+            {
+                "policy_name": "field-classifier",
+                "policy_content": f'block {{\n  {field_name} = "credential-value"\n}}',
+            },
+            schema,
         )
 
 
@@ -281,45 +363,83 @@ def test_result_schemas_accept_the_actual_handler_envelopes(
         validate(result, procedures.rows[name]["result_schema"])
 
 
-def test_allowlist_seed_is_enabled_and_reverse_is_scoped(
+def test_allowlist_seed_is_device_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    migration, allowlist = _run_allowlist_seed(monkeypatch)
+    _, allowlist = _run_allowlist_seed(monkeypatch)
 
     assert allowlist.rows["openbao"] == {
         "systemd_unit": "openbao.service",
         "enabled": True,
-        "target_models": ["dcim.device", "virtualization.virtualmachine"],
+        "target_models": ["dcim.device"],
         "description": "OpenBao server service",
     }
-    allowlist.rows["unrelated"] = {"systemd_unit": "unrelated.service"}
-    migration._remove(_apps_for_allowlist(allowlist), None)
-    assert allowlist.rows == {
-        "unrelated": {"systemd_unit": "unrelated.service"}
+
+
+def test_allowlist_forward_refuses_to_adopt_a_canonical_slug_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_allowlist_migration(monkeypatch)
+    allowlist = _AllowlistManager()
+    operator_row = {
+        "systemd_unit": "operator-openbao.service",
+        "enabled": False,
+        "target_models": ["dcim.device"],
+        "description": "operator owned",
     }
+    allowlist.rows["openbao"] = operator_row
+
+    with pytest.raises(RuntimeError, match="canonical slug already exists"):
+        migration._seed(_apps_for_allowlist(allowlist), None)
+
+    assert allowlist.rows == {"openbao": operator_row}
 
 
-def test_procedure_reverse_deletes_exactly_the_seeded_rows_and_commands(
+def test_allowlist_reverse_is_irreversible_and_preserves_operator_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration, allowlist = _run_allowlist_seed(monkeypatch)
+    allowlist.rows["openbao"]["description"] = "operator edited"
+    before = deepcopy(allowlist.rows)
+
+    with pytest.raises(migration.IrreversibleError, match="intentionally irreversible"):
+        migration._remove(_apps_for_allowlist(allowlist), None)
+
+    assert allowlist.rows == before
+
+
+def test_procedure_forward_refuses_to_adopt_any_canonical_name_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration = _load_procedure_migration(monkeypatch)
+    procedures = _ProcedureManager()
+    commands = _CommandManager()
+    procedures.commands = commands
+    conflict = "service.openbao.1.inspect"
+    operator_row = {"handler_id": "operator.owned.inspect", "enabled": False}
+    procedures.rows[conflict] = operator_row
+
+    with pytest.raises(RuntimeError, match="canonical name already exists"):
+        migration._seed(_apps_for_procedures(procedures, commands), None)
+
+    assert procedures.rows == {conflict: operator_row}
+    assert commands.rows == {}
+
+
+def test_procedure_reverse_is_irreversible_with_protected_execution_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     migration, procedures, commands = _run_procedure_seed(monkeypatch)
-    procedures.rows["service.unrelated.1.inspect"] = {
-        "handler_id": "service.unrelated_1.inspect"
-    }
-    commands.rows[("service.unrelated.1.inspect", 9)] = {
-        "argv": ["unrelated", "command"]
-    }
+    protected_name = "service.openbao.1.inspect"
+    procedures.protected_names.add(protected_name)
+    before_procedures = deepcopy(procedures.rows)
+    before_commands = deepcopy(commands.rows)
 
-    migration._remove(_apps_for_procedures(procedures, commands), None)
+    with pytest.raises(migration.IrreversibleError, match="intentionally irreversible"):
+        migration._remove(_apps_for_procedures(procedures, commands), None)
 
-    assert procedures.rows == {
-        "service.unrelated.1.inspect": {
-            "handler_id": "service.unrelated_1.inspect"
-        }
-    }
-    assert commands.rows == {
-        ("service.unrelated.1.inspect", 9): {"argv": ["unrelated", "command"]}
-    }
+    assert procedures.rows == before_procedures
+    assert commands.rows == before_commands
 
 
 @pytest.fixture()
@@ -385,6 +505,75 @@ def test_openbao_normalizer_rejects_every_ssh_override(
     assert caught.value.code == "RPC_PARAM_INVALID"
 
 
+@pytest.mark.parametrize(
+    "policy_content",
+    [
+        '  client_secret = "hunter2!"\npath "kv/*" {}',
+        '  connection_url =\n    "opaque-credential"\ntelemetry {}',
+        'seal "pkcs11" { enabled = true }\n    pin:\n      "4321"',
+    ],
+)
+def test_openbao_normalizer_rejects_indented_and_multiline_sensitive_assignments(
+    jobs_module,
+    policy_content: str,
+) -> None:
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.openbao.1.policy_write",
+            handler_id="service.openbao_1.policy_write",
+        ),
+        params={"policy_name": "must-not-persist", "policy_content": policy_content},
+        target_display="bao01",
+        target_model_label="dcim.device",
+        assigned_object_id=871,
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as caught:
+        jobs_module.normalize_execution_params(execution)
+    assert caught.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
+
+
+@pytest.mark.parametrize("field_name", BACKEND_SENSITIVE_FIELD_ORACLE)
+def test_openbao_normalizer_matches_the_backend_sensitive_field_oracle(
+    jobs_module,
+    field_name: str,
+) -> None:
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.openbao.1.policy_write",
+            handler_id="service.openbao_1.policy_write",
+        ),
+        params={
+            "policy_name": "field-classifier",
+            "policy_content": f'block {{\n  {field_name} = "credential-value"\n}}',
+        },
+        target_display="bao01",
+        target_model_label="dcim.device",
+        assigned_object_id=871,
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as caught:
+        jobs_module.normalize_execution_params(execution)
+    assert caught.value.code == "RPC_PARAM_SECRET_FORBIDDEN"
+
+
+def test_openbao_normalizer_rejects_virtual_machine_target(jobs_module) -> None:
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.openbao.1.inspect",
+            handler_id="service.openbao_1.inspect",
+        ),
+        params={},
+        target_display="bao-vm",
+        target_model_label="virtualization.virtualmachine",
+        assigned_object_id=871,
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as caught:
+        jobs_module.normalize_execution_params(execution)
+    assert caught.value.code == "RPC_TARGET_INVALID"
+
+
 class _FakeProcedure:
     def __init__(self, manager: "_ProcedureManager", name: str) -> None:
         self.manager = manager
@@ -402,20 +591,32 @@ class _ProcedureQuery:
 
     def delete(self) -> None:
         for name in set(self.manager.rows) & self.names:
+            if name in self.manager.protected_names:
+                raise _ProtectedHistoryError(name)
             self.manager.rows.pop(name)
             if self.manager.commands is not None:
                 for key in [key for key in self.manager.commands.rows if key[0] == name]:
                     self.manager.commands.rows.pop(key)
+
+    def exists(self) -> bool:
+        return bool(set(self.manager.rows) & self.names)
+
+
+class _ProtectedHistoryError(RuntimeError):
+    """Models RPCExecution.procedure's on_delete=PROTECT behavior."""
 
 
 class _ProcedureManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
         self.commands: _CommandManager | None = None
+        self.protected_names: set[str] = set()
 
-    def update_or_create(self, *, name: str, defaults: dict[str, object]):
+    def create(self, *, name: str, **defaults: object):
+        if name in self.rows:
+            raise AssertionError(f"duplicate procedure {name}")
         self.rows[name] = dict(defaults)
-        return _FakeProcedure(self, name), True
+        return _FakeProcedure(self, name)
 
     def filter(self, *, name__in):
         return _ProcedureQuery(self, set(name__in))
@@ -425,15 +626,15 @@ class _CommandManager:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, int], dict[str, object]] = {}
 
-    def update_or_create(
+    def create(
         self,
         *,
         procedure: _FakeProcedure,
         sequence: int,
-        defaults: dict[str, object],
+        **defaults: object,
     ):
         self.rows[(procedure.name, sequence)] = dict(defaults)
-        return SimpleNamespace(sequence=sequence, **defaults), True
+        return SimpleNamespace(sequence=sequence, **defaults)
 
 
 class _AllowlistQuery:
@@ -444,14 +645,19 @@ class _AllowlistQuery:
     def delete(self) -> None:
         self.manager.rows.pop(self.slug, None)
 
+    def exists(self) -> bool:
+        return self.slug in self.manager.rows
+
 
 class _AllowlistManager:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
 
-    def update_or_create(self, *, slug: str, defaults: dict[str, object]):
+    def create(self, *, slug: str, **defaults: object):
+        if slug in self.rows:
+            raise AssertionError(f"duplicate allowlist slug {slug}")
         self.rows[slug] = dict(defaults)
-        return SimpleNamespace(slug=slug, **defaults), True
+        return SimpleNamespace(slug=slug, **defaults)
 
     def filter(self, *, slug: str):
         return _AllowlistQuery(self, slug)
@@ -484,9 +690,7 @@ def _apps_for_allowlist(allowlist: _AllowlistManager):
 
 
 def _run_procedure_seed(monkeypatch: pytest.MonkeyPatch):
-    _install_migration_import_stubs(monkeypatch)
-    sys.modules.pop(PROCEDURE_MIGRATION, None)
-    migration = importlib.import_module(PROCEDURE_MIGRATION)
+    migration = _load_procedure_migration(monkeypatch)
     procedures = _ProcedureManager()
     commands = _CommandManager()
     procedures.commands = commands
@@ -495,12 +699,22 @@ def _run_procedure_seed(monkeypatch: pytest.MonkeyPatch):
 
 
 def _run_allowlist_seed(monkeypatch: pytest.MonkeyPatch):
-    _install_migration_import_stubs(monkeypatch)
-    sys.modules.pop(ALLOWLIST_MIGRATION, None)
-    migration = importlib.import_module(ALLOWLIST_MIGRATION)
+    migration = _load_allowlist_migration(monkeypatch)
     allowlist = _AllowlistManager()
     migration._seed(_apps_for_allowlist(allowlist), None)
     return migration, allowlist
+
+
+def _load_procedure_migration(monkeypatch: pytest.MonkeyPatch):
+    _install_migration_import_stubs(monkeypatch)
+    sys.modules.pop(PROCEDURE_MIGRATION, None)
+    return importlib.import_module(PROCEDURE_MIGRATION)
+
+
+def _load_allowlist_migration(monkeypatch: pytest.MonkeyPatch):
+    _install_migration_import_stubs(monkeypatch)
+    sys.modules.pop(ALLOWLIST_MIGRATION, None)
+    return importlib.import_module(ALLOWLIST_MIGRATION)
 
 
 def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,6 +726,10 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_migrations = types.ModuleType("django.db.migrations")
     django_migrations.Migration = type("Migration", (), {})
     django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
+    django_migration_exceptions = types.ModuleType("django.db.migrations.exceptions")
+    django_migration_exceptions.IrreversibleError = type(
+        "IrreversibleError", (RuntimeError,), {}
+    )
     django_db.migrations = django_migrations
     django.db = django_db
     monkeypatch.setitem(sys.modules, "netbox", netbox)
@@ -519,6 +737,11 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     monkeypatch.setitem(sys.modules, "django.db.migrations", django_migrations)
+    monkeypatch.setitem(
+        sys.modules,
+        "django.db.migrations.exceptions",
+        django_migration_exceptions,
+    )
 
 
 def _install_runtime_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:

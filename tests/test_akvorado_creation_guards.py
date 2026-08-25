@@ -33,6 +33,14 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
     django_db.transaction = SimpleNamespace(atomic=lambda: nullcontext())
+    django_migrations = types.ModuleType("django.db.migrations")
+    django_migrations.Migration = type("Migration", (), {})
+    django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
+    django_migration_exceptions = types.ModuleType("django.db.migrations.exceptions")
+    django_migration_exceptions.IrreversibleError = type(
+        "IrreversibleError", (RuntimeError,), {}
+    )
+    django_db.migrations = django_migrations
     rest_framework = types.ModuleType("rest_framework")
     drf_serializers = types.ModuleType("rest_framework.serializers")
     drf_serializers.ValidationError = ValidationError
@@ -82,6 +90,8 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "netbox.plugins": netbox_plugins,
         "django": django,
         "django.db": django_db,
+        "django.db.migrations": django_migrations,
+        "django.db.migrations.exceptions": django_migration_exceptions,
         "rest_framework": rest_framework,
         "rest_framework.serializers": drf_serializers,
         "rest_framework.exceptions": drf_exceptions,
@@ -100,6 +110,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     module = importlib.import_module("netbox_rpc.application.command_handlers")
     yield module, ValidationError, RPCExecutionError
     sys.modules.pop("netbox_rpc.application.command_handlers", None)
+    sys.modules.pop("netbox_rpc.migrations.0078_seed_openbao_procedures", None)
 
 
 class _RestrictedQuerySet:
@@ -766,7 +777,109 @@ def test_unsafe_config_content_is_rejected_before_serializer_save(
         reject_unsafe_content,
     )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(serializer=serializer, user=user)
+
+    assert set(caught.value.detail) == {"params"}
+    assert serializer.saved is False
+
+
+@pytest.mark.parametrize(
+    "policy_content",
+    [
+        '  client_secret = "hunter2!"\npath "kv/*" {}',
+        '  connection_url =\n    "opaque-credential"\ntelemetry {}',
+    ],
+)
+def test_openbao_sensitive_assignment_is_rejected_before_serializer_save(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_content: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    migration_name = "netbox_rpc.migrations.0078_seed_openbao_procedures"
+    sys.modules.pop(migration_name, None)
+    migration = importlib.import_module(migration_name)
+    row = next(
+        item
+        for item in migration._PROCEDURES
+        if item["name"] == "service.openbao.1.policy_write"
+    )
+    procedure = SimpleNamespace(**row, version=1, enabled=True)
+
+    class Serializer:
+        validated_data = {
+            "procedure": procedure,
+            "params": {
+                "policy_name": "must-not-persist",
+                "policy_content": policy_content,
+            },
+        }
+        saved = False
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            self.saved = True
+            return SimpleNamespace()
+
+    serializer = Serializer()
+    user = SimpleNamespace(
+        has_perm=lambda permission: permission == "netbox_rpc.execute_rpcprocedure"
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        command_handlers.create_execution(serializer=serializer, user=user)
+
+    assert set(caught.value.detail) == {"params"}
+    assert serializer.saved is False
+
+
+@pytest.mark.parametrize("action", ["stop", "disable"])
+def test_execute_only_caller_cannot_stop_or_disable_openbao(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    migration_name = "netbox_rpc.migrations.0078_seed_openbao_procedures"
+    sys.modules.pop(migration_name, None)
+    migration = importlib.import_module(migration_name)
+    row = next(
+        item
+        for item in migration._PROCEDURES
+        if item["name"] == "service.openbao.1.service_action"
+    )
+    procedure = SimpleNamespace(**row, version=1, enabled=True)
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": {"action": action}}
+        saved = False
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            self.saved = True
+            return SimpleNamespace()
+
+    serializer = Serializer()
+    user = SimpleNamespace(
+        has_perm=lambda permission: permission == "netbox_rpc.execute_rpcprocedure"
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda requester: 1,
+    )
+
+    with pytest.raises(command_handlers.PermissionDenied, match="requires approval"):
         command_handlers.create_execution(serializer=serializer, user=user)
 
     assert serializer.saved is False

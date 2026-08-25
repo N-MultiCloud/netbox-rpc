@@ -1083,8 +1083,10 @@ nms-backend handlers build the runtime actions server-side.
 ## OpenBao Procedure Catalogue (`service.openbao.1.*`)
 
 Twenty-three OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
-procedures + command rows), targeting `dcim.device` and
-`virtualization.virtualmachine`. Their handlers live in `netbox-rpc-backend`
+procedures + command rows), targeting **`dcim.device` only**. The paired
+backend's strict OpenBao credential lookup currently rejects VM identities;
+`virtualization.virtualmachine` must not be advertised until the backend has an
+equivalent identity-checked VM credential resolver. Their handlers live in `netbox-rpc-backend`
 (`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
 dotted-catalogue-name / underscored-handler-id convention.
 
@@ -1092,7 +1094,18 @@ Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
 (`openbao` → `openbao.service`), which makes the **existing** generic
 `os.linux.ubuntu.24.*_service` and `journal_tail` procedures work against an
 OpenBao host with no new procedure, normalizer, or handler — the same mechanism
-as the `netbox` / `netbox-rq` rows in `0058`.
+as the `netbox` / `netbox-rq` rows in `0058`. The OpenBao-specific
+`service_action` mixes restart with the generic catalogue's approval-gated
+start/stop/reload/enable/disable actions, so the whole procedure is
+`approval_required=True`; an execute-only caller cannot use it to stop or
+disable `openbao.service`.
+
+Both seed migrations fail forward on a pre-existing canonical procedure name or
+allowlist slug instead of adopting operator-owned state. Both are explicitly
+irreversible: after use, `RPCExecution.procedure` protects catalogue history,
+and neither migration has a durable ownership ledger that could safely restore
+or delete an operator-edited row. Removal or repair requires a reviewed forward
+migration.
 
 ### Seven procedures are deliberately NOT seeded
 
@@ -1129,6 +1142,14 @@ separate key-material bypasses in the backend, and the backend refuses them now
 validates them. So the backend's refusal is layer two; declining to declare the
 fields here is the layer that actually prevents persistence. Estate-wide
 enforcement for every other procedure family is tracked in **#253**.
+
+`policy_content` also rejects secret-shaped assignments at that pre-persistence
+schema gate, including ordinary indentation and values continued onto a later
+line. The normalizer repeats the same fixed field-name policy as defense in
+depth: credential components such as `password`, `pin`, `secret`, and `token`,
+the backend's special connection fields, and its prefixed `*_key` families are
+rejected, while public metadata such as `key_id`, `token_label`, and
+`tls_key_file` remains allowed.
 
 ## Procedure Naming
 
