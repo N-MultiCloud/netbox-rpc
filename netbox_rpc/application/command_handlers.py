@@ -48,6 +48,7 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
 _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     AKVORADO_1_PROCEDURE_NAMES | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
 )
+_OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
 
 # #215: RPCExecutionJob.enqueue() used to fall back to a flat 600s RQ
 # job_timeout for every procedure, regardless of the dispatched procedure's
@@ -559,7 +560,11 @@ def _require_viewable_assigned_object(
     InfluxDB 3 Core installer.
     """
 
-    if getattr(procedure, "name", "") not in _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES:
+    procedure_name = getattr(procedure, "name", "")
+    if (
+        procedure_name not in _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES
+        and not procedure_name.startswith(_OPENBAO_PROCEDURE_PREFIX)
+    ):
         return
     content_type = validated_data.get("assigned_object_type")
     object_id = validated_data.get("assigned_object_id")
