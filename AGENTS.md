@@ -680,6 +680,19 @@ pending approval or distinct-actor check.
     non-daemon unit fails the test and forces a deliberate decision rather than
     silently widening it. Adding a maintenance unit under this prefix therefore
     requires updating that set, not the seed migration.
+- **Gitea Actions org CI runner provisioning** is seeded disabled by migration
+  `0080` as `service.gitea.actions_runner.provision_org_ci_runner`. It is a
+  distinct approval-required install/register/start/verify workflow for an
+  assigned runner host, not a restart of an existing systemd unit. It fixes the
+  runner authority to
+  `ci-untrusted-python312:docker://nmulti/gitea-act-ubuntu:22.04-actions`,
+  requires `registration_token_secret_ref` as an `nms-secret:<uuid>`, rejects
+  `rpc_ssh_*` routing overrides, and resolves SSH only from the assigned NetBox
+  object. The hard gate `_GITEA_ORG_CI_RUNNER_AVAILABLE` must stay false until
+  the paired `netbox-rpc-backend` handler and approved capability contract are
+  deployed, then a forward migration may enable the row and open the gate. The
+  manual command log and Ansible mapping live in
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a
@@ -1215,6 +1228,14 @@ pending approval or distinct-actor check.
   unapplied migration with deleted, surviving, or orphaned rows. Removal or
   repair requires a reviewed forward migration with explicit ownership
   evidence.
+- Gitea org CI runner provisioning is seeded disabled by migration `0080` as
+  `service.gitea.actions_runner.provision_org_ci_runner` (write, 1800s,
+  approval required), targeting `dcim.device` and `virtualization.virtualmachine`.
+  It provisions only the `ci-untrusted-python312` organization runner, takes the
+  one-time registration token only through `registration_token_secret_ref`, and
+  does not expose caller-supplied SSH routing. Its reverse is non-destructive:
+  disable only, never delete. Keep it gated until the paired backend handler is
+  deployed. Runbook: [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve

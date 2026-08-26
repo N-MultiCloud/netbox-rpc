@@ -62,6 +62,12 @@ command behavior changes.
 > disabled and accepts no caller parameters; see
 > `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
 > signed-lease, activation, and rollback contract.
+> `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
+> runner-host provisioning procedure, seeded disabled and hard-gated until the
+> paired backend handler exists. It accepts only an `nms-secret:<uuid>` runner
+> token reference plus bounded metadata, fixes the label to
+> `ci-untrusted-python312`, and rejects caller SSH routing. See
+> `docs/gitea-org-ci-runner-provision.md`.
 
 @AGENTS.md
 

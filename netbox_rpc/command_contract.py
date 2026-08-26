@@ -99,6 +99,13 @@ EXEMPT_HANDLER_RATIONALE = {
         "validation, official artifact verification, backup, service lifecycle, "
         "health checks, and safe rollback cannot be represented as one fixed argv."
     ),
+    "service.gitea.actions_runner.provision_org_ci_runner": (
+        "Installs Docker when needed, prepares the Actions runner image and "
+        "Compose project, resolves a vaulted one-time registration token, "
+        "registers the Gitea org runner, starts it, and verifies online state. "
+        "The sequencing, token delivery, and final Gitea verification cannot be "
+        "represented safely as one public argv."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

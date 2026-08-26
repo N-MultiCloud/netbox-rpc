@@ -122,6 +122,20 @@ NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
 # server-normalized and signed; the caller supplies no params.
 GITEA_PRODUCTION_UPGRADE_1_27_1 = "service.gitea.production.upgrade_1_27_1"
 GITEA_PRODUCTION_UPGRADE_1_27_1_HANDLER = GITEA_PRODUCTION_UPGRADE_1_27_1
+
+# Disabled, approval-bound Gitea Actions org CI runner provisioning. The runner
+# label is fixed in the normalizer/backend contract; callers may provide only
+# non-secret display/endpoint values plus an nms-secret reference for the
+# one-time Gitea registration token.
+GITEA_ORG_CI_RUNNER_PROVISION = (
+    "service.gitea.actions_runner.provision_org_ci_runner"
+)
+GITEA_ORG_CI_RUNNER_PROVISION_HANDLER = GITEA_ORG_CI_RUNNER_PROVISION
+GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
+    {
+        GITEA_ORG_CI_RUNNER_PROVISION,
+    }
+)
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
     {
         NETBOX_STAGING_ROTATE_BACKEND_TOKEN,

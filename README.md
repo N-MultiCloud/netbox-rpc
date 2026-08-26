@@ -188,6 +188,19 @@ The procedure catalog is intentionally narrow:
   migration with explicit ownership evidence. See
   [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md)
   for activation order, exact states, security, and rollback invariants.
+- `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
+  approval-required provisioning contract for a dedicated Gitea organization CI
+  runner on an assigned host. It fixes the runner authority to
+  `ci-untrusted-python312:docker://nmulti/gitea-act-ubuntu:22.04-actions`,
+  accepts only bounded endpoint/display params plus
+  `registration_token_secret_ref`, rejects `rpc_ssh_*` routing overrides, and
+  resolves SSH exclusively from the assigned NetBox object. Migration `0080`
+  seeds the catalog row and representative backend-orchestrated command with
+  `enabled=False`; a three-layer code gate keeps it non-advertised and
+  non-dispatchable until the matching `netbox-rpc-backend` handler and approved
+  capability contract ship. The manual SSH/Docker command sequence and Ansible
+  mapping are documented in
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -1296,6 +1309,14 @@ mirror and production-capable runners ineligible for pull-request jobs and
 permit ordinary CI to match only the isolated runner label. Until that external
 policy is provisioned and proven, this CI contract must remain blocked/queued
 rather than activated on a broader runner.
+
+Migration `0080` adds
+`service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
+procedure for provisioning that isolated organization runner on the assigned
+runner host. It is seeded disabled and hard-gated until its backend handler is
+available. See
+[`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md)
+for the exact SSH/Docker commands to translate into Ansible.
 
 Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, the
 rebuild oracle, the append-only ledger, the command handlers, and the

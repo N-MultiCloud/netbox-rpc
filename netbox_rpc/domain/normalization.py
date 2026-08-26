@@ -33,6 +33,8 @@ from ..constants import (
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
+    GITEA_ORG_CI_RUNNER_PROVISION,
+    GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
@@ -172,6 +174,11 @@ _HUAWEI_NE8000_BGP_AVAILABLE = False
 # same coordinated rollout that deploys the handlers and their capability
 # contract, via an additive migration that also sets RPCProcedure.enabled=True.
 _INFLUXDB3_DEBIAN13_AVAILABLE = False
+# No service.gitea.actions_runner.* handler exists in netbox-rpc-backend yet.
+# Keep this independent of RPCProcedure.enabled so an operator cannot make the
+# catalog dispatchable without the paired backend implementation and capability
+# contract. Flip to True only in the same additive rollout that enables the row.
+_GITEA_ORG_CI_RUNNER_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -216,6 +223,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "execution could only queue and then fail on an unknown handler. "
             "Enable it in the coordinated rollout that ships the handlers and "
             "their approved capability contract."
+        )
+    if (
+        procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
+        and not _GITEA_ORG_CI_RUNNER_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no service.gitea.actions_runner.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handler and "
+            "its approved capability contract."
         )
     return None
 
@@ -418,6 +436,59 @@ _INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
 # validation (intent origin markers, the frozen RQ timeout snapshot). They are not
 # caller input and must not trip the unknown-parameter guard.
 _INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+# Gitea Actions org CI runner provisioning catalog (migration 0080). This is a
+# backend-owned SSH/Docker workflow: NetBox supplies a closed, approval-bound
+# contract, and the backend resolves the target host and SSH credential from the
+# assigned object. The untrusted CI authority is intentionally fixed here.
+_GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL = "http://10.0.30.96:3000"
+_GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION = "N-MultiCloud"
+_GITEA_ORG_CI_RUNNER_DEFAULT_NAME = "ci-untrusted-nmulticloud-org-241"
+_GITEA_ORG_CI_RUNNER_AGENT_LABEL = "ci-untrusted-python312"
+_GITEA_ORG_CI_RUNNER_IMAGE = "nmulti/gitea-act-ubuntu:22.04-actions"
+_GITEA_ORG_CI_RUNNER_LABEL_SPEC = (
+    f"{_GITEA_ORG_CI_RUNNER_AGENT_LABEL}:docker://{_GITEA_ORG_CI_RUNNER_IMAGE}"
+)
+_GITEA_ORG_CI_RUNNER_PROJECT_DIR = "/opt/gitea-ci-runner"
+_GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
+_GITEA_ORG_CI_RUNNER_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_GITEA_ORG_CI_RUNNER_ORG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_GITEA_ORG_CI_RUNNER_HOST_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?"
+)
+_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = {
+    "install_docker": True,
+    "build_runner_image": True,
+    "load_prebuilt_runner_image": False,
+    "force_recreate": False,
+}
+_GITEA_ORG_CI_RUNNER_PARAM_KEYS = frozenset(
+    {
+        "registration_token_secret_ref",
+        "gitea_instance_url",
+        "organization",
+        "runner_name",
+        *_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS,
+    }
+)
+_GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+_GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS = frozenset(
     {
         "_intent",
         "_intent_name",
@@ -1008,6 +1079,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
         return _normalize_gitea_production_upgrade_execution(execution)
+
+    if procedure_name == GITEA_ORG_CI_RUNNER_PROVISION:
+        return _normalize_gitea_org_ci_runner_provision_execution(execution, target)
 
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
@@ -2106,6 +2180,214 @@ def _normalize_influxdb3_debian13_execution(
     normalized["remote_bind"] = remote_bind
     normalized["command_fingerprint"]["remote_bind"] = remote_bind
 
+    return normalized
+
+
+def _gitea_org_ci_runner_pattern_param(
+    raw_value: object,
+    field_name: str,
+    pattern: re.Pattern[str],
+) -> str:
+    if not isinstance(raw_value, str):
+        raise RPCExecutionError(
+            f"{field_name} must be a string.",
+            code="RPC_PARAM_INVALID",
+        )
+    value = raw_value.strip()
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_gitea_org_ci_runner_url(raw_value: object) -> str:
+    if raw_value in (None, ""):
+        value = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
+    elif isinstance(raw_value, str):
+        value = raw_value.strip()
+    else:
+        raise RPCExecutionError(
+            "gitea_instance_url must be a string.",
+            code="RPC_PARAM_INVALID",
+        )
+    if not value or len(value) > 255:
+        raise RPCExecutionError(
+            "gitea_instance_url must be a non-empty URL of at most 255 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    parsed = urlparse(value)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RPCExecutionError(
+            "gitea_instance_url must be an http(s) origin URL with no credentials, "
+            "path, query, or fragment.",
+            code="RPC_PARAM_INVALID",
+        )
+    host = parsed.hostname.lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        raise RPCExecutionError(
+            "gitea_instance_url must be reachable from the runner host and must "
+            "not use loopback.",
+            code="RPC_PARAM_INVALID",
+        )
+    if not _GITEA_ORG_CI_RUNNER_HOST_RE.fullmatch(host):
+        raise RPCExecutionError(
+            "gitea_instance_url host has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "gitea_instance_url port must be between 1 and 65535.",
+            code="RPC_PARAM_OUT_OF_RANGE",
+        ) from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise RPCExecutionError(
+            "gitea_instance_url port must be between 1 and 65535.",
+            code="RPC_PARAM_OUT_OF_RANGE",
+        )
+    netloc = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme.lower()}://{netloc}"
+
+
+def _normalize_gitea_org_ci_runner_provision_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the Gitea Actions org CI runner provision procedure."""
+
+    procedure_name = execution.procedure.name
+    params = execution.params or {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            f"{procedure_name} params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    target = str(target or "").strip()
+    if not target or any(ord(char) < 32 or ord(char) == 127 for char in target):
+        raise RPCExecutionError(
+            "Gitea org CI runner provisioning requires a safe target display name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    content_type = f"{app_label}.{model}"
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        target_model not in _GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS
+        or content_type != target_model
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Gitea org CI runner provisioning requires an existing assigned "
+            "dcim.device or virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    supplied_overrides = sorted(
+        set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
+    )
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params)
+        - _GITEA_ORG_CI_RUNNER_PARAM_KEYS
+        - _GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    secret_ref = params.get("registration_token_secret_ref")
+    if not isinstance(secret_ref, str) or not _INFLUXDB_SECRET_REF_RE.fullmatch(
+        secret_ref.strip()
+    ):
+        raise RPCExecutionError(
+            "registration_token_secret_ref must be an nms-secret:<uuid> reference.",
+            code="RPC_PARAM_INVALID",
+        )
+    secret_ref = secret_ref.strip()
+
+    gitea_instance_url = _normalize_gitea_org_ci_runner_url(
+        params.get("gitea_instance_url")
+    )
+    organization = _gitea_org_ci_runner_pattern_param(
+        params.get("organization", _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION),
+        "organization",
+        _GITEA_ORG_CI_RUNNER_ORG_RE,
+    )
+    runner_name = _gitea_org_ci_runner_pattern_param(
+        params.get("runner_name", _GITEA_ORG_CI_RUNNER_DEFAULT_NAME),
+        "runner_name",
+        _GITEA_ORG_CI_RUNNER_IDENTIFIER_RE,
+    )
+    booleans = {
+        key: _bool_param(params, key, default)
+        for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
+    }
+    if booleans["build_runner_image"] and booleans["load_prebuilt_runner_image"]:
+        raise RPCExecutionError(
+            "build_runner_image and load_prebuilt_runner_image are mutually exclusive.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "runner_name": runner_name,
+        "runner_label": _GITEA_ORG_CI_RUNNER_AGENT_LABEL,
+        "runner_labels": [_GITEA_ORG_CI_RUNNER_LABEL_SPEC],
+        "runner_image": _GITEA_ORG_CI_RUNNER_IMAGE,
+        "compose_project_dir": _GITEA_ORG_CI_RUNNER_PROJECT_DIR,
+        **booleans,
+    }
+    fingerprint = {
+        "handler_id": execution.procedure.handler_id,
+        "procedure": procedure_name,
+        "target_content_type": content_type,
+        "target_object_id": object_id,
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "runner_name": runner_name,
+        "runner_label": _GITEA_ORG_CI_RUNNER_AGENT_LABEL,
+        "runner_image": _GITEA_ORG_CI_RUNNER_IMAGE,
+        "compose_project_dir": _GITEA_ORG_CI_RUNNER_PROJECT_DIR,
+        **booleans,
+    }
+    normalized["command_fingerprint"] = fingerprint
     return normalized
 
 
