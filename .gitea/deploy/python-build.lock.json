@@ -1,0 +1,1 @@
+{"dependencies":[{"hashes":["29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"],"requirement":"setuptools==83.0.0"}],"frontend":{"name":"uv","version":"0.12.5"},"python_version":"3.12.13","schema":1}

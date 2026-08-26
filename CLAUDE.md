@@ -107,6 +107,32 @@ merged commit is by definition not yet published as a package. A manual
 `workflow_dispatch` offers the estate-standard choice, defaulting to the
 immutable `latest_package` (which requires an exact `package_version`).
 
+**Source build lock (required for `main_branch`).** The `git <sha>` path builds
+the wheel inside an isolated, pristine snapshot of the commit and installs the
+build backend with `--require-hashes`. It therefore refuses to run unless the
+commit carries `.gitea/deploy/python-build.lock.json`; without it the deploy
+fails with:
+
+```
+error: source build lock or pyproject is unreadable
+```
+
+The file is canonical JSON (`sort_keys`, `,`/`:` separators, one trailing
+newline) and must pin every applicable `[build-system] requires` entry to an
+exact `==` version whose sha256 matches the artifact on PyPI:
+
+```json
+{"dependencies":[{"hashes":["<sha256>"],"requirement":"setuptools==83.0.0"}],"frontend":{"name":"uv","version":"0.12.5"},"python_version":"3.12.13","schema":1}
+```
+
+`python_version` and `frontend.version` must equal the gateway's pinned
+`BUILD_PYTHON_VERSION` / `UV_BUILD_VERSION`. Bumping `[build-system] requires`
+past the pinned version — or the gateway bumping its own pins — requires
+regenerating this file, or every `main_branch` deploy fails closed.
+
+The `latest_package` path does **not** read this lock; it is separately blocked
+on the deploy attestation ("completion") package (issue #258).
+
 **Repository variables** (Settings → Actions → Variables), all optional:
 
 | Variable | Default |
