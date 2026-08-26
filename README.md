@@ -237,6 +237,21 @@ The procedure catalog is intentionally narrow:
   `netbox-network` credential-identity API, signed lease, and scheduling-domain
   isolation are deployed together. See
   [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
+- `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
+  approval-required provisioning contract for the two organization CI lanes on
+  the assigned runner host. The required closed `lane` enum selects either the
+  no-socket, `cap_drop: ALL`, no-new-privileges, non-root `cirunner`
+  `untrusted-python312` host-executor stack or the `general-ubuntu` Docker-
+  executor stack, where only the runner mounts `/var/run/docker.sock` and jobs
+  run as sibling containers without that socket. Runner name, ordered labels,
+  image, executor, Compose directory, and trust posture are frozen server-side;
+  callers cannot override them. Callers provide only the lane, bounded common
+  controls, and `registration_token_secret_ref`; SSH resolves exclusively from
+  the assigned NetBox object. Migration `0084` depends on `0083`, seeds the row
+  and representative command with `enabled=False`, and a three-layer code gate
+  keeps it non-advertised and non-dispatchable until the matching
+  `netbox-rpc-backend` handler and approved capability contract ship. See
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -1352,6 +1367,14 @@ mirror and production-capable runners ineligible for pull-request jobs and
 permit ordinary CI to match only the isolated runner label. Until that external
 policy is provisioned and proven, this CI contract must remain blocked/queued
 rather than activated on a broader runner.
+
+Migration `0080` adds
+`service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
+procedure for provisioning that isolated organization runner on the assigned
+runner host. It is seeded disabled and hard-gated until its backend handler is
+available. See
+[`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md)
+for the exact SSH/Docker commands to translate into Ansible.
 
 Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, the
 rebuild oracle, the append-only ledger, the command handlers, and the

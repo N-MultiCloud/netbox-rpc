@@ -33,6 +33,8 @@ from ..constants import (
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
+    GITEA_ORG_CI_RUNNER_PROVISION,
+    GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     HUAWEI_MA5800_R024_START_ONT,
@@ -123,6 +125,9 @@ from ..models import (
     RPCLinuxServiceAllowlist,
     RPCNetBoxPluginAllowlist,
 )
+from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
+from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
+from ..transport import driver_capability as _driver_capability
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -132,7 +137,9 @@ _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # Duplicated from models for the same reason as the path regex above: the
 # pure-domain test suite must not have to model netbox_rpc.models.
-_PYTHON_DISTRIBUTION_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\Z")
+_PYTHON_DISTRIBUTION_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\Z"
+)
 _PYTHON_MODULE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _PYTHON_EXACT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.!+-]{0,63}\Z")
 
@@ -189,6 +196,11 @@ _INFLUXDB3_DEBIAN13_AVAILABLE = False
 # is also seeded disabled; this code gate prevents an operator toggle from
 # bypassing the coordinated rollout order.
 _GITEA_RUNNER_REGISTER_AVAILABLE = False
+# No service.gitea.actions_runner.* handler exists in netbox-rpc-backend yet.
+# Keep this independent of RPCProcedure.enabled so an operator cannot make the
+# catalog dispatchable without the paired backend implementation and capability
+# contract. Flip to True only in the same additive rollout that enables the row.
+_GITEA_ORG_CI_RUNNER_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -248,6 +260,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "execution could only queue and then fail on an unknown handler. "
             "Enable it in the coordinated rollout that ships the handlers and "
             "their approved capability contract."
+        )
+    if (
+        procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
+        and not _GITEA_ORG_CI_RUNNER_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no service.gitea.actions_runner.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handler and "
+            "its approved capability contract."
         )
     return None
 
@@ -457,6 +480,81 @@ _INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
     }
 )
 
+# Gitea Actions org CI runner provisioning catalog (migration 0084). This is a
+# backend-owned SSH/Docker workflow: NetBox supplies a closed, approval-bound
+# contract, and the backend resolves the target host and SSH credential from the
+# assigned object. Each lane's runtime authority and trust posture are fixed here.
+_GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL = "http://10.0.30.96:3000"
+_GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION = "N-MultiCloud"
+_GITEA_ORG_CI_RUNNER_LANES = {
+    "untrusted-python312": {
+        "runner_name": "ci-untrusted-nmulticloud-org-241",
+        "runner_labels": ("ci-untrusted-python312:host",),
+        "runner_image": "nmc/ci-untrusted-runner:python312-241",
+        "compose_project_dir": "/opt/nmc-ci-untrusted-org-241",
+        "executor": "host",
+        "runner_mounts_docker_socket": False,
+        "jobs_mount_docker_socket": False,
+        "runner_cap_drop_all": True,
+        "runner_no_new_privileges": True,
+        "job_user": "cirunner",
+    },
+    "general-ubuntu": {
+        "runner_name": "ci-ubuntu-nmulticloud-org-241",
+        "runner_labels": (
+            "ubuntu-latest:docker://nmulti/gitea-act-ubuntu:22.04-actions",
+            "ubuntu-24.04:docker://nmulti/gitea-act-ubuntu:22.04-actions",
+            "ubuntu-22.04:docker://nmulti/gitea-act-ubuntu:22.04-actions",
+        ),
+        "runner_image": "nmulti/gitea-act-ubuntu:22.04-actions",
+        "compose_project_dir": "/opt/nmc-ci-ubuntu-241",
+        "executor": "docker",
+        "runner_mounts_docker_socket": True,
+        "jobs_mount_docker_socket": False,
+        "runner_cap_drop_all": False,
+        "runner_no_new_privileges": False,
+        "job_user": None,
+    },
+}
+_GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
+_GITEA_ORG_CI_RUNNER_ORG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_GITEA_ORG_CI_RUNNER_HOST_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?"
+)
+_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = {
+    "install_docker": True,
+    "build_runner_image": True,
+    "load_prebuilt_runner_image": False,
+    "force_recreate": False,
+}
+_GITEA_ORG_CI_RUNNER_PARAM_KEYS = frozenset(
+    {
+        "lane",
+        "registration_token_secret_ref",
+        "gitea_instance_url",
+        "organization",
+        *_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS,
+    }
+)
+_GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+_GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
 _AKVORADO_SENSITIVE_KEY_RE = re.compile(
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
@@ -638,10 +736,6 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 # default would make every asyncssh procedure stop pinning its driver.
 
 _UNSET = object()
-
-from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
-from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
-from ..transport import driver_capability as _driver_capability
 
 
 def _transport_policy() -> Any | None:
@@ -1044,6 +1138,8 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == GITEA_RUNNER_REGISTER:
         return _normalize_gitea_runner_registration_execution(execution)
+    if procedure_name == GITEA_ORG_CI_RUNNER_PROVISION:
+        return _normalize_gitea_org_ci_runner_provision_execution(execution, target)
 
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
@@ -2133,6 +2229,230 @@ def _normalize_influxdb3_debian13_execution(
     normalized["remote_bind"] = remote_bind
     normalized["command_fingerprint"]["remote_bind"] = remote_bind
 
+    return normalized
+
+
+def _gitea_org_ci_runner_pattern_param(
+    raw_value: object,
+    field_name: str,
+    pattern: re.Pattern[str],
+) -> str:
+    if not isinstance(raw_value, str):
+        raise RPCExecutionError(
+            f"{field_name} must be a string.",
+            code="RPC_PARAM_INVALID",
+        )
+    value = raw_value.strip()
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_gitea_org_ci_runner_url(raw_value: object) -> str:
+    if raw_value in (None, ""):
+        value = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
+    elif isinstance(raw_value, str):
+        value = raw_value.strip()
+    else:
+        raise RPCExecutionError(
+            "gitea_instance_url must be a string.",
+            code="RPC_PARAM_INVALID",
+        )
+    if not value or len(value) > 255:
+        raise RPCExecutionError(
+            "gitea_instance_url must be a non-empty URL of at most 255 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    parsed = urlparse(value)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RPCExecutionError(
+            "gitea_instance_url must be an http(s) origin URL with no credentials, "
+            "path, query, or fragment.",
+            code="RPC_PARAM_INVALID",
+        )
+    host = parsed.hostname.lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        raise RPCExecutionError(
+            "gitea_instance_url must be reachable from the runner host and must "
+            "not use loopback.",
+            code="RPC_PARAM_INVALID",
+        )
+    if not _GITEA_ORG_CI_RUNNER_HOST_RE.fullmatch(host):
+        raise RPCExecutionError(
+            "gitea_instance_url host has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "gitea_instance_url port must be between 1 and 65535.",
+            code="RPC_PARAM_OUT_OF_RANGE",
+        ) from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise RPCExecutionError(
+            "gitea_instance_url port must be between 1 and 65535.",
+            code="RPC_PARAM_OUT_OF_RANGE",
+        )
+    netloc = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme.lower()}://{netloc}"
+
+
+def _normalize_gitea_org_ci_runner_provision_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the Gitea Actions org CI runner provision procedure."""
+
+    procedure_name = execution.procedure.name
+    params = execution.params or {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            f"{procedure_name} params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    target = str(target or "").strip()
+    if not target or any(ord(char) < 32 or ord(char) == 127 for char in target):
+        raise RPCExecutionError(
+            "Gitea org CI runner provisioning requires a safe target display name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    content_type = f"{app_label}.{model}"
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        target_model not in _GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS
+        or content_type != target_model
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Gitea org CI runner provisioning requires an existing assigned "
+            "dcim.device or virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    supplied_overrides = sorted(
+        set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
+    )
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params)
+        - _GITEA_ORG_CI_RUNNER_PARAM_KEYS
+        - _GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    secret_ref = params.get("registration_token_secret_ref")
+    if not isinstance(secret_ref, str) or not _INFLUXDB_SECRET_REF_RE.fullmatch(
+        secret_ref.strip()
+    ):
+        raise RPCExecutionError(
+            "registration_token_secret_ref must be an nms-secret:<uuid> reference.",
+            code="RPC_PARAM_INVALID",
+        )
+    secret_ref = secret_ref.strip()
+
+    lane = params.get("lane")
+    if not isinstance(lane, str) or lane not in _GITEA_ORG_CI_RUNNER_LANES:
+        raise RPCExecutionError(
+            "lane must be 'untrusted-python312' or 'general-ubuntu'.",
+            code="RPC_PARAM_INVALID",
+        )
+    lane_contract = _GITEA_ORG_CI_RUNNER_LANES[lane]
+
+    gitea_instance_url = _normalize_gitea_org_ci_runner_url(
+        params.get("gitea_instance_url")
+    )
+    organization = _gitea_org_ci_runner_pattern_param(
+        params.get("organization", _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION),
+        "organization",
+        _GITEA_ORG_CI_RUNNER_ORG_RE,
+    )
+    booleans = {
+        key: _bool_param(params, key, default)
+        for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
+    }
+    if booleans["build_runner_image"] and booleans["load_prebuilt_runner_image"]:
+        raise RPCExecutionError(
+            "build_runner_image and load_prebuilt_runner_image are mutually exclusive.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "lane": lane,
+        "runner_name": lane_contract["runner_name"],
+        "runner_labels": list(lane_contract["runner_labels"]),
+        "runner_image": lane_contract["runner_image"],
+        "compose_project_dir": lane_contract["compose_project_dir"],
+        "executor": lane_contract["executor"],
+        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
+        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
+        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
+        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
+        "job_user": lane_contract["job_user"],
+        **booleans,
+    }
+    fingerprint = {
+        "handler_id": execution.procedure.handler_id,
+        "procedure": procedure_name,
+        "target_content_type": content_type,
+        "target_object_id": object_id,
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "lane": lane,
+        "runner_name": lane_contract["runner_name"],
+        "runner_labels_sha256": _hash_json(list(lane_contract["runner_labels"])),
+        "runner_image": lane_contract["runner_image"],
+        "compose_project_dir": lane_contract["compose_project_dir"],
+        "executor": lane_contract["executor"],
+        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
+        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
+        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
+        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
+        "job_user": lane_contract["job_user"] or "",
+        **booleans,
+    }
+    normalized["command_fingerprint"] = fingerprint
     return normalized
 
 

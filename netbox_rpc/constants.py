@@ -124,6 +124,18 @@ GITEA_PRODUCTION_UPGRADE_1_27_1 = "service.gitea.production.upgrade_1_27_1"
 GITEA_PRODUCTION_UPGRADE_1_27_1_HANDLER = GITEA_PRODUCTION_UPGRADE_1_27_1
 GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
 GITEA_RUNNER_REGISTER_HANDLER = GITEA_RUNNER_REGISTER
+
+# Disabled, approval-bound Gitea Actions org CI runner provisioning. The caller
+# chooses one reviewed lane; its runner name, labels, image, executor, project
+# directory, and trust posture are fixed in the normalizer/backend contract.
+# The one-time Gitea registration token remains an nms-secret reference.
+GITEA_ORG_CI_RUNNER_PROVISION = "service.gitea.actions_runner.provision_org_ci_runner"
+GITEA_ORG_CI_RUNNER_PROVISION_HANDLER = GITEA_ORG_CI_RUNNER_PROVISION
+GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
+    {
+        GITEA_ORG_CI_RUNNER_PROVISION,
+    }
+)
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
     {
         NETBOX_STAGING_ROTATE_BACKEND_TOKEN,

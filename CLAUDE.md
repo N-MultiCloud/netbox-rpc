@@ -68,6 +68,15 @@ command behavior changes.
 > never exposes the reusable registration token. Its durable fence,
 > expected-token rotation/reconciliation, and activation order are mandatory; see
 > `docs/gitea-runner-registration.md`.
+> `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
+> runner-host provisioning procedure, seeded disabled and hard-gated until the
+> paired backend handler exists. Its closed `lane` enum selects either the
+> no-socket/non-root `untrusted-python312` host-executor stack or the
+> runner-socket-only `general-ubuntu` Docker-executor stack. Every lane-specific
+> name, label, image, directory, executor, and trust-posture value is frozen
+> server-side. It accepts the registration credential only as an
+> `nms-secret:<uuid>` reference and rejects caller SSH routing. See
+> `docs/gitea-org-ci-runner-provision.md`.
 
 @AGENTS.md
 
