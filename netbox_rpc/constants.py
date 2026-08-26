@@ -394,6 +394,7 @@ UBUNTU_24_JOURNAL_TAIL_HANDLER = "os.linux_ubuntu_24.journal_tail"
 # environment file and systemd unit from RPCLinuxServiceAllowlist; callers pass
 # only a service slug, a confined variable name, and a DeviceCredential PK.
 LINUX_ENV_FILE_UPSERT_VAR = "os.linux_env_file.upsert_var"
+NETBOX_PLUGIN_INSTALL = "netbox.plugin.install"
 LINUX_ENV_FILE_UPSERT_VAR_HANDLER = "os.linux_env_file.upsert_var"
 
 _SSH_INSTALL_KEY_PARAMS_SCHEMA = {

@@ -80,6 +80,14 @@ EXEMPT_HANDLER_RATIONALE = {
         "Installs key material through stdin to a guarded bash script; the public "
         "key body is intentionally never represented as argv."
     ),
+    "netbox.plugin.install": (
+        "Orchestrates a version-window pre-flight, a pinned install into a "
+        "configured virtualenv, an in-place PLUGINS edit taken from a backup, "
+        "migrations, collectstatic, allowlisted service restarts, a health "
+        "check, and a settings-file restore if NetBox does not come back. The "
+        "rollback in particular has no fixed-argv representation: whether it "
+        "runs depends on whether the health check passed."
+    ),
     "os.linux_ubuntu_24.install_zabbix_agent2": (
         "Runs a multi-line install/configuration script through sudo bash -s with "
         "repository setup and config-file edits."

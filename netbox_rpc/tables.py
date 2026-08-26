@@ -7,6 +7,7 @@ from .models import (
     RPCExecutionEvent,
     RPCIntent,
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
 )
@@ -241,3 +242,28 @@ class RPCExecutionEventTable(NetBoxTable):
             "actions",
         )
         default_columns = ("execution", "sequence", "level", "event", "message")
+
+
+class RPCNetBoxPluginAllowlistTable(NetBoxTable):
+    slug = tables.Column(linkify=True)
+    enabled = columns.BooleanColumn()
+    ssh_credential_override = tables.Column(verbose_name="SSH Credential Override")
+
+    class Meta(NetBoxTable.Meta):
+        model = RPCNetBoxPluginAllowlist
+        fields = (
+            "pk",
+            "id",
+            "slug",
+            "distribution",
+            "module",
+            "venv_python",
+            "manage_py",
+            "settings_file",
+            "service_slugs",
+            "enabled",
+            "target_models",
+            "ssh_credential_override",
+            "description",
+        )
+        default_columns = ("slug", "distribution", "module", "enabled")

@@ -7,6 +7,7 @@ from .models import (
     RPCExecutionEvent,
     RPCIntent,
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
 )
@@ -69,6 +70,14 @@ class RPCLinuxServiceAllowlistFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = RPCLinuxServiceAllowlist
         fields = ("slug", "systemd_unit", "environment_file", "enabled")
+
+
+class RPCNetBoxPluginAllowlistFilterSet(NetBoxModelFilterSet):
+    enabled = django_filters.BooleanFilter()
+
+    class Meta:
+        model = RPCNetBoxPluginAllowlist
+        fields = ("slug", "distribution", "module", "enabled")
 
 
 class RPCIntentFilterSet(NetBoxModelFilterSet):

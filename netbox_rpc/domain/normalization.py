@@ -45,6 +45,7 @@ from ..constants import (
     INFLUXDB_1_TOKEN_CREATE,
     LINUX_COLLECT_FACTS,
     LINUX_ENV_FILE_UPSERT_VAR,
+    NETBOX_PLUGIN_INSTALL,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
@@ -106,7 +107,11 @@ from ..constants import (
     UBUNTU_24_STOP_SERVICE,
 )
 from ..command_templating import RENDER_JINJA
-from ..models import RPCLinuxServiceAllowlist, RPCExecution
+from ..models import (
+    RPCExecution,
+    RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
+)
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -114,6 +119,11 @@ _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 # models.ENVIRONMENT_FILE_PATH_RE (duplicated, not imported, so the
 # stub-based pure-domain test suite need not model netbox_rpc.models).
 _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
+# Duplicated from models for the same reason as the path regex above: the
+# pure-domain test suite must not have to model netbox_rpc.models.
+_PYTHON_DISTRIBUTION_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\Z")
+_PYTHON_MODULE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_PYTHON_EXACT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.!+-]{0,63}\Z")
 
 # Hard-coded fail-closed gate for os.linux_env_file.upsert_var, independent of
 # RPCProcedure.enabled (ordinary mutable catalog data that an operator could
@@ -154,6 +164,7 @@ _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # are met.
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
 _HUAWEI_NE8000_BGP_AVAILABLE = False
+_NETBOX_PLUGIN_INSTALL_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -177,6 +188,15 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "object-scoped-authorization checked against the requester "
             "(issue #203), and approval decisions are not yet bound to an "
             "allowlist-policy snapshot (issue #163)."
+        )
+    if procedure_name == NETBOX_PLUGIN_INSTALL and not _NETBOX_PLUGIN_INSTALL_AVAILABLE:
+        return (
+            "netbox.plugin.install cannot run yet: the nms-backend execution "
+            "handler is not deployed. Note also that approval decisions are not "
+            "yet bound to a snapshot of the RPCNetBoxPluginAllowlist row the "
+            "worker resolves at claim time (issue #163), so an approver could "
+            "approve against one row and the worker execute against another "
+            "edited in between."
         )
     if (
         procedure_name == HUAWEI_NE8000_F1A_SHOW_BGP_PEER
@@ -647,6 +667,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == LINUX_ENV_FILE_UPSERT_VAR:
         return _normalize_linux_env_file_upsert_execution(execution, target)
+
+    if procedure_name == NETBOX_PLUGIN_INSTALL:
+        return _normalize_netbox_plugin_install_execution(execution, target)
 
     if procedure_name == HUAWEI_MA5800_R024_START_ONT:
         params = execution.params or {}
@@ -2537,6 +2560,137 @@ def _normalize_linux_service_execution(
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "systemd_unit": unit,
+        },
+    }
+    if allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
+
+
+def _normalize_netbox_plugin_install_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Resolve an allowlisted NetBox plugin install; callers name only a slug.
+
+    Everything that decides what runs comes from the allowlist row. The caller
+    supplies the row's slug and a version, and nothing else reaches the backend
+    that could redirect the install -- a caller-supplied distribution would be
+    a string handed to ``pip install`` and then imported by a NetBox restart.
+
+    The services to restart are resolved through ``RPCLinuxServiceAllowlist``
+    rather than being named on the plugin row. That is deliberate: it means a
+    unit this procedure can restart is a unit an operator already approved for
+    restarting, and the two allowlists cannot drift into letting this procedure
+    bounce something the service catalog forbids.
+    """
+
+    # Defense in depth, as for the env-file upsert: create_execution() and
+    # /procedures/available/ already consult the gate, but a worker can claim a
+    # row created by an older process during a rolling deployment. Recheck
+    # before any allowlist lookup runs.
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    params = execution.params or {}
+    slug = str(params.get("plugin_slug") or "").strip()
+    allow = RPCNetBoxPluginAllowlist.objects.filter(slug=slug, enabled=True).first()
+    if allow is None:
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} is not allowlisted.",
+            code="RPC_NETBOX_PLUGIN_NOT_ALLOWLISTED",
+        )
+
+    target_models = set(allow.target_models or [])
+    if target_models and execution.target_model_label not in target_models:
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} is not allowed for {execution.target_model_label}.",
+            code="RPC_NETBOX_PLUGIN_TARGET_DENIED",
+        )
+
+    # Defensive revalidation of the row itself. The model's clean() enforces
+    # these already, but a row written outside full_clean() -- a fixture, a data
+    # migration, a bulk update -- must not reach the backend unvalidated. This
+    # is the same reasoning as the env-file path recheck above, and it matters
+    # more here: these strings become a pip target and a settings-file path.
+    distribution = str(allow.distribution or "").strip()
+    module = str(allow.module or "").strip()
+    if not _PYTHON_DISTRIBUTION_RE.fullmatch(distribution):
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} has a malformed distribution name.",
+            code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+        )
+    if not _PYTHON_MODULE_RE.fullmatch(module):
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} has a malformed module path.",
+            code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+        )
+    paths = {
+        "venv_python": str(allow.venv_python or "").strip(),
+        "manage_py": str(allow.manage_py or "").strip(),
+        "settings_file": str(allow.settings_file or "").strip(),
+    }
+    for field, value in paths.items():
+        if not _ENVIRONMENT_FILE_PATH_RE.fullmatch(value):
+            raise RPCExecutionError(
+                f"NetBox plugin {slug!r} has a malformed {field}.",
+                code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+            )
+
+    version = str(params.get("version") or "").strip()
+    if not _PYTHON_EXACT_VERSION_RE.fullmatch(version):
+        raise RPCExecutionError(
+            "version must be an exact version, not a range or an unpinned name.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # Resolve each restart target through the *service* allowlist, so this
+    # procedure can only bounce units that catalog already permits.
+    service_slugs = list(allow.service_slugs or [])
+    systemd_units: list[str] = []
+    for service_slug in service_slugs:
+        service = RPCLinuxServiceAllowlist.objects.filter(
+            slug=str(service_slug).strip(), enabled=True
+        ).first()
+        if service is None:
+            raise RPCExecutionError(
+                f"NetBox plugin {slug!r} lists service {service_slug!r}, which is "
+                f"not allowlisted.",
+                code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
+            )
+        systemd_units.append(service.systemd_unit)
+
+    if not systemd_units:
+        # Installing without restarting leaves the plugin on disk and absent
+        # from the running process -- a half-applied change that reports
+        # success and shows no plugin. Refuse rather than pretend.
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} lists no services to restart; the install "
+            f"would never take effect.",
+            code="RPC_NETBOX_PLUGIN_NO_SERVICES",
+        )
+
+    result: dict[str, Any] = {
+        "target": target,
+        "plugin_slug": slug,
+        "distribution": distribution,
+        "module": module,
+        "version": version,
+        "venv_python": paths["venv_python"],
+        "manage_py": paths["manage_py"],
+        "settings_file": paths["settings_file"],
+        "systemd_units": systemd_units,
+        "dry_run": bool(params.get("dry_run", False)),
+        # The fingerprint is what an approver is really approving: the exact
+        # artifact and the exact units, not the slug that stands for them.
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "distribution": distribution,
+            "version": version,
+            "module": module,
+            "settings_file": paths["settings_file"],
+            "systemd_units": systemd_units,
         },
     }
     if allow.ssh_credential_override_id is not None:

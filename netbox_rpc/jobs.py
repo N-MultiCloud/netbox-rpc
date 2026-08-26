@@ -12,6 +12,7 @@ from netbox.jobs import JobRunner
 from .backends import BackendTarget
 from .domain.normalization import (
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCExecutionError,
     _apply_driver_pipeline_overrides,
     _dispatch_normalize_execution_params,
@@ -36,6 +37,7 @@ RPC_JOB_TIMEOUT = 600
 __all__ = (
     "BackendTarget",
     "RPCLinuxServiceAllowlist",
+    "RPCNetBoxPluginAllowlist",
     "RPCExecutionError",
     "RPCExecutionJob",
     "_apply_driver_pipeline_overrides",

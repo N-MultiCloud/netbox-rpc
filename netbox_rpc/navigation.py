@@ -55,6 +55,18 @@ menu = PluginMenu(
                         ),
                     ),
                 ),
+                PluginMenuItem(
+                    link="plugins:netbox_rpc:rpcnetboxpluginallowlist_list",
+                    link_text="NetBox Plugin Allowlist",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rpc:rpcnetboxpluginallowlist_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                            color=ButtonColorChoices.GREEN,
+                        ),
+                    ),
+                ),
             ),
         ),
         (

@@ -52,6 +52,24 @@ SYSTEMD_UNIT_RE = re.compile(
 # _OOKLA_ABS_PATH_RE convention in domain/normalization.py.
 ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 
+# PEP 503 normalized distribution name. Deliberately strict: this is the name
+# handed to `pip install`, and pip accepts far more than a name -- a URL, a
+# local path, a VCS reference, an `--option`. None of those may ever reach it,
+# so the pattern permits only what a plain PyPI-style name can contain, and
+# `RPCNetBoxPluginAllowlist` is what supplies the value in the first place.
+PYTHON_DISTRIBUTION_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")
+
+# Importable Python module path, e.g. `netbox_openbao`. Dotted form is allowed
+# because NetBox's PLUGINS accepts one, but each segment must be a valid
+# identifier -- this string is written into a settings file and imported.
+PYTHON_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+# An exact version. `pip install pkg` with no pin resolves to whatever is
+# newest at that moment, which makes the artifact a NetBox restart is about to
+# execute unknowable from the audit record -- the whole point of this catalog.
+# A range is refused for the same reason.
+PYTHON_EXACT_VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.!+-]{0,63}$")
+
 # Bare hostname/domain for RPCBackend.domain: alphanumerics, dots, and hyphens
 # only — no scheme, port, path, or whitespace. Prevents a URL parser differential
 # when composing backend_url as "{scheme}://{host}:{port}".
@@ -1234,3 +1252,142 @@ class RpcPluginSettings(NetBoxModel):
         if self.backend_id is not None and self.backend is not None:
             return backends._adapt_backend(self.backend)
         return backends.resolve_backend(None)
+
+
+class RPCNetBoxPluginAllowlist(NetBoxModel):
+    """A NetBox plugin an operator has authorized for installation by RPC.
+
+    This model exists so that ``netbox.plugin.install`` never takes a
+    caller-supplied distribution name. A procedure that did would be remote
+    code execution with an audit trail attached: whatever string reached
+    ``pip install`` would be fetched and then imported by a NetBox restart.
+
+    The caller supplies only this row's ``slug``. Everything that determines
+    *what runs* -- the distribution, the module written into ``PLUGINS``, the
+    virtualenv, the settings file, the units to restart -- is operator-managed
+    here and resolved by the normalizer, exactly as
+    ``RPCLinuxServiceAllowlist`` resolves a systemd unit.
+
+    The version is the one exception, and it is caller-supplied on purpose: an
+    upgrade is the same operation against the same row, and pinning the version
+    in the row would mean editing the allowlist for every bump. It is validated
+    as an exact version rather than a range, so the audit record names the
+    precise artifact that was installed.
+    """
+
+    slug = models.SlugField(max_length=100, unique=True)
+    distribution = models.CharField(
+        max_length=100,
+        help_text=(
+            "Distribution name passed to pip, e.g. `netbox-openbao`. Never "
+            "caller-supplied; this row is the only source."
+        ),
+    )
+    module = models.CharField(
+        max_length=200,
+        help_text=(
+            "Python module appended to PLUGINS, e.g. `netbox_openbao`. Must be "
+            "importable after the distribution is installed."
+        ),
+    )
+    venv_python = models.CharField(
+        max_length=255,
+        help_text=(
+            "Absolute path to the NetBox virtualenv interpreter, e.g. "
+            "`/opt/netbox/venv/bin/python3`. Installs and migrations run through "
+            "this interpreter, never a bare `python`."
+        ),
+    )
+    manage_py = models.CharField(
+        max_length=255,
+        help_text="Absolute path to NetBox's manage.py.",
+    )
+    settings_file = models.CharField(
+        max_length=255,
+        help_text=(
+            "Absolute path to the settings file holding PLUGINS/PLUGINS_CONFIG. "
+            "Edited in place and restored if NetBox fails to start."
+        ),
+    )
+    service_slugs = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "RPCLinuxServiceAllowlist slugs to restart after installing, in "
+            "order -- typically the NetBox service and its RQ worker. Restarts "
+            "go through that allowlist rather than naming units here, so a unit "
+            "this procedure can restart is a unit an operator already approved."
+        ),
+    )
+    enabled = models.BooleanField(default=True)
+    target_models = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Optional model labels this plugin may be installed on.",
+    )
+    description = models.CharField(max_length=255, blank=True)
+    comments = models.TextField(blank=True)
+    ssh_credential_override = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        db_column="ssh_credential_override_id",
+        db_index=True,
+        help_text=(
+            "Override the device-level DeviceService SSH credential for RPC jobs "
+            "targeting this plugin host. Leave blank to use the target device's "
+            "default SSH DeviceService credential resolved by device name."
+        ),
+    )
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("slug",)
+        verbose_name = "RPC NetBox Plugin Allowlist Entry"
+        verbose_name_plural = "RPC NetBox Plugin Allowlist Entries"
+
+    def __str__(self) -> str:
+        return self.slug
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpcnetboxpluginallowlist", args=[self.pk])
+
+    @property
+    def ssh_credential_override_id(self) -> int | None:
+        return self.ssh_credential_override
+
+    @ssh_credential_override_id.setter
+    def ssh_credential_override_id(self, value: int | None) -> None:
+        self.ssh_credential_override = value
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, str] = {}
+
+        if not PYTHON_DISTRIBUTION_RE.fullmatch(self.distribution or ""):
+            errors["distribution"] = (
+                "Distribution must be a plain package name. URLs, paths, VCS "
+                "references and pip options are rejected -- this value is passed "
+                "to pip, which would accept all of them."
+            )
+        if not PYTHON_MODULE_RE.fullmatch(self.module or ""):
+            errors["module"] = (
+                "Module must be an importable dotted Python identifier; it is "
+                "written into PLUGINS and imported at NetBox startup."
+            )
+        for field in ("venv_python", "manage_py", "settings_file"):
+            value = getattr(self, field, "") or ""
+            if not ENVIRONMENT_FILE_PATH_RE.fullmatch(value):
+                errors[field] = (
+                    "Must be an absolute path with no traversal, containing only "
+                    "letters, numbers, dot, dash, underscore and slash."
+                )
+
+        if not isinstance(self.service_slugs, list) or not all(
+            isinstance(item, str) and item for item in self.service_slugs
+        ):
+            errors["service_slugs"] = "Must be a list of RPCLinuxServiceAllowlist slugs."
+
+        if errors:
+            raise ValidationError(errors)
