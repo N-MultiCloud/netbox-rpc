@@ -55,6 +55,29 @@ The procedure catalog is intentionally narrow:
   `netbox` (`netbox.service`), and `netbox-rq` (`netbox-rq.service`) services.
   Restarting `netbox-rq` is the audited way to sweep a NetBox RQ job stuck in
   `running` after its worker died.
+- `netbox.plugin.install` — installs an **allowlisted** NetBox plugin at an
+  **exact** version on a managed NetBox host, registers it in `PLUGINS`,
+  migrates, collects static, restarts the allowlisted services, health checks,
+  and **restores the previous settings file if NetBox does not come back**.
+  `approval_required=True`.
+
+  Params are only `plugin_slug`, `version`, and optional `dry_run`. Everything
+  that decides what runs — distribution, module, interpreter, settings file,
+  services — comes from an operator-managed `RPCNetBoxPluginAllowlist` row. A
+  caller-supplied distribution would be remote code execution with an audit
+  trail attached: it reaches `pip install`, which accepts URLs, paths and VCS
+  references, and whatever it fetches is then imported by a NetBox restart.
+
+  The rollback is the reason this is a procedure at all. A plugin outside the
+  running NetBox's version window does not degrade — NetBox refuses to start —
+  so a bad install is an outage on a host whose NetBox is already down.
+  `dry_run=true` runs the version pre-flight and stops.
+
+  Restart targets resolve through `RPCLinuxServiceAllowlist`, so this procedure
+  can only bounce units that catalog already permits. Seeded `enabled=False`
+  **and** hard-gated in code; do not open either until the paired nms-backend
+  handler is deployed.
+
 - `os.linux_env_file.upsert_var` — writes a single `KEY=VALUE` line (backend
   resolves the value from a `credential_pk` reference and delivers it over
   stdin; no raw secret is ever accepted as a param) into the allowlisted
