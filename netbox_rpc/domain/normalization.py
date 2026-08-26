@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+import jsonschema
 import yaml
 
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
@@ -19,6 +20,9 @@ from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
     AKVORADO_1_PROCEDURE_NAMES,
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+    AKVORADO_BOOTSTRAP_DEBIAN13_PREFLIGHT,
+    AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES,
     DELL_OS10_S5232F_ALLOW_THIRD_PARTY_TRANSCEIVER,
     DELL_OS10_S5232F_BOOTSTRAP_RESTCONF,
     DELL_OS10_S5232F_CONFIGURE_INTERFACE_BREAKOUT,
@@ -203,6 +207,11 @@ _GITEA_RUNNER_REGISTER_AVAILABLE = False
 # catalog dispatchable without the paired backend implementation and capability
 # contract. Flip to True only in the same additive rollout that enables the row.
 _GITEA_ORG_CI_RUNNER_AVAILABLE = False
+# Migration 0086 deliberately seeds the paired rows disabled with this code gate
+# closed. A later release may flip both only after this seed release is fully
+# deployed, so mixed old/new workers and package rollback cannot expose the
+# installer through the old generic claim path.
+_AKVORADO_BOOTSTRAP_DEBIAN13_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -273,6 +282,15 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "execution could only queue and then fail on an unknown handler. "
             "Enable it in the coordinated rollout that ships the handler and "
             "its approved capability contract."
+        )
+    if (
+        procedure_name in AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+        and not _AKVORADO_BOOTSTRAP_DEBIAN13_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: the Debian 13 Akvorado bootstrap "
+            "handlers and approved capability contracts are not deployed in "
+            "netbox-rpc-backend."
         )
     return None
 
@@ -702,7 +720,6 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 
 _UNSET = object()
 
-
 def _transport_policy() -> Any | None:
     """The plugin settings singleton, or ``None`` when it cannot be read.
 
@@ -1117,6 +1134,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES:
         return _normalize_influxdb3_debian13_execution(execution, target)
+
+    if procedure_name in AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES:
+        return _normalize_akvorado_bootstrap_debian13_execution(execution, target)
 
     if procedure_name in OPENBAO_1_PROCEDURE_NAMES:
         return _normalize_openbao_1_execution(execution, target)
@@ -2389,6 +2409,136 @@ def _normalize_gitea_org_ci_runner_provision_execution(
     return normalized
 
 
+def _normalize_akvorado_bootstrap_debian13_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Bind Akvorado bootstrap to one existing NetBox device.
+
+    The preflight has no caller-controlled behavior. The installer exposes one
+    boolean resource-policy override and no SSH routing fields. Runtime host,
+    credential, and host-key policy therefore remain owned by the assigned
+    DeviceService at both admission and dispatch.
+    """
+
+    procedure_name = execution.procedure.name
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    content_type = f"{app_label}.{model}"
+    if (
+        target_model != "dcim.device"
+        or content_type != target_model
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Debian 13 Akvorado bootstrap requires an existing dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params or {}
+    supplied_overrides = sorted(set(params) & _INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS)
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The backend "
+            "resolves SSH exclusively from the assigned device.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    allowed = (
+        {"allow_resource_shortfall"}
+        if procedure_name == AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
+        else set()
+    )
+    if procedure_name not in {
+        AKVORADO_BOOTSTRAP_DEBIAN13_PREFLIGHT,
+        AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+    }:
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+    unexpected = sorted(set(params) - allowed - _INFLUXDB3_INTERNAL_PARAM_KEYS)
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            "target_content_type": content_type,
+            "target_object_id": object_id,
+        },
+    }
+    if procedure_name == AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL:
+        assigned_object = getattr(execution, "assigned_object", None)
+        primary_ip4 = getattr(assigned_object, "primary_ip4", None)
+        raw_address = getattr(primary_ip4, "address", primary_ip4)
+        try:
+            ssh_host = ip_address(str(raw_address).split("/", 1)[0])
+        except ValueError as exc:
+            raise RPCExecutionError(
+                "Debian 13 Akvorado install requires one explicit primary IPv4 address.",
+                code="RPC_TARGET_INVALID",
+            ) from exc
+        if ssh_host.version != 4:
+            raise RPCExecutionError(
+                "Debian 13 Akvorado install requires one explicit primary IPv4 address.",
+                code="RPC_TARGET_INVALID",
+            )
+        policy_ref = f"target-owned-ssh:dcim.device:{object_id}"
+        ssh_snapshot = {
+            **_resolve_locked_ssh_identity(
+                assigned_object_type_id=getattr(
+                    execution, "assigned_object_type_id", None
+                ),
+                assigned_object_id=object_id,
+                expected_host=str(ssh_host),
+                policy_ref=policy_ref,
+            ),
+            "ssh_strict_host_key_checking": True,
+        }
+        allow_shortfall = _bool_param(params, "allow_resource_shortfall", False)
+        normalized["allow_resource_shortfall"] = allow_shortfall
+        normalized["ssh_snapshot"] = ssh_snapshot
+        normalized["ssh_policy_ref"] = policy_ref
+        normalized["command_fingerprint"]["allow_resource_shortfall"] = allow_shortfall
+        normalized["command_fingerprint"]["target_object_sha256"] = _hash_json(
+            normalized["target_object"]
+        )
+        normalized["command_fingerprint"]["ssh_snapshot"] = ssh_snapshot
+        normalized["command_fingerprint"]["ssh_policy_ref"] = policy_ref
+    from ..akvorado_bootstrap_contract import (
+        AKVORADO_BOOTSTRAP_NORMALIZED_PARAMS_SCHEMAS,
+    )
+
+    try:
+        jsonschema.validate(
+            normalized,
+            AKVORADO_BOOTSTRAP_NORMALIZED_PARAMS_SCHEMAS[procedure_name],
+        )
+    except jsonschema.ValidationError as exc:
+        raise RPCExecutionError(
+            "Debian 13 Akvorado normalized contract validation failed.",
+            code="RPC_NORMALIZED_CONTRACT_INVALID",
+        ) from exc
+    return normalized
+
+
 def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
     """Normalize the typed Akvorado procedure family.
 
@@ -2444,6 +2594,21 @@ def _normalize_akvorado_1_execution(execution: RPCExecution) -> dict[str, Any]:
                 "config_content_bytes": len(content.encode("utf-8")),
             }
         )
+
+    from ..akvorado_bootstrap_contract import (
+        AKVORADO_LIFECYCLE_NORMALIZED_PARAMS_SCHEMAS,
+    )
+
+    try:
+        jsonschema.validate(
+            normalized,
+            AKVORADO_LIFECYCLE_NORMALIZED_PARAMS_SCHEMAS[procedure_name],
+        )
+    except jsonschema.ValidationError as exc:
+        raise RPCExecutionError(
+            "Akvorado lifecycle normalized contract validation failed.",
+            code="RPC_NORMALIZED_CONTRACT_INVALID",
+        ) from exc
 
     return normalized
 

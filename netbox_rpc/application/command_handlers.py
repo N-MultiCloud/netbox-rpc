@@ -11,6 +11,7 @@ from django.db import transaction
 from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 
+from .. import akvorado_bootstrap_contract as akvorado_contract
 from .. import dns_staging_deploy_contract as dns_staging_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_runner_contract as gitea_runner_contract
@@ -19,6 +20,9 @@ from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
     AKVORADO_1_PROCEDURE_NAMES,
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+    AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES,
+    EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES,
     GITEA_ORG_CI_RUNNER_PROVISION,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
@@ -61,6 +65,7 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
 # is exactly why the assigned object has to be authorization-checked here.
 _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     AKVORADO_1_PROCEDURE_NAMES
+    | AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
     | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
     | {GITEA_RUNNER_REGISTER, GITEA_ORG_CI_RUNNER_PROVISION}
 )
@@ -95,6 +100,8 @@ _GITEA_ORG_CI_RUNNER_APPROVAL_REASON = (
 _GITEA_ORG_CI_RUNNER_REJECTION_REASON = (
     "Rejected audited Gitea organization CI runner provisioning."
 )
+_AKVORADO_INSTALL_APPROVAL_REASON = "Approved audited Debian 13 Akvorado bootstrap."
+_AKVORADO_INSTALL_REJECTION_REASON = "Rejected audited Debian 13 Akvorado bootstrap."
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -102,6 +109,7 @@ _PROTECTED_APPROVAL_REASON = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_APPROVAL_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_APPROVAL_REASON,
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -109,6 +117,7 @@ _PROTECTED_REJECTION_REASON = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_REJECTION_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_REJECTION_REASON,
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_REJECTION_REASON,
 }
 
 _PROTECTED_CONTRACTS = {
@@ -117,6 +126,7 @@ _PROTECTED_CONTRACTS = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: gitea_contract,
     GITEA_RUNNER_REGISTER: gitea_runner_contract,
     GITEA_ORG_CI_RUNNER_PROVISION: gitea_org_ci_runner_contract,
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: akvorado_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -124,15 +134,8 @@ _PROTECTED_LABELS = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: "Production Gitea upgrade",
     GITEA_RUNNER_REGISTER: "Gitea runner registration",
     GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "Debian 13 Akvorado bootstrap",
 }
-_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
-    {
-        GITEA_PRODUCTION_UPGRADE_1_27_1,
-        GITEA_RUNNER_REGISTER,
-        GITEA_ORG_CI_RUNNER_PROVISION,
-        NETBOX_STAGING_DEPLOY_DNS_PAIR,
-    }
-)
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {
         "content_type": gitea_runner_contract.RUNNER_TARGET_OBJECT["content_type"],
@@ -290,8 +293,8 @@ def _verify_backend_capability(
     procedure's handler/version/effect/contract-hash/envelope against it. A
     ``MISMATCH`` (advertised but incompatible) is rejected (400). Legacy
     procedures retain graceful ``UNKNOWN`` handling; procedures in the explicit
-    protected-capability registry require a compatible manifest at admission
-    and claim.
+    protected-capability registry, including the Akvorado bootstrap family,
+    require a compatible manifest at admission and claim.
     """
     from .. import capabilities
     from ..models import RpcPluginSettings
@@ -300,7 +303,8 @@ def _verify_backend_capability(
     manifest = capabilities.fetch_backend_capabilities(target, use_cache=use_cache)
     status = capabilities.verify_procedure_capability(procedure, manifest)
     requires_explicit_capability = (
-        getattr(procedure, "name", "") in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES
+        getattr(procedure, "name", "")
+        in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
     )
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
@@ -809,6 +813,26 @@ def _require_protected_procedure_policy(
     procedure_name = str(getattr(procedure, "name", "") or "")
     contract_name = expected_name or procedure_name
     contract = _protected_contract(contract_name)
+    if contract_name == AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL:
+        from ..capabilities import derive_command_contract_hash
+
+        expected_hash = akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES[
+            AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
+        ]
+        if (
+            procedure_name != AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
+            or getattr(procedure, "enabled", None) is not True
+            or derive_command_contract_hash(procedure) != expected_hash
+        ):
+            raise drf_serializers.ValidationError(
+                {
+                    "procedure_id": (
+                        "Debian 13 Akvorado bootstrap catalog policy does not "
+                        "match the immutable reviewed contract."
+                    )
+                }
+            )
+        return
     actual_policy = _protected_procedure_policy(
         procedure,
         contract_name=contract_name,
@@ -1457,7 +1481,10 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                 execution,
                 backend_target=target,
             )
-        if execution.procedure.name in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
+        if (
+            execution.procedure.name
+            in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
+        ):
             _verify_backend_capability(
                 execution.procedure,
                 backend_target=target,

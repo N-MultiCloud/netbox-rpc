@@ -21,8 +21,11 @@ from ..application.command_handlers import (
     reject_execution,
 )
 from ..application.queries import execution_events
+from ..constants import (
+    EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES,
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+)
 from ..domain.normalization import code_gate_unavailable_reason
-from ..constants import NETBOX_STAGING_ROTATE_BACKEND_TOKEN
 from .serializers import (
     RPCBackendSerializer,
     RPCIntentRunSerializer,
@@ -94,23 +97,32 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
             if code_gate_unavailable_reason(procedure.name) is None
         ]
 
-        # #167: when the selected backend advertises a capability manifest, a
-        # procedure the backend cannot serve compatibly is not "available".
-        # Graceful when the backend advertises nothing (manifest is None).
+        # #167: a procedure the selected backend cannot serve compatibly is not
+        # "available". Legacy procedures degrade gracefully when the backend
+        # advertises nothing; protected bootstrap/upgrade procedures do not.
         from .. import capabilities
         from ..models import RpcPluginSettings
 
         manifest = capabilities.fetch_backend_capabilities(
             RpcPluginSettings.get_solo().resolved_backend_target()
         )
-        if manifest is not None:
-            compatible = [
-                procedure
-                for procedure in qs
-                if capabilities.verify_procedure_capability(procedure, manifest)
-                is not capabilities.CapabilityStatus.MISMATCH
-            ]
-            qs = compatible
+        qs = [
+            procedure
+            for procedure in qs
+            if (
+                (
+                    status := capabilities.verify_procedure_capability(
+                        procedure, manifest
+                    )
+                )
+                is capabilities.CapabilityStatus.COMPATIBLE
+                or (
+                    status is capabilities.CapabilityStatus.UNKNOWN
+                    and procedure.name
+                    not in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
+                )
+            )
+        ]
 
         page = self.paginate_queryset(qs)
         serializer = self.get_serializer(page if page is not None else qs, many=True)

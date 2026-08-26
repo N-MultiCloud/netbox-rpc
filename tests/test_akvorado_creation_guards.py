@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sys
@@ -106,6 +107,13 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "service.akvorado.1.config_read",
         "service.akvorado.1.config_deploy",
     }
+    constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES = {
+        "os.linux.debian.13.preflight_akvorado",
+        "os.linux.debian.13.install_akvorado",
+    }
+    constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL = (
+        "os.linux.debian.13.install_akvorado"
+    )
     constants.INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = {
         "os.linux.debian.13.preflight_influxdb3_core",
         "os.linux.debian.13.install_influxdb3_core",
@@ -123,13 +131,30 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.GITEA_ORG_CI_RUNNER_PROVISION = (
         "service.gitea.actions_runner.provision_org_ci_runner"
     )
+    constants.EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = (
+        constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+        | {
+            constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
+            constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
+            constants.GITEA_RUNNER_REGISTER,
+            constants.GITEA_ORG_CI_RUNNER_PROVISION,
+        }
+    )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
         constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
         constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
         constants.GITEA_ORG_CI_RUNNER_PROVISION,
+        constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
     }
+    akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
+    akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
+        constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "a" * 64,
+    }
+    akvorado_contract.canonical_sha256 = lambda value: hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
     aggregate.RPCExecutionAggregateError = type(
@@ -159,6 +184,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "rest_framework.serializers": drf_serializers,
         "rest_framework.exceptions": drf_exceptions,
         "netbox_rpc.backends": backends,
+        "netbox_rpc.akvorado_bootstrap_contract": akvorado_contract,
         "netbox_rpc.constants": constants,
         "netbox_rpc.domain.aggregate": aggregate,
         "netbox_rpc.domain.normalization": normalization,
@@ -697,6 +723,157 @@ def test_gitea_org_ci_runner_creation_requests_two_person_approval_without_enque
     ]
 
 
+def test_akvorado_install_creation_requests_protected_two_person_approval(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=264,
+        name="os.linux.debian.13.install_akvorado",
+        handler_id="os.linux_debian_13.install_akvorado",
+        enabled=True,
+        approval_required=True,
+        params_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"allow_resource_shortfall": {"type": "boolean"}},
+        },
+        timeout_seconds=1200,
+    )
+    params = {"allow_resource_shortfall": False}
+    execution = SimpleNamespace(pk=2640, procedure=procedure, params=params)
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": params}
+        initial_data = {
+            "procedure_id": procedure.name,
+            "assigned_object_type": "dcim.device",
+            "assigned_object_id": 45,
+            "params": params,
+        }
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            execution.requested_by = kwargs["requested_by"]
+            execution.requested_by_id = kwargs["requested_by"].pk
+            execution.backend_id = kwargs["backend"]
+            return execution
+
+    transitions: list[tuple[object, ...]] = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            pytest.fail("Akvorado install must not queue before distinct approval")
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: 1,
+    )
+    scoped_actions: list[str] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda candidate, user, action: scoped_actions.append(action),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="b" * 64),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: pytest.fail(
+            "Akvorado install must not enqueue before distinct approval"
+        ),
+    )
+    user = SimpleNamespace(pk=2641, has_perm=lambda permission: True)
+
+    created = command_handlers.create_execution(serializer=Serializer(), user=user)
+
+    assert created is execution
+    assert scoped_actions == ["execute"]
+    assert transitions == [
+        ("request", user.pk),
+        ("request_approval", "b" * 64, user.pk),
+    ]
+
+
+def test_akvorado_install_protected_policy_is_enabled_and_digest_pinned(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        name="os.linux.debian.13.install_akvorado",
+        enabled=True,
+    )
+    capabilities = types.ModuleType("netbox_rpc.capabilities")
+    capabilities.derive_command_contract_hash = lambda candidate: "a" * 64
+    monkeypatch.setitem(sys.modules, "netbox_rpc.capabilities", capabilities)
+    monkeypatch.setattr(
+        command_handlers.akvorado_contract,
+        "AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES",
+        {procedure.name: "a" * 64},
+    )
+
+    command_handlers._require_protected_procedure_policy(procedure)
+
+    procedure.enabled = False
+    with pytest.raises(ValidationError):
+        command_handlers._require_protected_procedure_policy(procedure)
+    procedure.enabled = True
+    capabilities.derive_command_contract_hash = lambda candidate: "b" * 64
+    with pytest.raises(ValidationError):
+        command_handlers._require_protected_procedure_policy(procedure)
+
+
 def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(
     command_handlers_module,
 ) -> None:
@@ -751,9 +928,21 @@ def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(
     )
 
 
-def test_gitea_requires_explicit_compatible_backend_capability(
+@pytest.mark.parametrize(
+    "procedure_name",
+    [
+        "service.gitea.production.upgrade_1_27_1",
+        "service.gitea.runner.register",
+        "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.netbox.staging.deploy_dns_pair",
+        "os.linux.debian.13.preflight_akvorado",
+        "os.linux.debian.13.install_akvorado",
+    ],
+)
+def test_protected_procedures_require_explicit_compatible_backend_capability(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
+    procedure_name: str,
 ) -> None:
     command_handlers, ValidationError, _ = command_handlers_module
     statuses = SimpleNamespace(
@@ -767,9 +956,7 @@ def test_gitea_requires_explicit_compatible_backend_capability(
     capabilities.fetch_backend_capabilities = lambda target, use_cache=True: (
         observed.update({"target": target, "use_cache": use_cache}) or object()
     )
-    procedure = SimpleNamespace(
-        name="service.gitea.production.upgrade_1_27_1",
-    )
+    procedure = SimpleNamespace(name=procedure_name)
     capabilities.verify_procedure_capability = lambda proc, manifest: statuses.UNKNOWN
     models = types.ModuleType("netbox_rpc.models")
     models.RpcPluginSettings = type("RpcPluginSettings", (), {})

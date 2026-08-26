@@ -787,6 +787,70 @@ handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
 `netbox-packer` profile `influxdb-core-3.11.0-debian-13` bakes the same
 production posture into a first-boot cloud-init template for *new* guests.
 
+### `os.linux.debian.13.*_akvorado` — fresh-host Akvorado bootstrap
+
+Migration `0086` adds the backend-first rollout for one assigned `dcim.device`
+target but deliberately leaves both procedures disabled and the code gate
+closed. A later catalog release may enable them only after the seed release is
+fully deployed, so rolling workers and package rollback never expose the new
+rows to older generic claim code. The seed refuses to overwrite a same-name row
+or accept extra/drifted command rows; later enablement remains unusable until the
+selected backend explicitly advertises a matching capability at admission,
+availability, and uncached worker claim. Reversing the seed disables durable
+rows instead of deleting their audit history:
+
+| Procedure | Effect | Approval | Timeout | Purpose |
+|---|---|---|---|---|
+| `preflight_akvorado` | read | no | 90s | Report Debian/resource/sudo/host-key/Docker/Compose/file/port/stack posture and return the observed SSH host key. |
+| `install_akvorado` | write | **yes** | 1200s | Install Debian Docker/Compose, converge pinned Akvorado 2.4.0 assets, start the stack, and verify console and ingestion listeners. |
+
+Neither accepts `rpc_ssh_*`, credential, host, command, config-content, or image
+parameters. The normalizer pins the exact assigned object ID and content type;
+execution creation also requires the object to exist and be viewable. Preflight
+can observe an unpinned target-owned DeviceService key, but installation is
+admitted by the backend only after that same service stores the `known_hosts`
+line and enables strict checking. The sole install parameter is
+`allow_resource_shortfall` (default `false`), covering an explicit approved
+exception to the 8-vCPU/16-GiB/50-GiB minimum.
+The installer also uses the protected two-person approval path: concrete
+procedure-scoped execute/approve restrictions, distinct requester and approver,
+an immutable target/backend/params snapshot, approval-time capability
+revalidation, and a required signed one-time dispatch lease. That public
+snapshot and command fingerprint bind the exact target hash, SSH service and
+credential IDs/revisions, local storage policy, primary IPv4/port, principal,
+authentication method, explicit strict-key state, known-host digest, and
+target-owned policy reference. The backend compares the same fields to the
+point-of-use DeviceService response before using secret material; any drift
+fails before SSH.
+
+The runtime contract pins Akvorado, Kafka, Valkey, and ClickHouse with immutable
+`tag@sha256` references, owns `.env` and `docker-compose.yml` through the
+adjacent `.netbox-rpc-bootstrap-owner` sidecar, and keeps console HTTP on
+loopback TCP 8080. Required packages come only from isolated, signed official
+Debian 13 `trixie`, `trixie-updates`, and `trixie-security` sources; candidate
+versions are installed exactly and dpkg-verified. Observation-only preflight never sends authentication
+material; operators pin the returned public server identity and rerun before
+any authenticated posture probe or install.
+
+The install result uses a closed success envelope: `ok=true` requires
+`installed`, `stack_healthy`, `console_ready`, `ingress_ports_ready`, and
+`ready` all true with `stage="complete"`, exact expected/running/healthy
+seven-service arrays, and an empty `error`; the event store also requires outer
+and nested `ok` to agree. A timeout, redirect, server error, or malformed
+install response—including a compressed, oversized, truncated, slow, or 2xx
+document that is not the exact five-key envelope or fails the nested result
+schema—returns `outcome_unknown` with nullable `installed`, `changed`, and
+`config_created`. The client streams under an absolute deadline and 64-KiB body
+cap, closes every response, and requires preflight reconciliation before retry. Both
+handlers are transport-pinned to AsyncSSH and have one `backend-orchestrated`
+command-contract row. Its capability hash also binds catalog policy/schema
+fingerprints to exact asset hashes, image digests, ownership, result states,
+paths, ports, locks, and the 90/1200-second end-to-end route deadlines.
+Bootstrap preserves any existing
+`/opt/nmulticloud/deploy/compose/akvorado/akvorado.yaml`; customize the initial
+placeholder ASN, networks, classifiers, and SNMP community afterward with the
+existing approval-gated `service.akvorado.1.config_deploy` procedure.
+
 ### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
 
 Migration `0057` seeds four typed procedures targeting `dcim.device` and
@@ -795,9 +859,9 @@ Migration `0057` seeds four typed procedures targeting `dcim.device` and
 | Procedure | Effect | Timeout | Purpose |
 |---|---|---|---|
 | `config_read` | read | 30s | Read the current `akvorado.yaml` content |
-| `status_stack` | read | 60s | Read the current Compose stack status |
-| `config_deploy` | write | 120s | Validate and deploy `akvorado.yaml` from structured `input_data` |
-| `restart_stack` | write | 120s | Restart the Compose stack and report status |
+| `status_stack` | read | 150s | Read the current Compose stack status |
+| `config_deploy` | write | 450s | Validate and deploy `akvorado.yaml` from structured `input_data` |
+| `restart_stack` | write | 420s | Restart the Compose stack and report status |
 
 Both write procedures set `approval_required=True`. `config_content` is a
 structured `input_data` string payload — never argv-interpolated — and only its
@@ -816,6 +880,12 @@ The API accepts no caller-controlled Akvorado host/`target` parameter. Every
 execution must reference an existing assigned `dcim.device` or
 `virtualization.virtualmachine`; normalization derives the backend target name
 only from that NetBox object so request params cannot pivot SSH dispatch.
+Each lifecycle digest binds approval, targets, timeout, transport,
+normalized/fingerprint schemas, result schema, and exact runtime assets. During
+the coordinated one-release rollout, a backend may expose the legacy
+command-only digest as primary plus the single reviewed semantic digest as
+compatible; the catalog accepts that exact matrix only when its own current
+digest matches the reviewed constant, so policy drift still fails closed.
 
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 

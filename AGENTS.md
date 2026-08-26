@@ -939,12 +939,51 @@ pending approval or distinct-actor check.
   `netbox-packer` profile `influxdb-core-3.11.0-debian-13` (VMID 9052) bakes the
   same production posture into a first-boot cloud-init template for new guests;
   this catalog is for hosts that already exist.
+- Akvorado fresh-host bootstrap is seeded disabled by migration `0086`, with the
+  code gate deliberately left closed for the entire seed release. Enable it only
+  in a later catalog release after `0086` code is fully deployed, so mixed
+  workers and rollback cannot expose the new rows to the old generic claim
+  path. Reverse migration disables durable rows rather than deleting audit
+  history. The read-only
+  `os.linux.debian.13.preflight_akvorado` (90s) reports device posture and may
+  return the observed target-owned SSH key. The approval-gated
+  `os.linux.debian.13.install_akvorado` (1200s) accepts only
+  `allow_resource_shortfall=false|true`. Both require one existing/viewable
+  `dcim.device`, reject every `rpc_ssh_*` override, pin transport to AsyncSSH,
+  bind object identity into normalized params/fingerprint, and use
+  backend-orchestrated command rows. Migration `0086` fails atomically rather
+  than overwriting a same-name procedure or accepting extra/drifted commands.
+  Admission, availability, and uncached worker claim all require an explicit
+  compatible backend manifest; the capability hash covers procedure policy,
+  schema fingerprints, exact asset hashes and image digests, ownership sidecar,
+  result states, paths, ports, locks, and 90/1200-second route deadlines. The
+  install result is envelope-state strict; outer and nested `ok` must agree,
+  success requires the exact five-key outer response, schema-valid nested
+  result, exact seven-service arrays, and empty `error`; compressed, oversized,
+  truncated, slow, malformed 2xx, and ambiguous transport completion use
+  `outcome_unknown` with nullable change fields. Install responses are streamed
+  under an absolute deadline and 64-KiB cap and are always closed. The installer
+  must use the protected two-person path with concrete procedure-scoped
+  execute/approve restrictions, distinct actors, immutable approval snapshot,
+  uncached capability revalidation, and a signed one-time dispatch lease. The
+  approved normalized params and fingerprint bind the target hash plus exact
+  SSH service/credential IDs and revisions, local storage policy, primary IPv4
+  and port, principal/method, explicit strict-key state, known-host digest, and
+  target-owned policy reference. Backend dispatch must compare every field to
+  the point-of-use DeviceService response before secret use and fail closed on
+  drift.
+  Package candidates come only from isolated, signed official Debian 13
+  `trixie`, `trixie-updates`, and `trixie-security` sources and are installed
+  at exact, dpkg-verified versions; ambient host sources are not authority.
+  Never broaden preflight TOFU into
+  write authorization: the backend install requires the returned key to be
+  stored on the DeviceService with strict checking enabled.
 - Akvorado service management uses the typed `service.akvorado.1.*` catalog
   seeded by migration `0057`, targeting `dcim.device` and
   `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
-  approval, 30s) and `status_stack` (read, no approval, 60s) are queries;
-  `config_deploy` (write, approval required, 120s) and `restart_stack` (write,
-  approval required, 120s) are mutations. `config_deploy` accepts
+  approval, 30s) and `status_stack` (read, no approval, 150s) are queries;
+  `config_deploy` (write, approval required, 450s) and `restart_stack` (write,
+  approval required, 420s) are mutations. `config_deploy` accepts
   `config_content` as a structured `input_data` string payload (never
   argv-interpolated); only its sha256/byte count enters the command fingerprint.
   NUL/unsafe controls, inline secret material, credential URLs, and private keys
@@ -958,6 +997,11 @@ pending approval or distinct-actor check.
   stack lifecycle state — `netbox-observability`'s
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
+  Lifecycle hashes bind approval, targets, timeout, transport,
+  normalized/fingerprint schemas, result schema, and runtime assets. The
+  one-release compatibility window accepts only the reviewed pairing of a
+  legacy command-only primary hash with the current semantic hash; arbitrary
+  historical hashes and policy drift remain mismatches.
 - InfluxDB service management is provided by the generic Ubuntu 24 systemd
   procedures through two seeded `RPCLinuxServiceAllowlist` rows, both targeting
   `dcim.device` and `virtualization.virtualmachine`:
