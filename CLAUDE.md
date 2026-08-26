@@ -133,6 +133,57 @@ regenerating this file, or every `main_branch` deploy fails closed.
 The `latest_package` path does **not** read this lock; it is separately blocked
 on the deploy attestation ("completion") package (issue #258).
 
+**Embedded deployment manifest (required for every path).** The gateway then
+reads `netbox_rpc/_nmulticloud_deploy.json` **out of the built wheel**. It
+synthesises one only for a pre-contract legacy wheel captured during
+first-activation recovery — "new package and main candidates must publish the
+manifest themselves" — so a wheel without it fails with:
+
+```
+error: required deployment manifest is missing for netbox-rpc
+```
+
+The manifest declares package identity (name, version, repository, cp312 /
+manylinux_2_17_x86_64 runtime target, a sha256 over the wheel's sorted
+`Requires-Dist`), the fixed plugin strategy triple
+(`dependency_mode="host-provided-no-install"`, empty `dependencies`,
+`database_strategy="expand-only-rollback-compatible"`,
+`static_strategy="append-only-hashed"`), and a path+sha256 row for **every**
+migration and static file in the wheel. The gateway recomputes those digests
+from the archive and refuses any mismatch, so the manifest cannot drift from
+what is actually shipped.
+
+Generate it — never hand-edit it:
+
+```bash
+.gitea/scripts/generate_deploy_manifest.py --write    # rewrites the lock + manifest
+.gitea/scripts/generate_deploy_manifest.py            # --check; non-zero if stale
+```
+
+`pyproject.toml` must keep `_nmulticloud_deploy.json` in
+`[tool.setuptools.package-data]`, or the file exists in the repository and is
+silently absent from the wheel.
+
+**The migration attestation is a review gate, not a generated value.** Every
+migration row is declared `rollback_compatible: true`, and
+`DeploymentContent.from_mapping()` rejects any other value — so the manifest can
+only be built by attesting that the whole migration graph is expand-only.
+`.gitea/deploy/migration-compatibility.json` pins the count and a canonical
+digest of those rows; adding a migration makes the manifest generator fail
+with "migration compatibility policy is stale" until a human reviews the new
+migration and renews the file:
+
+```bash
+.gitea/scripts/generate_deploy_manifest.py --show-migration-attestation > \
+  .gitea/deploy/migration-compatibility.json
+```
+
+Renew it only after confirming the new migration is additive: no `RemoveField`,
+`DeleteModel`, `RenameField`/`RenameModel`, no narrowing `AlterField`, and no
+data-destroying `RunPython`/`RunSQL`. Dropping a stale constraint (as `0034`
+does) and adding a nullable column with a backfill (as `0031` does) are both
+expand-only; removing a column an older plugin version still reads is not.
+
 **Repository variables** (Settings → Actions → Variables), all optional:
 
 | Variable | Default |
