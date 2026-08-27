@@ -45,7 +45,9 @@ def event_store_module(monkeypatch: pytest.MonkeyPatch):
 
     module = importlib.import_module("netbox_rpc.event_store")
     events = []
-    monkeypatch.setattr(module, "_append_and_project", lambda execution, event: events.append(event))
+    monkeypatch.setattr(
+        module, "_append_and_project", lambda execution, event: events.append(event)
+    )
     yield module, events
 
 
@@ -136,6 +138,71 @@ def test_gitea_public_ssh_snapshot_survives_redaction_byte_exact(
     assert event_store.redact_event_data(
         {"credential_policy": "must-still-redact"}
     ) == {"credential_policy": "[REDACTED]"}
+
+
+def test_vaulted_secret_reference_survives_redaction(event_store_module) -> None:
+    """An ``nms-secret:<uuid>`` pointer must be persisted, not redacted.
+
+    Every reference parameter in the catalog is named so that it trips the
+    key-name redaction rule (``admin_secret_ref``, ``operator_token_secret_ref``,
+    ``registration_token_secret_ref``). Redacting them strands the pull-based
+    backend, which reads the approved reference back out of ``normalized_params``,
+    and desynchronises the persisted fingerprint from ``resolved_command_hash``
+    and the dispatch lease, both computed before redaction.
+    """
+
+    event_store, _events = event_store_module
+    reference = "nms-secret:12345678-1234-4234-8234-123456789abc"
+    for key in (
+        "registration_token_secret_ref",
+        "admin_secret_ref",
+        "operator_token_secret_ref",
+        "admin_password_secret_ref",
+    ):
+        payload = {key: reference, "command_fingerprint": {key: reference}}
+        assert event_store.redact_event_data(payload) == payload, key
+
+
+def test_only_an_exact_vaulted_reference_survives_redaction(event_store_module) -> None:
+    """Raw or malformed values under the same keys must still be redacted."""
+
+    event_store, _events = event_store_module
+    key = "registration_token_secret_ref"
+    for unsafe in (
+        "b79d0ee21567b7fa72fbf326aaaf57f3a809283d",
+        "hunter2",
+        "nms-secret:not-a-uuid",
+        "nms-secret:12345678-1234-6234-8234-123456789abc",
+        "nms-secret:12345678-1234-4234-8234-123456789abc ",
+        " nms-secret:12345678-1234-4234-8234-123456789abc",
+        "nms-secret:12345678-1234-4234-8234-123456789abc\n",
+    ):
+        assert event_store.redact_event_data({key: unsafe}) == {key: "[REDACTED]"}, (
+            unsafe
+        )
+
+
+def test_redacted_projection_preserves_the_reference_used_for_hashing(
+    event_store_module,
+) -> None:
+    """The persisted fingerprint must equal the one the hashes were taken over.
+
+    ``resolved_command_hash`` and the dispatch lease are computed from the
+    unredacted fingerprint, so if redaction rewrote the reference the persisted
+    record would hash differently and lease verification would fail.
+    """
+
+    event_store, _events = event_store_module
+    fingerprint = {
+        "handler_id": "service.gitea.actions_runner.provision_org_ci_runner",
+        "lane": "general-ubuntu",
+        "registration_token_secret_ref": "nms-secret:12345678-1234-4234-8234-123456789abc",
+    }
+    persisted = event_store.redact_event_data({"command_fingerprint": fingerprint})
+    assert persisted["command_fingerprint"] == fingerprint
+    assert event_store._stable_hash(
+        persisted["command_fingerprint"]
+    ) == event_store._stable_hash(fingerprint)
 
 
 @pytest.mark.parametrize(
@@ -501,8 +568,7 @@ def test_generic_backend_events_are_namespaced_and_capped(
     assert len(events) == event_store.MAX_BACKEND_EVENTS + 1
     backend_events = events[:-1]
     assert all(
-        event.event_name == "Backend::ExecutionApproved"
-        for event in backend_events
+        event.event_name == "Backend::ExecutionApproved" for event in backend_events
     )
     assert events[-1].event_name == "ExecutionFailed"
 

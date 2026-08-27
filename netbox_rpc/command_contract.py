@@ -112,6 +112,13 @@ EXEMPT_HANDLER_RATIONALE = {
         "bootstrap token on Gitea and consumes it immediately on the isolated "
         "runner without exposing token material to the RPC contract."
     ),
+    "service.gitea.actions_runner.provision_org_ci_runner": (
+        "Installs Docker when needed, prepares the Actions runner image and "
+        "Compose project, resolves a vaulted one-time registration token, "
+        "registers the Gitea org runner, starts it, and verifies online state. "
+        "The sequencing, token delivery, and final Gitea verification cannot be "
+        "represented safely as one public argv."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

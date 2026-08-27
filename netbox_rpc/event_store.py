@@ -15,6 +15,7 @@ from .constants import (
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+    NMS_SECRET_REFERENCE_RE,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
 )
 from .domain import events as domain_events
@@ -109,6 +110,25 @@ def _is_sensitive_key(key: str) -> bool:
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
 
 
+def _is_vaulted_secret_reference(value: object) -> bool:
+    """True only for an exact ``nms-secret:<uuid>`` pointer.
+
+    A reference is not secret material -- redeeming it requires the execution
+    backend's own credentials -- so it is safe to persist, and it MUST be
+    persisted: the pull-based backend reads the approved reference back out of
+    ``normalized_params``, and ``resolved_command_hash`` and the dispatch lease
+    are computed from the unredacted fingerprint, so redacting it here would
+    both strand the backend and desynchronise those hashes.
+
+    Matched by value rather than by key name on purpose. Every reference
+    parameter in the catalog (``admin_secret_ref``, ``operator_token_secret_ref``,
+    ``registration_token_secret_ref``, ...) trips the key-name rule, while a raw
+    or malformed value under those same keys must still be redacted.
+    """
+
+    return isinstance(value, str) and bool(NMS_SECRET_REFERENCE_RE.fullmatch(value))
+
+
 def redact_event_value(
     value: object,
     *,
@@ -117,6 +137,8 @@ def redact_event_value(
     path: StringLimitPath = (),
 ) -> object:
     if parent_key and _is_sensitive_key(parent_key):
+        if _is_vaulted_secret_reference(value):
+            return value
         return "[REDACTED]"
     if isinstance(value, dict):
         redacted: dict[str, object] = {}
@@ -501,8 +523,7 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     # object. Requiring outer/nested agreement prevents an ok=true wrapper around
     # a failed operation from being recorded as success.
     requires_envelope_state_match = (
-        is_protected_procedure
-        or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        is_protected_procedure or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
     )
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
@@ -682,7 +703,9 @@ def _protected_backend_response_mismatch(
         return envelope_mismatch
     backend_events = response.get("events")
     if backend_events not in (None, []):
-        return "Backend result schema mismatch at events: protected events are forbidden."
+        return (
+            "Backend result schema mismatch at events: protected events are forbidden."
+        )
     return ""
 
 
