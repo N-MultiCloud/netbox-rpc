@@ -21,7 +21,8 @@ from django.db import migrations
 
 _PROCEDURE_NAME = "service.gitea.actions_runner.provision_org_ci_runner"
 _HANDLER_ID = _PROCEDURE_NAME
-_TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
+_TARGET_MODELS = ["virtualization.virtualmachine"]
+_TARGET_NAME = "Gitea-Runner"
 _DEFAULT_GITEA_INSTANCE_URL = "http://10.0.30.96:3000"
 _DEFAULT_ORGANIZATION = "N-MultiCloud"
 
@@ -99,11 +100,6 @@ _NMS_SECRET_REF_PATTERN = (
     r"^nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}(?![\s\S])"
 )
-_ORG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\s\S])"
-_HTTP_ORIGIN_PATTERN = (
-    r"^https?://[A-Za-z0-9][A-Za-z0-9.-]{0,253}"
-    r"(?::[0-9]{1,5})?/?(?![\s\S])"
-)
 
 _PARAMS_SCHEMA = {
     "type": "object",
@@ -117,20 +113,11 @@ _PARAMS_SCHEMA = {
             "pattern": _NMS_SECRET_REF_PATTERN,
             "description": "Reference to the vaulted one-time Gitea runner token.",
         },
-        "gitea_instance_url": {
-            "type": "string",
-            "minLength": 8,
-            "maxLength": 255,
-            "pattern": _HTTP_ORIGIN_PATTERN,
-            "default": _DEFAULT_GITEA_INSTANCE_URL,
-        },
-        "organization": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64,
-            "pattern": _ORG_PATTERN,
-            "default": _DEFAULT_ORGANIZATION,
-        },
+        # gitea_instance_url and organization are deliberately NOT caller
+        # params. The backend resolves the vaulted registration token and then
+        # registers against this origin, so a caller-supplied origin would let
+        # the requester choose where that credential is sent. Both are frozen
+        # server-side and only echoed back in the result as consts.
         # The lane is the ONLY thing the caller chooses about what is installed.
         # runner_name/label/image/dir are all derived from it server-side.
         "lane": {
@@ -158,7 +145,6 @@ _PARAMS_SCHEMA = {
 
 _SHORT_TEXT = {"type": "string", "maxLength": 64}
 _TEXT = {"type": "string", "maxLength": 255}
-_URL_TEXT = {"type": "string", "maxLength": 255}
 _ERROR = {"type": "string", "maxLength": 2048}
 
 _RESULT_SCHEMA = {
@@ -192,7 +178,7 @@ _RESULT_SCHEMA = {
     "properties": {
         "ok": {"type": "boolean"},
         "procedure": {"const": _HANDLER_ID},
-        "target": _TEXT,
+        "target": {"const": _TARGET_NAME},
         "changed": {"type": ["boolean", "null"]},
         "registered": {"type": "boolean"},
         "online": {"type": "boolean"},
@@ -211,7 +197,7 @@ _RESULT_SCHEMA = {
             ],
         },
         "runner_name": {"enum": _ALL_RUNNER_NAMES},
-        "organization": _TEXT,
+        "organization": {"const": _DEFAULT_ORGANIZATION},
         "lane": {"enum": _LANE_NAMES},
         "runner_image": {"enum": _ALL_RUNNER_IMAGES},
         "executor": {"type": "string", "enum": ["host", "docker"]},
@@ -227,7 +213,7 @@ _RESULT_SCHEMA = {
             "maxItems": 8,
             "uniqueItems": True,
         },
-        "gitea_instance_url": _URL_TEXT,
+        "gitea_instance_url": {"const": _DEFAULT_GITEA_INSTANCE_URL},
         "compose_project_dir": {"enum": _ALL_COMPOSE_DIRS},
         "docker_installed": {"type": "boolean"},
         "image_ready": {"type": "boolean"},

@@ -1368,7 +1368,7 @@ permit ordinary CI to match only the isolated runner label. Until that external
 policy is provisioned and proven, this CI contract must remain blocked/queued
 rather than activated on a broader runner.
 
-Migration `0080` adds
+Migration `0084` adds
 `service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
 procedure for provisioning that isolated organization runner on the assigned
 runner host. It is seeded disabled and hard-gated until its backend handler is

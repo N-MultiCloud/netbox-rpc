@@ -13,6 +13,7 @@ from rest_framework.exceptions import PermissionDenied
 from ..backends import resolve_backend
 from ..constants import (
     AKVORADO_1_PROCEDURE_NAMES,
+    GITEA_ORG_CI_RUNNER_PROVISION,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
@@ -24,18 +25,20 @@ from ..domain.normalization import (
     RPCExecutionError,
     code_gate_unavailable_reason,
     normalize_execution_params,
+    validate_akvorado_content_params,
+    validate_gitea_org_ci_runner_target,
     validate_gitea_runner_target,
     validate_gitea_upgrade_target,
-    validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
 from ..openbao_validation import (
     OpenBaoSecretIngressError,
     validate_openbao_params_for_persistence,
 )
-from .. import staging_rotation_contract as staging_contract
+from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
 from .. import gitea_runner_contract as gitea_runner_contract
+from .. import staging_rotation_contract as staging_contract
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
 # service.samba.1.user_create / user_set_password). The raw password must
@@ -56,7 +59,7 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
 _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     AKVORADO_1_PROCEDURE_NAMES
     | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
-    | {GITEA_RUNNER_REGISTER}
+    | {GITEA_RUNNER_REGISTER, GITEA_ORG_CI_RUNNER_PROVISION}
 )
 _OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
 
@@ -81,37 +84,72 @@ _GITEA_UPGRADE_APPROVAL_REASON = "Approved audited production Gitea 1.27.1 upgra
 _GITEA_UPGRADE_REJECTION_REASON = "Rejected audited production Gitea 1.27.1 upgrade."
 _GITEA_RUNNER_APPROVAL_REASON = "Approved audited Gitea runner registration."
 _GITEA_RUNNER_REJECTION_REASON = "Rejected audited Gitea runner registration."
+_GITEA_ORG_CI_RUNNER_APPROVAL_REASON = (
+    "Approved audited Gitea organization CI runner provisioning."
+)
+_GITEA_ORG_CI_RUNNER_REJECTION_REASON = (
+    "Rejected audited Gitea organization CI runner provisioning."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_APPROVAL_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
+    GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_REJECTION_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
+    GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_REJECTION_REASON,
+}
+
+_PROTECTED_CONTRACTS = {
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN: staging_contract,
+    GITEA_PRODUCTION_UPGRADE_1_27_1: gitea_contract,
+    GITEA_RUNNER_REGISTER: gitea_runner_contract,
+    GITEA_ORG_CI_RUNNER_PROVISION: gitea_org_ci_runner_contract,
+}
+_PROTECTED_LABELS = {
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
+    GITEA_PRODUCTION_UPGRADE_1_27_1: "Production Gitea upgrade",
+    GITEA_RUNNER_REGISTER: "Gitea runner registration",
+    GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
+}
+_GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
+    {
+        GITEA_PRODUCTION_UPGRADE_1_27_1,
+        GITEA_RUNNER_REGISTER,
+        GITEA_ORG_CI_RUNNER_PROVISION,
+    }
+)
+_GITEA_RUNNER_TARGET_POLICIES = {
+    GITEA_RUNNER_REGISTER: {
+        "content_type": gitea_runner_contract.RUNNER_TARGET_OBJECT["content_type"],
+        "object_id": gitea_runner_contract.RUNNER_TARGET_ID,
+        "validator": validate_gitea_runner_target,
+        "required_message": "The exact isolated Gitea runner VM is required.",
+    },
+    GITEA_ORG_CI_RUNNER_PROVISION: {
+        "content_type": gitea_org_ci_runner_contract.TARGET_OBJECT["content_type"],
+        "object_id": gitea_org_ci_runner_contract.TARGET_OBJECT_ID,
+        "validator": validate_gitea_org_ci_runner_target,
+        "required_message": "The exact dedicated Gitea CI runner VM is required.",
+    },
 }
 
 
 def _protected_contract(procedure_name: str):
-    if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
-        return staging_contract
-    if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
-        return gitea_contract
-    if procedure_name == GITEA_RUNNER_REGISTER:
-        return gitea_runner_contract
-    raise ValueError(f"{procedure_name!r} is not a protected approval procedure")
+    try:
+        return _PROTECTED_CONTRACTS[procedure_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"{procedure_name!r} is not a protected approval procedure"
+        ) from exc
 
 
 def _protected_label(procedure_name: str) -> str:
-    if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
-        return "Staging token rotation"
-    if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
-        return "Production Gitea upgrade"
-    if procedure_name == GITEA_RUNNER_REGISTER:
-        return "Gitea runner registration"
-    return "Protected RPC procedure"
+    return _PROTECTED_LABELS.get(procedure_name, "Protected RPC procedure")
 
 
 def _execution_job_timeout(timeout_seconds: object) -> int:
@@ -250,10 +288,9 @@ def _verify_backend_capability(
     target = backend_target or RpcPluginSettings.get_solo().resolved_backend_target()
     manifest = capabilities.fetch_backend_capabilities(target, use_cache=use_cache)
     status = capabilities.verify_procedure_capability(procedure, manifest)
-    requires_explicit_capability = getattr(procedure, "name", "") in {
-        GITEA_PRODUCTION_UPGRADE_1_27_1,
-        GITEA_RUNNER_REGISTER,
-    }
+    requires_explicit_capability = (
+        getattr(procedure, "name", "") in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES
+    )
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
         and status is not capabilities.CapabilityStatus.COMPATIBLE
@@ -702,8 +739,9 @@ def _require_gitea_runner_assigned_object(
     procedure: object,
     user: object,
 ) -> None:
-    """Pin registration to the exact viewable isolated-runner VM."""
-    if getattr(procedure, "name", "") != GITEA_RUNNER_REGISTER:
+    """Pin Gitea runner operations to their exact viewable runner VM."""
+    policy = _GITEA_RUNNER_TARGET_POLICIES.get(getattr(procedure, "name", ""))
+    if policy is None:
         return
     content_type = validated_data.get("assigned_object_type")
     object_id = validated_data.get("assigned_object_id")
@@ -711,12 +749,12 @@ def _require_gitea_runner_assigned_object(
         f"{getattr(content_type, 'app_label', '')}.{getattr(content_type, 'model', '')}"
     )
     if (
-        type_label != gitea_runner_contract.RUNNER_TARGET_OBJECT["content_type"]
-        or object_id != gitea_runner_contract.RUNNER_TARGET_ID
+        type_label != policy["content_type"]
+        or object_id != policy["object_id"]
         or isinstance(object_id, bool)
     ):
         raise drf_serializers.ValidationError(
-            {"assigned_object_id": "The exact isolated Gitea runner VM is required."},
+            {"assigned_object_id": policy["required_message"]},
             code="required",
         )
     try:
@@ -727,7 +765,7 @@ def _require_gitea_runner_assigned_object(
     except (AttributeError, TypeError, ValueError):
         assigned_object = None
     try:
-        validate_gitea_runner_target(
+        policy["validator"](
             assigned_object,
             target_model_label=type_label,
             assigned_object_id=object_id,
@@ -1364,10 +1402,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                     f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
                     code="RPC_BACKEND_BINDING_INVALID",
                 ) from exc
-        if execution.procedure.name in {
-            GITEA_PRODUCTION_UPGRADE_1_27_1,
-            GITEA_RUNNER_REGISTER,
-        }:
+        if execution.procedure.name in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
             _verify_backend_capability(
                 execution.procedure,
                 backend_target=target,

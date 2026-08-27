@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
     AKVORADO_1_PROCEDURE_NAMES,
@@ -484,57 +485,20 @@ _INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
 # backend-owned SSH/Docker workflow: NetBox supplies a closed, approval-bound
 # contract, and the backend resolves the target host and SSH credential from the
 # assigned object. Each lane's runtime authority and trust posture are fixed here.
-_GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL = "http://10.0.30.96:3000"
-_GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION = "N-MultiCloud"
-_GITEA_ORG_CI_RUNNER_LANES = {
-    "untrusted-python312": {
-        "runner_name": "ci-untrusted-nmulticloud-org-241",
-        "runner_labels": ("ci-untrusted-python312:host",),
-        "runner_image": "nmc/ci-untrusted-runner:python312-241",
-        "compose_project_dir": "/opt/nmc-ci-untrusted-org-241",
-        "executor": "host",
-        "runner_mounts_docker_socket": False,
-        "jobs_mount_docker_socket": False,
-        "runner_cap_drop_all": True,
-        "runner_no_new_privileges": True,
-        "job_user": "cirunner",
-    },
-    "general-ubuntu": {
-        "runner_name": "ci-ubuntu-nmulticloud-org-241",
-        "runner_labels": (
-            "ubuntu-latest:docker://nmulti/gitea-act-ubuntu:22.04-actions",
-            "ubuntu-24.04:docker://nmulti/gitea-act-ubuntu:22.04-actions",
-            "ubuntu-22.04:docker://nmulti/gitea-act-ubuntu:22.04-actions",
-        ),
-        "runner_image": "nmulti/gitea-act-ubuntu:22.04-actions",
-        "compose_project_dir": "/opt/nmc-ci-ubuntu-241",
-        "executor": "docker",
-        "runner_mounts_docker_socket": True,
-        "jobs_mount_docker_socket": False,
-        "runner_cap_drop_all": False,
-        "runner_no_new_privileges": False,
-        "job_user": None,
-    },
-}
-_GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS = frozenset(
-    {"dcim.device", "virtualization.virtualmachine"}
+_GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL = (
+    gitea_org_ci_runner_contract.DEFAULT_GITEA_INSTANCE_URL
 )
-_GITEA_ORG_CI_RUNNER_ORG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_GITEA_ORG_CI_RUNNER_HOST_RE = re.compile(
-    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?"
+_GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION = (
+    gitea_org_ci_runner_contract.DEFAULT_ORGANIZATION
 )
-_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = {
-    "install_docker": True,
-    "build_runner_image": True,
-    "load_prebuilt_runner_image": False,
-    "force_recreate": False,
-}
+_GITEA_ORG_CI_RUNNER_LANES = gitea_org_ci_runner_contract.LANES
+_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = (
+    gitea_org_ci_runner_contract.BOOLEAN_PARAM_DEFAULTS
+)
 _GITEA_ORG_CI_RUNNER_PARAM_KEYS = frozenset(
     {
         "lane",
         "registration_token_secret_ref",
-        "gitea_instance_url",
-        "organization",
         *_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS,
     }
 )
@@ -1139,7 +1103,7 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name == GITEA_RUNNER_REGISTER:
         return _normalize_gitea_runner_registration_execution(execution)
     if procedure_name == GITEA_ORG_CI_RUNNER_PROVISION:
-        return _normalize_gitea_org_ci_runner_provision_execution(execution, target)
+        return _normalize_gitea_org_ci_runner_provision_execution(execution)
 
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
@@ -2232,87 +2196,62 @@ def _normalize_influxdb3_debian13_execution(
     return normalized
 
 
-def _gitea_org_ci_runner_pattern_param(
-    raw_value: object,
-    field_name: str,
-    pattern: re.Pattern[str],
-) -> str:
-    if not isinstance(raw_value, str):
-        raise RPCExecutionError(
-            f"{field_name} must be a string.",
-            code="RPC_PARAM_INVALID",
-        )
-    value = raw_value.strip()
-    if not pattern.fullmatch(value):
-        raise RPCExecutionError(
-            f"{field_name} has an invalid or unsupported value.",
-            code="RPC_PARAM_INVALID",
-        )
-    return value
+def validate_gitea_org_ci_runner_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate the exact dedicated runner VM selected by reviewed policy."""
 
-
-def _normalize_gitea_org_ci_runner_url(raw_value: object) -> str:
-    if raw_value in (None, ""):
-        value = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
-    elif isinstance(raw_value, str):
-        value = raw_value.strip()
-    else:
-        raise RPCExecutionError(
-            "gitea_instance_url must be a string.",
-            code="RPC_PARAM_INVALID",
-        )
-    if not value or len(value) > 255:
-        raise RPCExecutionError(
-            "gitea_instance_url must be a non-empty URL of at most 255 characters.",
-            code="RPC_PARAM_INVALID",
-        )
-    parsed = urlparse(value)
+    contract = gitea_org_ci_runner_contract
     if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
+        target_model_label != contract.TARGET_OBJECT["content_type"]
+        or assigned_object_id != contract.TARGET_OBJECT_ID
+        or isinstance(assigned_object_id, bool)
+        or target is None
+        or getattr(target, "pk", None) != contract.TARGET_OBJECT_ID
+        or getattr(target, "name", None) != contract.TARGET_NAME
+        or (target_display is not None and target_display != contract.TARGET_NAME)
     ):
         raise RPCExecutionError(
-            "gitea_instance_url must be an http(s) origin URL with no credentials, "
-            "path, query, or fragment.",
-            code="RPC_PARAM_INVALID",
+            "Gitea org CI runner provisioning requires the exact dedicated runner VM.",
+            code="RPC_TARGET_INVALID",
         )
-    host = parsed.hostname.lower()
-    if host in {"localhost", "127.0.0.1", "::1"}:
-        raise RPCExecutionError(
-            "gitea_instance_url must be reachable from the runner host and must "
-            "not use loopback.",
-            code="RPC_PARAM_INVALID",
-        )
-    if not _GITEA_ORG_CI_RUNNER_HOST_RE.fullmatch(host):
-        raise RPCExecutionError(
-            "gitea_instance_url host has an invalid or unsupported value.",
-            code="RPC_PARAM_INVALID",
-        )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
     try:
-        port = parsed.port
+        ipv4 = ip_address(str(raw_address).split("/", 1)[0])
     except ValueError as exc:
         raise RPCExecutionError(
-            "gitea_instance_url port must be between 1 and 65535.",
-            code="RPC_PARAM_OUT_OF_RANGE",
+            "Gitea org CI runner target primary_ip4 is invalid.",
+            code="RPC_TARGET_INVALID",
         ) from exc
-    if port is not None and not 1 <= port <= 65535:
+    if ipv4.version != 4 or str(ipv4) != contract.TARGET_IPV4_ADDRESS:
         raise RPCExecutionError(
-            "gitea_instance_url port must be between 1 and 65535.",
-            code="RPC_PARAM_OUT_OF_RANGE",
+            "Gitea org CI runner target primary_ip4 does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
         )
-    netloc = f"{host}:{port}" if port is not None else host
-    return f"{parsed.scheme.lower()}://{netloc}"
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Gitea org CI runner target must be active.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.TARGET_NAME,
+        "target_object": dict(contract.TARGET_OBJECT),
+        "runner_ipv4": str(ipv4),
+    }
 
 
 def _normalize_gitea_org_ci_runner_provision_execution(
     execution: RPCExecution,
-    target: str,
 ) -> dict[str, Any]:
     """Normalize the Gitea Actions org CI runner provision procedure."""
 
@@ -2328,31 +2267,23 @@ def _normalize_gitea_org_ci_runner_provision_execution(
     if gate_reason is not None:
         raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
 
-    target = str(target or "").strip()
-    if not target or any(ord(char) < 32 or ord(char) == 127 for char in target):
-        raise RPCExecutionError(
-            "Gitea org CI runner provisioning requires a safe target display name.",
-            code="RPC_TARGET_INVALID",
-        )
-
     target_model = str(getattr(execution, "target_model_label", "") or "")
     assigned_object_type = getattr(execution, "assigned_object_type", None)
     app_label = str(getattr(assigned_object_type, "app_label", "") or "")
     model = str(getattr(assigned_object_type, "model", "") or "")
     content_type = f"{app_label}.{model}"
     object_id = getattr(execution, "assigned_object_id", None)
-    if (
-        target_model not in _GITEA_ORG_CI_RUNNER_TARGET_MODEL_LABELS
-        or content_type != target_model
-        or isinstance(object_id, bool)
-        or not isinstance(object_id, int)
-        or object_id < 1
-    ):
+    if content_type != target_model:
         raise RPCExecutionError(
-            "Gitea org CI runner provisioning requires an existing assigned "
-            "dcim.device or virtualization.virtualmachine target.",
+            "Gitea org CI runner target content type is inconsistent.",
             code="RPC_TARGET_INVALID",
         )
+    target_metadata = validate_gitea_org_ci_runner_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=content_type,
+        assigned_object_id=object_id,
+        target_display=getattr(execution, "target_display", None),
+    )
 
     supplied_overrides = sorted(
         set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
@@ -2394,14 +2325,11 @@ def _normalize_gitea_org_ci_runner_provision_execution(
         )
     lane_contract = _GITEA_ORG_CI_RUNNER_LANES[lane]
 
-    gitea_instance_url = _normalize_gitea_org_ci_runner_url(
-        params.get("gitea_instance_url")
-    )
-    organization = _gitea_org_ci_runner_pattern_param(
-        params.get("organization", _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION),
-        "organization",
-        _GITEA_ORG_CI_RUNNER_ORG_RE,
-    )
+    # Frozen server-side. The backend resolves the vaulted registration token
+    # and then registers against this origin, so letting a caller choose either
+    # value would let the requester decide where that credential is delivered.
+    gitea_instance_url = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
+    organization = _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION
     booleans = {
         key: _bool_param(params, key, default)
         for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
@@ -2413,8 +2341,7 @@ def _normalize_gitea_org_ci_runner_provision_execution(
         )
 
     normalized: dict[str, Any] = {
-        "target": target,
-        "target_object": {"content_type": content_type, "object_id": object_id},
+        **target_metadata,
         "gitea_instance_url": gitea_instance_url,
         "organization": organization,
         "registration_token_secret_ref": secret_ref,
@@ -2436,6 +2363,8 @@ def _normalize_gitea_org_ci_runner_provision_execution(
         "procedure": procedure_name,
         "target_content_type": content_type,
         "target_object_id": object_id,
+        "target_object_sha256": gitea_org_ci_runner_contract.TARGET_OBJECT_SHA256,
+        "runner_ipv4": target_metadata["runner_ipv4"],
         "gitea_instance_url": gitea_instance_url,
         "organization": organization,
         "registration_token_secret_ref": secret_ref,
