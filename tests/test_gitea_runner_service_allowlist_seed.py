@@ -128,10 +128,12 @@ def test_rows_match_the_real_runner_units_on_disk() -> None:
     """
 
     unit_dir = Path("/root/personal-context/gitea-act-runner/systemd")
-    # os.path.isdir, not Path.is_dir: pathlib swallows only ENOENT/ENOTDIR/EBADF/
-    # ELOOP and lets EACCES propagate, so the guard itself raised on the untrusted
-    # CI runner, where the job user cannot traverse the container's /root. That
-    # turned the intended skip into a hard failure.
+    # os.path.isdir, not Path.is_dir: through Python 3.13 pathlib swallows only
+    # ENOENT/ENOTDIR/EBADF/ELOOP and lets EACCES propagate (3.14 widened it to all
+    # OSError). CI pins 3.12, where the guard itself raised on the untrusted
+    # runner, whose job user cannot traverse the container's /root — turning the
+    # intended skip into a hard failure. os.path.isdir is False on any OSError
+    # regardless of version.
     if not os.path.isdir(unit_dir):  # pragma: no cover - environment-dependent
         import pytest
 
