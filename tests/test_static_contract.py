@@ -1,3 +1,4 @@
+import ast
 import runpy
 from pathlib import Path
 
@@ -10,6 +11,55 @@ def read(path: str) -> str:
 
 def load_constants() -> dict:
     return runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
+
+
+def test_execution_params_have_no_post_creation_mutation_path() -> None:
+    def is_params_attribute(target: ast.AST) -> bool:
+        return (isinstance(target, ast.Attribute) and target.attr == "params") or (
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Attribute)
+            and target.value.attr == "params"
+        )
+
+    violations = []
+    for path in sorted((ROOT / "netbox_rpc").rglob("*.py")):
+        if "migrations" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if any(is_params_attribute(target) for target in targets):
+                    violations.append((path.name, node.lineno, "attribute assignment"))
+            if not isinstance(node, ast.Call):
+                continue
+            method = getattr(node.func, "attr", "")
+            if method == "update" and any(
+                keyword.arg == "params" for keyword in node.keywords
+            ):
+                violations.append((path.name, node.lineno, "queryset update"))
+            if method == "save" and any(
+                keyword.arg == "update_fields"
+                and isinstance(keyword.value, (ast.List, ast.Tuple, ast.Set))
+                and any(
+                    isinstance(item, ast.Constant) and item.value == "params"
+                    for item in keyword.value.elts
+                )
+                for keyword in node.keywords
+            ):
+                violations.append((path.name, node.lineno, "params-only save"))
+
+    assert violations == []
+
+    models = read("netbox_rpc/models.py")
+    handler = read("netbox_rpc/application/command_handlers.py")
+    migration = read("netbox_rpc/migrations/0079_rpcexecution_source_intent.py")
+    assert "source_intent = models.ForeignKey(" in models
+    assert "validate_openbao_params_for_persistence(" in models
+    assert "source_intent=source_intent" in handler
+    assert '("netbox_rpc", "0078_seed_openbao_procedures")' in migration
 
 
 def test_plugin_uses_rpc_base_url_without_required_netbox_nms() -> None:
@@ -53,8 +103,15 @@ def test_procedure_exposes_driver_and_parser_selection_fields() -> None:
     assert "transport_driver = models.CharField" in models
     assert "output_parser = models.CharField" in models
     assert "output_schema = models.JSONField" in models
-    for driver in ("asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
-        assert f'"{driver}"' in models
+    # The driver vocabulary lives in netbox_rpc/transport.py so the chain
+    # resolver can share it without importing Django. The model must source its
+    # choices from there rather than re-declaring them, or the two can drift and
+    # a chain entry the UI offers becomes one the resolver cannot classify.
+    transport = read("netbox_rpc/transport.py")
+    assert "from . import transport as _transport" in models
+    assert "TRANSPORT_DRIVER_CHOICES = _transport.TRANSPORT_DRIVER_CHOICES" in models
+    for driver in ("ansible", "asyncssh", "scrapli", "netmiko", "paramiko", "napalm"):
+        assert f'"{driver}"' in transport
     for parser in (
         "none",
         "auto",
@@ -970,9 +1027,7 @@ def test_intent_is_reference_data_not_event_sourced() -> None:
 
 def test_intent_sequence_has_min_validator_and_check_constraint() -> None:
     models = read("netbox_rpc/models.py")
-    migration = read(
-        "netbox_rpc/migrations/0040_rpcintentprocedure_sequence_min.py"
-    )
+    migration = read("netbox_rpc/migrations/0040_rpcintentprocedure_sequence_min.py")
     assert "MinValueValidator(1)" in models
     assert "netbox_rpc_intentprocedure_sequence_gte_1" in models
     assert "condition=models.Q(sequence__gte=1)" in models
@@ -998,18 +1053,26 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
     assert 'max_version = "4.6.99"' in init
+    assert "on:\n  workflow_dispatch:" in gitea_workflow
+    assert "pull_request:" not in gitea_workflow
+    assert "push:" not in gitea_workflow
+    assert "Manual, non-gating diagnostics only" in gitea_workflow
     assert "\n  compatibility:\n" in gitea_workflow
     compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
     assert "runs-on: mirror-host" in compatibility_job
     assert "fail-fast: false" in compatibility_job
     assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
-    # Host-mode executor: the gate provisions per-leg UTF8 databases on the
-    # host PostgreSQL instead of Docker service containers.
+    # Host-mode manual diagnostic: it provisions per-leg UTF8 databases on host
+    # PostgreSQL only for a trusted canonical-main operator dispatch. It is not
+    # PR/push or branch-protection evidence.
     assert "Provision a UTF8 compatibility database" in compatibility_job
     assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
     assert "v4.5.8" in compatibility_job
     assert "v4.6.5" in compatibility_job
-    assert "if:" not in compatibility_job
+    assert (
+        "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
+        "github.ref == 'refs/heads/main' }}"
+    ) in compatibility_job
     assert "soft-skip" not in compatibility_job
 
     migrations_dir = ROOT / "netbox_rpc" / "migrations"
@@ -1023,10 +1086,10 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    # 6 since #262 added 0068_rpcnetboxpluginallowlist. Raising this number
+    # 7 since #262 added 0082_rpcnetboxpluginallowlist. Raising this number
     # is meant to be deliberate: the assertion below is what actually
     # matters, and every entry must stay anchored to the 4.5.8 floor.
-    assert len(extras_dependencies) == 6
+    assert len(extras_dependencies) == 7
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
@@ -1034,11 +1097,13 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         "0033_rpcbackend.py",
         "0039_rpcintent.py",
         "0044_rpcpluginsettings.py",
-        "0068_rpcnetboxpluginallowlist.py",
+        "0082_rpcnetboxpluginallowlist.py",
     ):
         # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
         # remains an ancestor of the 4.6 migration graph.
         assert "0134_owner" in migration_sources[name]
+
+
 def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
     # The migration graph uses extras.0134 because it is present in both
     # NetBox 4.5.8 and 4.6.x. Do not move these anchors back to 4.6-only
@@ -1052,7 +1117,7 @@ def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> No
         "netbox_rpc/migrations/0033_rpcbackend.py",
         "netbox_rpc/migrations/0039_rpcintent.py",
         "netbox_rpc/migrations/0044_rpcpluginsettings.py",
-        "netbox_rpc/migrations/0068_rpcnetboxpluginallowlist.py",
+        "netbox_rpc/migrations/0082_rpcnetboxpluginallowlist.py",
     )
     for path in migration_paths:
         migration = read(path)

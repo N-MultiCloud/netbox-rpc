@@ -121,7 +121,7 @@ class RPCProcedureRunsView(generic.ObjectChildrenView):
     def get_children(self, request, parent):
         return (
             parent.executions.restrict(request.user, "view")
-            .select_related("assigned_object_type", "requested_by")
+            .select_related("assigned_object_type", "requested_by", "source_intent")
             .order_by("-created", "-id")
         )
 
@@ -295,7 +295,7 @@ class RPCIntentBulkDeleteView(generic.BulkDeleteView):
 @register_model_view(models.RPCExecution, "list", path="", detail=False)
 class RPCExecutionListView(generic.ObjectListView):
     queryset = models.RPCExecution.objects.select_related(
-        "procedure", "assigned_object_type", "requested_by"
+        "procedure", "assigned_object_type", "requested_by", "source_intent"
     )
     table = tables.RPCExecutionTable
     filterset = filtersets.RPCExecutionFilterSet
@@ -306,7 +306,7 @@ class RPCExecutionListView(generic.ObjectListView):
 @register_model_view(models.RPCExecution)
 class RPCExecutionView(generic.ObjectView):
     queryset = models.RPCExecution.objects.select_related(
-        "procedure", "assigned_object_type", "requested_by"
+        "procedure", "assigned_object_type", "requested_by", "source_intent"
     )
 
     def get_extra_context(self, request, instance):

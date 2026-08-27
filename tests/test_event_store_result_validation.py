@@ -115,6 +115,411 @@ def test_schema_valid_backend_result_still_records_success(event_store_module) -
     assert [event.event_name for event in events] == ["ExecutionSucceeded"]
 
 
+def test_gitea_public_ssh_snapshot_survives_redaction_byte_exact(
+    event_store_module,
+) -> None:
+    event_store, _events = event_store_module
+    snapshot = {
+        "ssh_service_id": 901,
+        "ssh_service_revision": "2026-08-17T12:00:00Z",
+        "ssh_identity_id": 902,
+        "ssh_identity_revision": "2026-08-17T11:00:00Z",
+        "ssh_principal": "gitea-admin",
+        "ssh_method": "key",
+        "ssh_host": "10.0.30.96",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": "a" * 64,
+        "ssh_policy_ref": "target-owned-ssh:virtualization.virtualmachine:170",
+    }
+    payload = {**snapshot, "command_fingerprint": dict(snapshot)}
+    assert event_store.redact_event_data(payload) == payload
+    assert event_store.redact_event_data(
+        {"credential_policy": "must-still-redact"}
+    ) == {"credential_policy": "[REDACTED]"}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": False,
+            "stage": "execute",
+        },
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": True,
+            "stage": "complete",
+        },
+        {
+            "ok": False,
+            "procedure": "service.netbox.staging.rotate_backend_token",
+            "target": "nms-front-door",
+            "rotated": None,
+            "stage": "indeterminate",
+        },
+    ],
+)
+def test_valid_closed_failure_result_is_preserved(
+    event_store_module,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": result,
+            "error_code": "RPC_REMOTE_FAILED",
+            "error_message": "Closed backend failure.",
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == "RPC_REMOTE_FAILED"
+    assert failure.result == result
+
+
+def test_gitea_backend_diagnostics_never_reach_the_event_ledger(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    opaque = "m8QvL2pR7xZ1nT6c"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": contract.TARGET_NAME,
+                "changed": False,
+                "healthy": True,
+                "stage": "rolled_back",
+            },
+            "error_code": opaque,
+            "error_message": opaque,
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert opaque not in failure.error_message
+    assert opaque not in repr(failure)
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": False,
+            "healthy": False,
+            "stage": "execute",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": False,
+            "healthy": True,
+            "stage": "rolled_back",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": True,
+            "healthy": False,
+            "stage": "complete",
+        },
+        {
+            "ok": False,
+            "procedure": "service.gitea.production.upgrade_1_27_1",
+            "target": "Gitea",
+            "changed": None,
+            "healthy": None,
+            "stage": "indeterminate",
+        },
+    ],
+)
+def test_gitea_closed_failure_and_indeterminate_result_is_preserved(
+    event_store_module,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": result,
+        },
+    )
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    expected_code, expected_message = contract.result_diagnostics(result)
+    assert failure.code == expected_code
+    assert failure.error_message == expected_message
+    assert failure.result == result
+
+
+def test_gitea_protected_envelope_rejects_events_and_ok_mismatch(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.gitea_upgrade_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": True,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "Gitea",
+                "changed": False,
+                "healthy": True,
+                "stage": "complete",
+            },
+            "events": [{"message": "must not persist"}],
+        },
+    )
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
+
+
+def test_malformed_nested_failure_result_fails_schema_and_is_not_persisted(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "indeterminate",
+            },
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize("raw_result", [None, [], 0, "not-an-object"])
+def test_staging_present_non_object_result_is_rejected(
+    event_store_module,
+    raw_result: object,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {"ok": False, "result": raw_result},
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize(
+    ("outer_ok", "result"),
+    [
+        (
+            True,
+            {
+                "ok": False,
+                "procedure": "service.netbox.staging.rotate_backend_token",
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "execute",
+            },
+        ),
+        (
+            False,
+            {
+                "ok": True,
+                "procedure": "service.netbox.staging.rotate_backend_token",
+                "target": "nms-front-door",
+                "rotated": True,
+                "stage": "complete",
+            },
+        ),
+    ],
+)
+def test_staging_envelope_and_nested_result_must_agree(
+    event_store_module,
+    outer_ok: bool,
+    result: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {"ok": outer_ok, "result": result},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+def test_staging_backend_events_are_forbidden_before_persistence(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": contract.PROCEDURE_NAME,
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "execute",
+            },
+            "events": [
+                {
+                    "event": "HostileProgress",
+                    "message": "Authorization: Bearer opaque-secret",
+                }
+            ],
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+def test_generic_backend_events_are_namespaced_and_capped(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name="service.test", result_schema={})
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "events": [
+                {
+                    "event": "ExecutionApproved",
+                    "message": f"progress-{index}",
+                }
+                for index in range(event_store.MAX_BACKEND_EVENTS + 20)
+            ],
+        },
+    )
+
+    assert len(events) == event_store.MAX_BACKEND_EVENTS + 1
+    backend_events = events[:-1]
+    assert all(
+        event.event_name == "Backend::ExecutionApproved"
+        for event in backend_events
+    )
+    assert events[-1].event_name == "ExecutionFailed"
+
+
+def test_event_messages_are_redacted_and_hard_capped(event_store_module) -> None:
+    event_store, _events = event_store_module
+    hostile = "Authorization: Bearer opaque-secret\n" + (
+        "x" * (event_store.MAX_EVENT_STRING_LENGTH * 2)
+    )
+
+    bounded = event_store._bounded_event_message(hostile)
+
+    assert "opaque-secret" not in bounded
+    assert len(bounded) <= event_store.MAX_EVENT_STRING_LENGTH
+    assert bounded.endswith(event_store._TRUNCATION_MARKER)
+
+
 def test_schema_bounded_large_config_read_content_is_not_truncated(
     event_store_module,
 ) -> None:
@@ -644,3 +1049,163 @@ def _result_schema(required_field: str) -> dict[str, object]:
             required_field: {"type": "string"},
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# Debian 13 InfluxDB 3 Core install/preflight envelope agreement
+# --------------------------------------------------------------------------- #
+
+_INFLUXDB3_INSTALL = "os.linux.debian.13.install_influxdb3_core"
+
+
+def _influxdb3_install_schema():
+    """Load the real seeded result schema from migration 0072.
+
+    Using the shipped schema rather than a hand-copied one keeps this test honest:
+    if the migration's envelope rules change, this test sees the change.
+    """
+
+    django_db = sys.modules.setdefault("django.db", types.ModuleType("django.db"))
+    django_migrations = types.ModuleType("django.db.migrations")
+    django_migrations.Migration = type("Migration", (), {})
+    django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
+    sys.modules["django.db.migrations"] = django_migrations
+    django_db.migrations = django_migrations
+    django_models = sys.modules.setdefault(
+        "django.db.models", types.ModuleType("django.db.models")
+    )
+    deletion = types.ModuleType("django.db.models.deletion")
+    deletion.ProtectedError = type("ProtectedError", (Exception,), {})
+    sys.modules["django.db.models.deletion"] = deletion
+    django_models.deletion = deletion
+    name = "netbox_rpc.migrations.0072_seed_influxdb3_debian13_install_procedures"
+    sys.modules.pop(name, None)
+    migration = importlib.import_module(name)
+    return migration._INSTALL_RESULT
+
+
+def _influxdb3_success_result():
+    return {
+        "ok": True,
+        "procedure": _INFLUXDB3_INSTALL,
+        "target": "influx01",
+        "installed": True,
+        "package_version": "3.11.0-1",
+        "service_state": "active",
+        "service_enabled": "enabled",
+        "http_bind": "127.0.0.1:8181",
+        "node_id": "influx01-node",
+        "data_dir": "/var/lib/influxdb3/data",
+        "config_path": "/etc/influxdb3/influxdb3-core.conf",
+        "plugins_enabled": False,
+        "package_held": True,
+        "ready": True,
+        "stage": "complete",
+    }
+
+
+def _influxdb3_execution():
+    return SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=_INFLUXDB3_INSTALL,
+            result_schema=_influxdb3_install_schema(),
+        )
+    )
+
+
+def test_influxdb3_install_success_envelope_records_success(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": True, "result": _influxdb3_success_result()},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionSucceeded"
+
+
+@pytest.mark.parametrize(
+    ("outer_ok", "nested_overrides"),
+    [
+        # The motivating case: a truthy outer envelope wrapping a failed install.
+        # The terminal event is derived from the OUTER ok, so without the envelope
+        # check this would be recorded as a successful installation.
+        (True, {"ok": False, "installed": False, "ready": False, "stage": "package"}),
+        # The reverse direction must fail closed too.
+        (False, {"ok": True}),
+    ],
+)
+def test_influxdb3_install_outer_and_nested_ok_must_agree(
+    event_store_module,
+    outer_ok: bool,
+    nested_overrides: dict,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": outer_ok, "result": {**_influxdb3_success_result(), **nested_overrides}},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result == {}
+
+
+@pytest.mark.parametrize("outer_ok", [1, "true", None, 0, [], {}])
+def test_influxdb3_install_rejects_a_non_boolean_outer_ok(
+    event_store_module,
+    outer_ok: object,
+) -> None:
+    """A truthy non-boolean would otherwise pass bool() coercion silently."""
+
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": outer_ok, "result": _influxdb3_success_result()},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_influxdb3_install_requires_a_nested_result(event_store_module) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(_influxdb3_execution(), {"ok": True})
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_influxdb3_install_matching_failure_envelope_is_preserved(
+    event_store_module,
+) -> None:
+    """A genuine failure must stay representable, with its partial stage intact."""
+
+    event_store, events = event_store_module
+    failure = {
+        **_influxdb3_success_result(),
+        "ok": False,
+        "installed": False,
+        "ready": False,
+        "stage": "package",
+        "error": "apt candidate 3.11.0 not offered by the repository",
+    }
+
+    event_store.record_backend_response(
+        _influxdb3_execution(),
+        {"ok": False, "result": failure},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code != event_store.RESULT_SCHEMA_MISMATCH_CODE
+    assert events[0].result["stage"] == "package"

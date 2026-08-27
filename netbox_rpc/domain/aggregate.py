@@ -40,6 +40,16 @@ class RPCExecutionAggregate:
 
         event_store.record_execution_queued(self.execution)
 
+    def queue_after_approval(self) -> None:
+        """Move an approved execution to the worker queue without a new request."""
+        if self.status != ExecutionStatus.APPROVED.value:
+            raise RPCExecutionAggregateError(
+                "Only an approved execution can be queued after approval."
+            )
+        from .. import event_store
+
+        event_store.record_execution_queued(self.execution)
+
     def enqueue(self, job_id: Any) -> None:
         self._ensure_not_terminal()
         if self.status != ExecutionStatus.QUEUED.value:
@@ -194,6 +204,7 @@ class RPCExecutionAggregate:
         approver_id: Any,
         current_protected: dict[str, Any] | None = None,
         reason: str = "",
+        queue_after_approval: bool = False,
     ) -> None:
         """Second-actor approval. Enforces segregation of duties + snapshot match."""
         snapshot = self._require_snapshot()
@@ -215,6 +226,8 @@ class RPCExecutionAggregate:
                 snapshot_hash=snapshot.payload_hash,
                 reason=reason,
             )
+            if queue_after_approval:
+                self.queue_after_approval()
 
         self._decide_from_pending(_record)
 

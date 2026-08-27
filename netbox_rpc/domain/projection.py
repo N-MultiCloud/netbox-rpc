@@ -36,6 +36,7 @@ class ProjectionState:
     normalized_params: dict[str, Any] = field(default_factory=dict)
     resolved_command_hash: str = ""
     job_id: Any | None = None
+    approved_by_id: Any | None = None
 
     FIELD_NAMES = (
         "status",
@@ -47,6 +48,7 @@ class ProjectionState:
         "normalized_params",
         "resolved_command_hash",
         "job_id",
+        "approved_by_id",
     )
 
     @classmethod
@@ -69,6 +71,7 @@ class ProjectionState:
                 getattr(execution, "resolved_command_hash", None) or ""
             ),
             job_id=getattr(execution, "job_id", None),
+            approved_by_id=getattr(execution, "approved_by_id", None),
         )
 
     def as_update_dict(self) -> dict[str, Any]:
@@ -83,7 +86,11 @@ def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
     if isinstance(event, ApprovalRequested):
         return replace(state, status=ExecutionStatus.PENDING_APPROVAL.value)
     if isinstance(event, ExecutionApproved):
-        return replace(state, status=ExecutionStatus.APPROVED.value)
+        return replace(
+            state,
+            status=ExecutionStatus.APPROVED.value,
+            approved_by_id=event.approved_by_id,
+        )
     if isinstance(event, ExecutionRejected):
         return replace(
             state,
@@ -135,6 +142,7 @@ def apply(state: ProjectionState, event: DomainEvent) -> ProjectionState:
         return replace(
             state,
             status=ExecutionStatus.FAILED.value,
+            result=dict(event.result),
             error_code=event.code or "RPC_EXECUTION_FAILED",
             error_message=event.message,
             finished_at=_coerce_datetime(event.finished_at),

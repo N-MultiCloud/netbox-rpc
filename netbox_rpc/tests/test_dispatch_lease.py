@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -61,6 +63,10 @@ def _configure_key(seed_hex: str, *, key_id="rpc-sign", key_version=3):
     return mock.patch.object(dl, "_plugin_setting", side_effect=_setting)
 
 
+def _absent_setting(_name, default=None):
+    return default
+
+
 class CrossRepoFixtureTests(TestCase):
     """The checked-in fixture is the hard cross-repo contract with #583."""
 
@@ -102,6 +108,50 @@ class CrossRepoFixtureTests(TestCase):
             expected_contract_hash=self.claims.contract_hash,
         )
         assert v.is_valid, v.reason
+
+    def test_semantic_bindings_and_actors_are_reverified(self):
+        expected = {
+            "expected_handler_id": self.claims.handler_id,
+            "expected_handler_version": self.claims.handler_version,
+            "expected_effect": self.claims.effect,
+            "expected_target_snapshot_hash": self.claims.target_snapshot_hash,
+            "expected_params_fingerprint": self.claims.params_fingerprint,
+            "expected_credential_policy": self.claims.credential_policy,
+            "expected_requested_by_id": self.claims.requested_by_id,
+            "expected_approved_by_id": self.claims.approved_by_id,
+        }
+        verified = dl.verify_dispatch_lease(
+            self.lease,
+            public_keys=self.pubs,
+            audience=self.fx["audience"],
+            now=self.now,
+            **expected,
+        )
+        assert verified.is_valid, verified.reason
+
+        reasons = {
+            "expected_handler_id": "handler id mismatch",
+            "expected_handler_version": "handler version mismatch",
+            "expected_effect": "effect mismatch",
+            "expected_target_snapshot_hash": "target snapshot mismatch",
+            "expected_params_fingerprint": "params fingerprint mismatch",
+            "expected_credential_policy": "credential policy mismatch",
+            "expected_requested_by_id": "requester mismatch",
+            "expected_approved_by_id": "approver mismatch",
+        }
+        for field, reason in reasons.items():
+            with self.subTest(field=field):
+                drifted = dict(expected)
+                current = drifted[field]
+                drifted[field] = current + 1 if isinstance(current, int) else f"{current}-drift"
+                rejected = dl.verify_dispatch_lease(
+                    self.lease,
+                    public_keys=self.pubs,
+                    audience=self.fx["audience"],
+                    now=self.now,
+                    **drifted,
+                )
+                assert not rejected.is_valid and rejected.reason == reason
 
     def test_rejects_replayed_nonce(self):
         v = dl.verify_dispatch_lease(
@@ -184,10 +234,191 @@ class CrossRepoFixtureTests(TestCase):
 
 
 class KeyLoadingTests(TestCase):
+    def _environment(self, path: Path, *, key_id="env-sign", key_version="7"):
+        return mock.patch.dict(
+            os.environ,
+            {
+                dl._SIGNING_KEY_FILE_ENV: str(path),
+                dl._SIGNING_KEY_ID_ENV: key_id,
+                dl._SIGNING_KEY_VERSION_ENV: key_version,
+            },
+            clear=False,
+        )
+
+    @staticmethod
+    def _write_key(directory: str, *, mode: int = 0o600) -> Path:
+        path = Path(directory) / "dispatch-lease.pem"
+        path.write_text(_pem_for("12" * 32), encoding="utf-8")
+        path.chmod(mode)
+        return path
+
     def test_no_config_returns_none(self):
         with mock.patch.object(dl, "_plugin_setting", return_value=None):
             assert dl.load_active_signing_key() is None
             assert dl.load_verifier_public_keys() == {}
+
+    def test_secure_environment_file_fallback_loads_private_and_public_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_key(directory)
+            with (
+                mock.patch.object(
+                    dl,
+                    "_plugin_setting",
+                    side_effect=lambda _name, default=None: default,
+                ),
+                self._environment(path),
+            ):
+                signing_key = dl.load_active_signing_key()
+                public_keys = dl.load_verifier_public_keys()
+
+        assert signing_key is not None
+        assert signing_key.key_id == "env-sign"
+        assert signing_key.key_version == 7
+        assert ("env-sign", 7) in public_keys
+
+    def test_explicit_plugin_setting_is_primary_over_environment_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_key(directory)
+            with (
+                mock.patch.object(dl, "_plugin_setting", return_value=[]),
+                self._environment(path),
+            ):
+                assert dl.load_active_signing_key() is None
+                assert dl.load_verifier_public_keys() == {}
+
+    def test_environment_file_rejects_partial_or_invalid_lineage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_key(directory)
+            absent_setting = mock.patch.object(
+                dl,
+                "_plugin_setting",
+                side_effect=_absent_setting,
+            )
+            with (
+                absent_setting,
+                mock.patch.dict(
+                    os.environ,
+                    {dl._SIGNING_KEY_FILE_ENV: str(path)},
+                    clear=True,
+                ),
+            ):
+                assert dl.load_active_signing_key() is None
+            for key_id, version in (("bad id", "1"), ("key", "0"), ("key", "x")):
+                with (
+                    mock.patch.object(
+                        dl,
+                        "_plugin_setting",
+                        side_effect=_absent_setting,
+                    ),
+                    self._environment(path, key_id=key_id, key_version=version),
+                ):
+                    assert dl.load_active_signing_key() is None
+
+    def test_environment_file_rejects_symlinks_and_loose_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._write_key(directory)
+            symlink = Path(directory) / "linked.pem"
+            symlink.symlink_to(target)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(symlink),
+            ):
+                assert dl.load_active_signing_key() is None
+
+            target.chmod(0o644)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(target),
+            ):
+                assert dl.load_active_signing_key() is None
+
+    def test_environment_file_rejects_symlinked_directory_and_oversized_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real_dir = Path(directory) / "real"
+            real_dir.mkdir(mode=0o700)
+            target = self._write_key(str(real_dir))
+            linked_dir = Path(directory) / "linked"
+            linked_dir.symlink_to(real_dir, target_is_directory=True)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(linked_dir / target.name),
+            ):
+                assert dl.load_active_signing_key() is None
+
+            target.write_bytes(b"x" * (dl._MAX_SIGNING_KEY_FILE_BYTES + 1))
+            target.chmod(0o600)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(target),
+            ):
+                assert dl.load_active_signing_key() is None
+
+    def test_environment_file_rejects_hardlinks_unsafe_directory_and_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._write_key(directory)
+            hardlink = Path(directory) / "hardlinked.pem"
+            os.link(target, hardlink)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(target),
+            ):
+                assert dl.load_active_signing_key() is None
+
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe_dir = Path(directory) / "unsafe"
+            unsafe_dir.mkdir(mode=0o700)
+            target = self._write_key(str(unsafe_dir))
+            unsafe_dir.chmod(0o777)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(target),
+            ):
+                assert dl.load_active_signing_key() is None
+
+        with (
+            mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+            self._environment(Path("/dev/null")),
+        ):
+            assert dl.load_active_signing_key() is None
+
+    def test_environment_file_rejects_fifo_without_blocking_and_missing_primitives(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "dispatch-lease.fifo"
+            os.mkfifo(fifo, mode=0o600)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                self._environment(fifo),
+            ):
+                assert dl.load_active_signing_key() is None
+
+            path = self._write_key(directory)
+            with (
+                mock.patch.object(dl, "_plugin_setting", side_effect=_absent_setting),
+                mock.patch.object(dl.os, "supports_dir_fd", set()),
+                self._environment(path),
+            ):
+                assert dl.load_active_signing_key() is None
+
+    def test_environment_file_handles_short_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_key(directory)
+            original_read = os.read
+
+            def short_read(fd, length):
+                return original_read(fd, min(length, 7))
+
+            with (
+                mock.patch.object(
+                    dl,
+                    "_plugin_setting",
+                    side_effect=_absent_setting,
+                ),
+                mock.patch.object(dl.os, "read", side_effect=short_read),
+                self._environment(path),
+            ):
+                assert dl.load_active_signing_key() is not None
 
     def test_malformed_key_is_skipped(self):
         entries = [{"key_id": "", "active": True, "private_key_pem": "nope"}]

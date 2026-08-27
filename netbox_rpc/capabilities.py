@@ -82,7 +82,10 @@ def derive_command_contract_hash(procedure: Any) -> str:
     """Derive the shared contract hash for a procedure.
 
     Canonical sha256 over the procedure's identity + its ordered command
-    contract. The paired backend derives the same value from the same contract,
+    contract. The production Gitea upgrade additionally includes its complete
+    semantic capability extension (target, guest constants, SSH pin policy,
+    normalized/fingerprint schemas, and result states); legacy handler hashes
+    remain byte-for-byte unchanged. The paired backend derives the same value,
     so a hash mismatch means the two sides disagree on what will run.
     """
     commands = []
@@ -111,6 +114,14 @@ def derive_command_contract_hash(procedure: Any) -> str:
         "effect": str(getattr(procedure, "effect", "")),
         "commands": commands,
     }
+    if payload["handler_id"] == "service.gitea.production.upgrade_1_27_1":
+        from .gitea_upgrade_contract import SEMANTIC_CAPABILITY_EXTENSION
+
+        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
+    if payload["handler_id"] == "service.gitea.runner.register":
+        from .gitea_runner_contract import SEMANTIC_CAPABILITY_EXTENSION
+
+        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
@@ -153,6 +164,9 @@ def _fetch_uncached(
             verify=verify,
             timeout=timeout,
             stream=True,
+            # A capability manifest is authoritative only for the configured
+            # backend origin.  Never accept compatibility through a redirect.
+            allow_redirects=False,
         )
     except requests.RequestException:
         return None

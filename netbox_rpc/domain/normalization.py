@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
+import posixpath
 import re
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
 from typing import Any
@@ -29,6 +33,8 @@ from ..constants import (
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
+    GITEA_PRODUCTION_UPGRADE_1_27_1,
+    GITEA_RUNNER_REGISTER,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
     INFLUXDB_1_BOOTSTRAP,
@@ -43,6 +49,9 @@ from ..constants import (
     INFLUXDB_1_PROCEDURE_NAMES,
     INFLUXDB_1_SERVICE_CONTROL,
     INFLUXDB_1_TOKEN_CREATE,
+    INFLUXDB3_DEBIAN13_INSTALL,
+    INFLUXDB3_DEBIAN13_PREFLIGHT,
+    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     LINUX_COLLECT_FACTS,
     LINUX_ENV_FILE_UPSERT_VAR,
     NETBOX_PLUGIN_INSTALL,
@@ -56,11 +65,13 @@ from ..constants import (
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
+    NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
     OOKLA_PROCEDURE_NAMES,
+    OPENBAO_1_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
     PASSBOLT_CLEANUP,
     PASSBOLT_EXPORT_SECRETS,
@@ -165,6 +176,19 @@ _PYTHON_EXACT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.!+-]{0,63}\Z")
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
 _HUAWEI_NE8000_BGP_AVAILABLE = False
 _NETBOX_PLUGIN_INSTALL_AVAILABLE = False
+# No os.linux_debian_13.* handler exists in netbox-rpc-backend yet. Capability
+# discovery is NOT a substitute for this gate: a backend that advertises no
+# manifest yields verification UNKNOWN and admission proceeds, so without the gate
+# /procedures/available/ would advertise these rows as dispatchable and every
+# execution would queue only to fail on an unknown handler. Flip to True in the
+# same coordinated rollout that deploys the handlers and their capability
+# contract, via an additive migration that also sets RPCProcedure.enabled=True.
+_INFLUXDB3_DEBIAN13_AVAILABLE = False
+# Registration remains unavailable until the composite backend handler and the
+# exact runner-host helper generation are deployed together.  The catalog row
+# is also seeded disabled; this code gate prevents an operator toggle from
+# bypassing the coordinated rollout order.
+_GITEA_RUNNER_REGISTER_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -198,6 +222,12 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "approve against one row and the worker execute against another "
             "edited in between."
         )
+    if procedure_name == GITEA_RUNNER_REGISTER and not _GITEA_RUNNER_REGISTER_AVAILABLE:
+        return (
+            "service.gitea.runner.register cannot run until the composite "
+            "secret-silent backend handler and exact isolated-runner host "
+            "generation are deployed and reviewed."
+        )
     if (
         procedure_name == HUAWEI_NE8000_F1A_SHOW_BGP_PEER
         and not _HUAWEI_NE8000_BGP_AVAILABLE
@@ -207,6 +237,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "netbox-rpc-backend execution handler and its approved capability "
             "contract are not deployed, and the coordinated BGP rollout has "
             "not been authorized."
+        )
+    if (
+        procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        and not _INFLUXDB3_DEBIAN13_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no os.linux_debian_13.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handlers and "
+            "their approved capability contract."
         )
     return None
 
@@ -348,6 +389,74 @@ _INFLUXDB_SECRET_REF_RE = re.compile(
     r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
+# Debian 13 InfluxDB 3 Core installation catalog (migration 0072). Every value is
+# re-validated here, in the pure domain, so a params_schema edit alone can never
+# widen what actually reaches the execution backend.
+_INFLUXDB3_ABSOLUTE_PATH_RE = re.compile(r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_INFLUXDB3_NODE_ID_RE = re.compile(r"[A-Za-z0-9]+(?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_INFLUXDB3_BIND_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9.-]{0,252}):([0-9]{1,5})$")
+_INFLUXDB3_WAL_FLUSH_INTERVAL_RE = re.compile(r"[0-9]{1,9}(?:ms|s)$")
+_INFLUXDB3_LOG_FILTER_RE = re.compile(r"[A-Za-z0-9_=,.-]{1,128}$")
+_INFLUXDB3_PACKAGE_VERSION_RE = re.compile(r"[A-Za-z0-9.+:~_-]{1,64}$")
+# The packaged systemd unit sandboxes these trees, so a data directory beneath one
+# of them yields a service that cannot start. Mirrors the operator installer.
+_INFLUXDB3_FORBIDDEN_DATA_DIR_ROOTS = (
+    "/home",
+    "/root",
+    "/run",
+    "/tmp",
+    "/var/tmp",
+)
+_INFLUXDB3_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_INFLUXDB3_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
+_INFLUXDB3_BOOLEAN_PARAM_DEFAULTS = {
+    "enable_plugins": False,
+    "disable_telemetry": True,
+    "hold_package": True,
+    "upgrade_package": False,
+    "force_reconfigure": False,
+    "allow_plaintext_remote": False,
+}
+_INFLUXDB3_INSTALL_STRING_PARAMS = (
+    "node_id",
+    "data_dir",
+    "http_bind",
+    "tls_cert",
+    "tls_key",
+    "wal_flush_interval",
+    "log_filter",
+    "package_version",
+)
+# Explicitly FORBIDDEN, not accepted. A caller-supplied rpc_ssh_credential_pk is
+# not object-scoped against the requester (issue #203), so honouring it here would
+# let a requester use a credential they cannot view; a caller-supplied rpc_ssh_host
+# would additionally pivot the SSH destination away from the audited NetBox target.
+# The execution backend must resolve host, port, credential, and known-host policy
+# from the execution's assigned object alone — the same rule the Huawei NE8000 BGP
+# procedure follows. These names are listed so the refusal is explicit rather than a
+# generic "unsupported parameter".
+_INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+# Underscore-prefixed keys the platform itself stamps into params after schema
+# validation (intent origin markers, the frozen RQ timeout snapshot). They are not
+# caller input and must not trip the unknown-parameter guard.
+_INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
 _AKVORADO_SENSITIVE_KEY_RE = re.compile(
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
@@ -380,6 +489,36 @@ _AKVORADO_AUTHORIZATION_RE = re.compile(
 )
 _AKVORADO_URL_CREDENTIAL_RE = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"
+)
+
+# The paired backend currently has an identity-checked OpenBao SSH credential
+# resolver only for dcim.device. Do not advertise or normalize VM targets until
+# the backend has an equivalent identity-checked VM resolver.
+_OPENBAO_TARGET_MODEL_LABELS = frozenset({"dcim.device"})
+_OPENBAO_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_OPENBAO_MOUNT_PATH_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+    r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?$"
+)
+_OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+_OPENBAO_INTERNAL_PARAM_KEYS = frozenset(
+    {"_intent", "_intent_name", "_timeout_seconds_snapshot"}
+)
+_OPENBAO_AUTH_TYPES = frozenset(
+    {"approle", "cert", "jwt", "kubernetes", "ldap", "oidc", "userpass"}
+)
+_OPENBAO_ENGINE_TYPES = frozenset({"database", "kv", "pki", "ssh", "transit", "totp"})
+_OPENBAO_AUDIT_TYPES = frozenset({"file", "syslog"})
+_OPENBAO_SERVICE_ACTIONS = frozenset(
+    {"start", "stop", "restart", "reload", "enable", "disable"}
 )
 # Samba/AD user and group identifiers (issue #160). The first character must
 # be a safe alphanumeric/underscore so a value can never be read as a
@@ -477,6 +616,159 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     return normalized
 
 
+# ── Transport driver chain resolution ────────────────────────────────────────
+#
+# Precedence, most specific first:
+#
+#   1. the procedure's own transport_driver_chain  — operator intent, verbatim
+#   2. the estate-wide default chain from RpcPluginSettings, with the
+#      procedure's own driver appended as its fallback
+#   3. nothing — the backend then uses the single transport_driver, and failing
+#      that its own built-in capability default
+#
+# A procedure marked ``transport_pinned`` never reaches step 2: its backend
+# handler depends on one specific driver (it disables fallback and relies on
+# AsyncSSH credential isolation, or streams a long-running command's output),
+# so an estate-wide policy must not touch it.
+#
+# NOTE: ``_DEFAULT_TRANSPORT_DRIVER`` below is deliberately still "asyncssh"
+# even though the *model* default is now "ansible". It means "the driver the
+# backend assumes when the key is absent from the payload", which is a property
+# of netbox-rpc-backend, not of this model. Changing it to match the model
+# default would make every asyncssh procedure stop pinning its driver.
+
+_UNSET = object()
+
+from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
+from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
+from ..transport import driver_capability as _driver_capability
+
+
+def _transport_policy() -> Any | None:
+    """The plugin settings singleton, or ``None`` when it cannot be read.
+
+    Never raises: normalization runs on the execution dispatch path, and a
+    settings row that is missing (fresh install, mid-migration, a test using a
+    stub procedure) must degrade to "no estate-wide policy" rather than break
+    the run.
+    """
+
+    try:
+        from netbox_rpc.models import RpcPluginSettings
+
+        # Deliberately NOT get_solo(): that is a get_or_create, i.e. a write.
+        # Normalization runs on the worker's dispatch path and must not create
+        # rows — a read-only lookup that finds nothing simply means "no
+        # estate-wide policy", which is exactly the pre-existing behaviour.
+        return RpcPluginSettings.objects.filter(singleton_key="default").first()
+    except Exception:  # noqa: BLE001 - policy lookup must never break dispatch
+        return None
+
+
+def resolve_driver_chain(procedure: Any, policy: Any = _UNSET) -> list[str]:
+    """The effective driver priority + fallback chain for a procedure.
+
+    ``policy`` is threaded in by the caller so one execution reads the settings
+    singleton exactly once. Reading it again for the platform map could pair a
+    chain from one snapshot with a platform map from another if an operator
+    edits the policy mid-dispatch.
+    """
+
+    raw_chain = getattr(procedure, "transport_driver_chain", None) or []
+    explicit = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
+    if explicit:
+        return explicit
+
+    if getattr(procedure, "transport_pinned", False):
+        return []
+
+    driver = str(getattr(procedure, "transport_driver", "") or "").strip()
+    if not driver:
+        return []
+
+    capability = _driver_capability(driver)
+    if not capability:
+        return []
+
+    if policy is _UNSET:
+        policy = _transport_policy()
+    if policy is None:
+        return []
+    default_chain = policy.default_chain_for(capability)
+    if not default_chain:
+        return []
+
+    chain = list(default_chain)
+    if driver not in chain:
+        chain.append(driver)
+
+    # Safety net: never leave Ansible without a raw fallback. A chain of only
+    # Ansible drivers turns an optional dependency into a hard one — if
+    # ansible-core is missing or the control node cannot serve the request, the
+    # execution would fail outright instead of degrading.
+    if all(entry in _ANSIBLE_DRIVERS for entry in chain):
+        chain.append(_RAW_CAPABILITY_DEFAULT[capability])
+    return chain
+
+
+def _apply_ansible_context(
+    execution: RPCExecution,
+    normalized: dict[str, Any],
+    chain: list[str],
+    policy: Any,
+) -> None:
+    """Inject the target's Ansible connection settings into the payload.
+
+    The execution backend has no view of what a target *is* — its SSH credential
+    carries no platform — but NetBox does. So when the resolved chain actually
+    contains an Ansible driver, netbox-rpc resolves the target device's Platform
+    to the ``netbox.netbox``-conventional ``ansible_network_os`` /
+    ``ansible_connection`` pair and passes it down.
+
+    Gated on the chain so every non-Ansible procedure keeps a byte-for-byte
+    identical ``normalized_params`` payload, exactly like the other overrides.
+    An unmapped platform injects nothing: the backend then reports its network
+    driver unavailable and falls back to a raw driver, which is far better than
+    guessing a vendor CLI dialect.
+    """
+
+    if not any(entry in _ANSIBLE_DRIVERS for entry in chain):
+        return
+    if policy is None:
+        return
+
+    context = policy.ansible_context_for_platform(_target_platform_slug(execution))
+    if not context:
+        return
+
+    normalized["_ansible"] = context
+    fingerprint = normalized.get("command_fingerprint")
+    if isinstance(fingerprint, dict):
+        fingerprint["ansible_context"] = context
+
+
+def _target_platform_slug(execution: RPCExecution) -> str:
+    """Slug of the target object's NetBox Platform, or ``""``.
+
+    Tolerates every shape the target can take (device, VM, plugin model, or a
+    test stub) and any missing relation, because a missing platform is a normal
+    condition — not every RPC target is a network device.
+    """
+
+    try:
+        target = getattr(execution, "assigned_object", None)
+    except Exception:  # noqa: BLE001 - a stale/removed content type must not
+        # break dispatch; a missing platform simply means "no Ansible context".
+        return ""
+    if target is None:
+        return ""
+    platform = getattr(target, "platform", None)
+    if platform is None:
+        return ""
+    slug = getattr(platform, "slug", None)
+    return str(slug).strip().lower() if slug else ""
+
+
 def _apply_driver_pipeline_overrides(
     execution: RPCExecution, normalized: dict[str, Any]
 ) -> None:
@@ -489,16 +781,16 @@ def _apply_driver_pipeline_overrides(
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver"] = driver
 
-    # Ordered driver priority + fallback chain. Injected only when the operator
-    # configured a non-empty chain, so legacy procedures keep a byte-for-byte
-    # identical payload. The backend reads it from normalized_params, tries the
-    # drivers in order, and falls through on unavailable/connection errors.
-    raw_chain = getattr(procedure, "transport_driver_chain", None) or []
-    chain = [str(entry).strip() for entry in raw_chain if str(entry).strip()]
+    # Ordered driver priority + fallback chain. The backend reads it from
+    # normalized_params, tries the drivers in order, and falls through on
+    # unavailable/connection errors.
+    policy = _transport_policy()
+    chain = resolve_driver_chain(procedure, policy)
     if chain:
         normalized["transport_driver_chain"] = chain
         if isinstance(fingerprint, dict):
             fingerprint["transport_driver_chain"] = chain
+        _apply_ansible_context(execution, normalized, chain, policy)
 
     parser = str(getattr(procedure, "output_parser", "") or "").strip()
     if parser and parser != _DEFAULT_OUTPUT_PARSER:
@@ -741,11 +1033,29 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name in PASSBOLT_PROCEDURE_NAMES:
         return _normalize_passbolt_migration_execution(execution, target)
 
+    if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+        return _normalize_staging_backend_token_rotation_execution(
+            execution,
+            target,
+        )
+
+    if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
+        return _normalize_gitea_production_upgrade_execution(execution)
+
+    if procedure_name == GITEA_RUNNER_REGISTER:
+        return _normalize_gitea_runner_registration_execution(execution)
+
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
 
     if procedure_name in INFLUXDB_1_PROCEDURE_NAMES:
         return _normalize_influxdb_1_execution(execution, target)
+
+    if procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES:
+        return _normalize_influxdb3_debian13_execution(execution, target)
+
+    if procedure_name in OPENBAO_1_PROCEDURE_NAMES:
+        return _normalize_openbao_1_execution(execution, target)
 
     if procedure_name in AKVORADO_1_PROCEDURE_NAMES:
         return _normalize_akvorado_1_execution(execution)
@@ -1165,6 +1475,214 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     )
 
 
+def _normalize_openbao_1_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the closed OpenBao catalog against its audited target.
+
+    OpenBao resolves its SSH service and credential from the execution's NetBox
+    object identity downstream.  Only schema-declared operation fields are
+    forwarded here: no caller ``rpc_ssh_*`` key can enter ``normalized_params``
+    or its command fingerprint.  This family-specific boundary mirrors the
+    Proxmox systemctl normalizer; estate-wide SSH-override enforcement is tracked
+    separately.
+    """
+
+    params = execution.params or {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "OpenBao params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    procedure_name = execution.procedure.name
+    handler_id = execution.procedure.handler_id
+    operation = procedure_name.removeprefix("service.openbao.1.")
+    allowed_by_operation = {
+        "inspect": frozenset(),
+        "seal_status": frozenset(),
+        "health": frozenset(),
+        "policies_list": frozenset(),
+        "auth_list": frozenset(),
+        "secrets_list": frozenset(),
+        "audit_list": frozenset(),
+        "raft_list_peers": frozenset(),
+        "raft_autopilot_state": frozenset(),
+        "snapshots_list": frozenset(),
+        "auth_enable": frozenset({"auth_type", "mount_path"}),
+        "secrets_enable": frozenset({"engine_type", "mount_path", "kv_version"}),
+        "audit_enable": frozenset({"audit_type", "mount_path"}),
+        "snapshot_create": frozenset({"snapshot_name"}),
+        "service_action": frozenset({"action"}),
+        "seal": frozenset(),
+        "step_down": frozenset(),
+        "raft_remove_peer": frozenset({"peer_id"}),
+        "policy_delete": frozenset({"policy_name"}),
+        "auth_disable": frozenset({"mount_path"}),
+        "secrets_disable": frozenset({"mount_path"}),
+        "audit_disable": frozenset({"mount_path"}),
+    }
+    allowed = allowed_by_operation.get(operation)
+    if allowed is None:
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+
+    supplied_overrides = sorted(set(params) & _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS)
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for OpenBao; the "
+            "execution backend resolves SSH from the assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(set(params) - allowed - _OPENBAO_INTERNAL_PARAM_KEYS)
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        target_model not in _OPENBAO_TARGET_MODEL_LABELS
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "OpenBao procedures require an existing assigned dcim.device.",
+            code="RPC_TARGET_INVALID",
+        )
+    if (
+        not isinstance(target, str)
+        or not target
+        or len(target) > 255
+        or any(ord(character) < 32 or ord(character) == 127 for character in target)
+    ):
+        raise RPCExecutionError(
+            "The assigned OpenBao target has an invalid display name.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_object = {"content_type": target_model, "object_id": object_id}
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": handler_id,
+            # The backend's OpenBao metadata model uses the registration-id
+            # namespace for this optional field, not the dotted catalog name.
+            "procedure": handler_id,
+            "target": target,
+            "target_object": target_object,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+    def required_string(key: str, pattern: re.Pattern[str]) -> str:
+        value = params.get(key)
+        if not isinstance(value, str) or not pattern.fullmatch(value):
+            raise RPCExecutionError(
+                f"{key} has an invalid or unsupported value.",
+                code="RPC_PARAM_INVALID",
+            )
+        return value
+
+    def optional_mount_path() -> str | None:
+        if "mount_path" not in params or params.get("mount_path") is None:
+            return None
+        return required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
+
+    if operation == "policy_delete":
+        policy_name = required_string("policy_name", _OPENBAO_NAME_RE)
+        normalized["policy_name"] = policy_name
+        normalized["command_fingerprint"]["policy_name"] = policy_name
+
+    if operation == "auth_enable":
+        auth_type = params.get("auth_type")
+        if not isinstance(auth_type, str) or auth_type not in _OPENBAO_AUTH_TYPES:
+            raise RPCExecutionError(
+                "auth_type is not a supported OpenBao authentication method.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["auth_type"] = auth_type
+        normalized["command_fingerprint"]["auth_type"] = auth_type
+
+    if operation == "secrets_enable":
+        engine_type = params.get("engine_type")
+        if not isinstance(engine_type, str) or engine_type not in _OPENBAO_ENGINE_TYPES:
+            raise RPCExecutionError(
+                "engine_type is not a supported OpenBao secrets engine.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["engine_type"] = engine_type
+        normalized["command_fingerprint"]["engine_type"] = engine_type
+        if "kv_version" in params and params.get("kv_version") is not None:
+            kv_version = params.get("kv_version")
+            if (
+                isinstance(kv_version, bool)
+                or not isinstance(kv_version, int)
+                or kv_version not in {1, 2}
+                or engine_type != "kv"
+            ):
+                raise RPCExecutionError(
+                    "kv_version must be 1 or 2 and is supported only for kv.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["kv_version"] = kv_version
+            normalized["command_fingerprint"]["kv_version"] = kv_version
+
+    if operation == "audit_enable":
+        audit_type = params.get("audit_type")
+        if not isinstance(audit_type, str) or audit_type not in _OPENBAO_AUDIT_TYPES:
+            raise RPCExecutionError(
+                "audit_type must be file or syslog.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["audit_type"] = audit_type
+        normalized["command_fingerprint"]["audit_type"] = audit_type
+
+    if operation in {
+        "auth_enable",
+        "secrets_enable",
+        "audit_enable",
+    }:
+        mount_path = optional_mount_path()
+        if mount_path is not None:
+            normalized["mount_path"] = mount_path
+            normalized["command_fingerprint"]["mount_path"] = mount_path
+
+    if operation in {"auth_disable", "secrets_disable", "audit_disable"}:
+        mount_path = required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
+        normalized["mount_path"] = mount_path
+        normalized["command_fingerprint"]["mount_path"] = mount_path
+
+    if operation == "snapshot_create" and params.get("snapshot_name") is not None:
+        snapshot_name = required_string("snapshot_name", _OPENBAO_NAME_RE)
+        normalized["snapshot_name"] = snapshot_name
+        normalized["command_fingerprint"]["snapshot_name"] = snapshot_name
+
+    if operation == "service_action":
+        action = params.get("action")
+        if not isinstance(action, str) or action not in _OPENBAO_SERVICE_ACTIONS:
+            raise RPCExecutionError(
+                "action is not a supported OpenBao service action.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["action"] = action
+        normalized["command_fingerprint"]["action"] = action
+
+    if operation == "raft_remove_peer":
+        peer_id = required_string("peer_id", _OPENBAO_NAME_RE)
+        normalized["peer_id"] = peer_id
+        normalized["command_fingerprint"]["peer_id"] = peer_id
+
+    return normalized
+
+
 def _normalize_influxdb_1_execution(
     execution: RPCExecution,
     target: str,
@@ -1283,7 +1801,10 @@ def _normalize_influxdb_1_execution(
                 normalized[key] = value
                 normalized["command_fingerprint"][key] = value
             _copy_influxdb_retention(params, normalized)
-        elif any(params.get(key) not in (None, "") for key in ("username", "organization", "database", "retention_seconds")):
+        elif any(
+            params.get(key) not in (None, "")
+            for key in ("username", "organization", "database", "retention_seconds")
+        ):
             raise RPCExecutionError(
                 "Core 3 bootstrap accepts only family, secret_name_prefix, and optional tenant_id.",
                 code="RPC_PARAM_INVALID",
@@ -1343,7 +1864,10 @@ def _normalize_influxdb_1_execution(
                     code="RPC_PARAM_INVALID",
                 )
         else:
-            if any(params.get(key) not in (None, "") for key in ("organization", "database")):
+            if any(
+                params.get(key) not in (None, "")
+                for key in ("organization", "database")
+            ):
                 raise RPCExecutionError(
                     "Core 3 named admin tokens are server-wide and do not accept organization/database.",
                     code="RPC_PARAM_INVALID",
@@ -1354,6 +1878,261 @@ def _normalize_influxdb_1_execution(
                 normalized["command_fingerprint"]["expiry_seconds"] = expiry
 
     _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
+def _influxdb3_absolute_path(raw_value: object, field_name: str) -> str:
+    """Return a validated, already-canonical absolute path.
+
+    The charset permits ``.`` inside a segment (``server.crt``), so a segment that
+    is exactly ``.`` or ``..`` has to be rejected explicitly. Both matter: ``..``
+    is traversal, and ``.`` would let ``/var/./tmp/influxdb3`` pass a literal
+    prefix comparison against the forbidden ``/var/tmp`` root while still
+    resolving inside it. Requiring the value to be canonical up front is stronger
+    than normalizing it, because what gets stored, fingerprinted, approved, and
+    executed is then the same string an operator read.
+    """
+
+    value = str(raw_value or "").strip()
+    if not _INFLUXDB3_ABSOLUTE_PATH_RE.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} must be a safe absolute path without whitespace.",
+            code="RPC_PARAM_INVALID",
+        )
+    if len(value) > 255:
+        raise RPCExecutionError(
+            f"{field_name} may contain at most 255 characters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if any(segment in {"", ".", ".."} for segment in value.split("/")[1:]):
+        raise RPCExecutionError(
+            f"{field_name} must be canonical: '.' and '..' segments are rejected.",
+            code="RPC_PARAM_INVALID",
+        )
+    if posixpath.normpath(value) != value:
+        raise RPCExecutionError(
+            f"{field_name} must already be a canonical absolute path.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _influxdb3_pattern_param(
+    raw_value: object,
+    field_name: str,
+    pattern: re.Pattern[str],
+) -> str:
+    value = str(raw_value or "").strip()
+    if not pattern.fullmatch(value):
+        raise RPCExecutionError(
+            f"{field_name} has an invalid or unsupported value.",
+            code="RPC_PARAM_INVALID",
+        )
+    return value
+
+
+def _normalize_influxdb3_debian13_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the Debian 13 InfluxDB 3 Core preflight/install procedures.
+
+    Neither procedure accepts a token, password, or secret reference of any kind:
+    administrative credentials for this product family are created and vaulted
+    exclusively by ``service.influxdb.1.bootstrap``. Everything forwarded here is a
+    structured, charset-bounded configuration value; nothing may reach a shell.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+
+    # Worker-claim layer of the fail-closed code gate. Admission
+    # (create_execution) and advertisement (/procedures/available/) check the same
+    # shared function; this third check covers an RPCExecution row created by an
+    # older process before the gate existed, or claimed by a worker running stale
+    # code during a rolling deployment.
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    # ``target`` is an audit-only display value. Runtime host and credential
+    # resolution must use the immutable content-type + object-ID identity below,
+    # never the display string: the caller chooses assigned_object_id, so an
+    # approved installation must be pinned to the object that was approved.
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    if target_model not in _INFLUXDB3_TARGET_MODEL_LABELS:
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require a dcim.device or "
+            "virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    content_type = f"{app_label}.{model}"
+    if (
+        content_type != target_model
+        or content_type not in _INFLUXDB3_TARGET_MODEL_LABELS
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Debian 13 InfluxDB 3 Core procedures require an existing assigned "
+            "dcim.device or virtualization.virtualmachine.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            # Flat scalars, so the fingerprint stays a single-level mapping.
+            "target_content_type": content_type,
+            "target_object_id": object_id,
+        },
+    }
+
+    # The SSH destination is derived from the assigned NetBox object by the
+    # execution backend. Refuse a caller-supplied override outright, ahead of the
+    # generic unknown-parameter check, so the reason is unambiguous in the audit
+    # trail.
+    supplied_overrides = sorted(set(params) & _INFLUXDB3_FORBIDDEN_SSH_OVERRIDE_PARAMS)
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # Reject unknown params in the pure domain as well as in params_schema, so a
+    # row created by an older process (or a loosened schema) cannot smuggle a key
+    # past this boundary.
+    allowed: set[str] = set()
+    if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
+        allowed.update({"tls_cert", "tls_key"})
+    elif procedure_name == INFLUXDB3_DEBIAN13_INSTALL:
+        allowed.update(_INFLUXDB3_INSTALL_STRING_PARAMS)
+        allowed.update(_INFLUXDB3_BOOLEAN_PARAM_DEFAULTS)
+    else:
+        # Fail closed rather than silently applying the installer's parameter set
+        # to a third procedure someone later adds to the dispatch frozenset.
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+    unexpected = sorted(set(params) - allowed - _INFLUXDB3_INTERNAL_PARAM_KEYS)
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # TLS material is both-or-neither on either procedure: preflight probes exactly
+    # the pair the install would consume, so a half-specified pair is a caller bug
+    # in both directions.
+    tls_cert_present = params.get("tls_cert") not in (None, "")
+    tls_key_present = params.get("tls_key") not in (None, "")
+    if tls_cert_present != tls_key_present:
+        raise RPCExecutionError(
+            "tls_cert and tls_key must be supplied together, or neither.",
+            code="RPC_PARAM_INVALID",
+        )
+    tls_enabled = tls_cert_present and tls_key_present
+    if tls_enabled:
+        for key in ("tls_cert", "tls_key"):
+            value = _influxdb3_absolute_path(params.get(key), key)
+            normalized[key] = value
+            normalized["command_fingerprint"][key] = value
+    normalized["tls_enabled"] = tls_enabled
+    normalized["command_fingerprint"]["tls_enabled"] = tls_enabled
+
+    if procedure_name == INFLUXDB3_DEBIAN13_PREFLIGHT:
+        return normalized
+
+    for key, default in _INFLUXDB3_BOOLEAN_PARAM_DEFAULTS.items():
+        value = _bool_param(params, key, default)
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = value
+
+    if params.get("node_id") not in (None, ""):
+        node_id = _influxdb3_pattern_param(
+            params.get("node_id"), "node_id", _INFLUXDB3_NODE_ID_RE
+        )
+        if len(node_id) > 128:
+            raise RPCExecutionError(
+                "node_id may contain at most 128 characters.",
+                code="RPC_PARAM_INVALID",
+            )
+        normalized["node_id"] = node_id
+        normalized["command_fingerprint"]["node_id"] = node_id
+
+    if params.get("data_dir") not in (None, ""):
+        data_dir = _influxdb3_absolute_path(params.get("data_dir"), "data_dir")
+        for root in _INFLUXDB3_FORBIDDEN_DATA_DIR_ROOTS:
+            if data_dir == root or data_dir.startswith(f"{root}/"):
+                raise RPCExecutionError(
+                    "data_dir must not be under /home, /root, /run, /tmp, or "
+                    "/var/tmp: the packaged systemd unit sandboxes those trees.",
+                    code="RPC_PARAM_INVALID",
+                )
+        normalized["data_dir"] = data_dir
+        normalized["command_fingerprint"]["data_dir"] = data_dir
+
+    for key, pattern in (
+        ("wal_flush_interval", _INFLUXDB3_WAL_FLUSH_INTERVAL_RE),
+        ("log_filter", _INFLUXDB3_LOG_FILTER_RE),
+        ("package_version", _INFLUXDB3_PACKAGE_VERSION_RE),
+    ):
+        if params.get(key) in (None, ""):
+            continue
+        value = _influxdb3_pattern_param(params.get(key), key, pattern)
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = value
+
+    # http_bind gates the security posture below, so it is parsed even when the
+    # caller relies on the backend's loopback default.
+    bind_host = "127.0.0.1"
+    if params.get("http_bind") not in (None, ""):
+        http_bind = str(params.get("http_bind") or "").strip()
+        match = _INFLUXDB3_BIND_RE.fullmatch(http_bind)
+        if match is None:
+            raise RPCExecutionError(
+                "http_bind must use hostname-or-IPv4:port syntax, for example "
+                "127.0.0.1:8181.",
+                code="RPC_PARAM_INVALID",
+            )
+        bind_host = match.group(1)
+        bind_port = int(match.group(2))
+        if not 1 <= bind_port <= 65535:
+            raise RPCExecutionError(
+                "http_bind port must be between 1 and 65535.",
+                code="RPC_PARAM_OUT_OF_RANGE",
+            )
+        normalized["http_bind"] = f"{bind_host}:{bind_port}"
+        normalized["command_fingerprint"]["http_bind"] = normalized["http_bind"]
+
+    # The operator installer refuses to expose bearer-token authentication over
+    # plaintext HTTP. Reproduce that refusal here so the audited catalog cannot be
+    # used to stand up an unprotected remote listener by omission.
+    remote_bind = bind_host not in _INFLUXDB3_LOOPBACK_BIND_HOSTS
+    if remote_bind and not tls_enabled and not normalized["allow_plaintext_remote"]:
+        raise RPCExecutionError(
+            "Refusing to expose token authentication over plaintext HTTP: supply "
+            "tls_cert and tls_key, keep http_bind on loopback behind a TLS reverse "
+            "proxy, or set allow_plaintext_remote=true for a trusted, firewalled "
+            "network.",
+            code="RPC_PARAM_INVALID",
+        )
+    normalized["remote_bind"] = remote_bind
+    normalized["command_fingerprint"]["remote_bind"] = remote_bind
+
     return normalized
 
 
@@ -1526,7 +2305,9 @@ def _normalize_influxdb_named_value(
     return value
 
 
-def _copy_influxdb_admin_ref(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_admin_ref(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     secret_ref = str(params.get("admin_secret_ref") or "").strip()
     if not _INFLUXDB_SECRET_REF_RE.fullmatch(secret_ref):
         raise RPCExecutionError(
@@ -1537,14 +2318,18 @@ def _copy_influxdb_admin_ref(params: dict[str, Any], normalized: dict[str, Any])
     normalized["command_fingerprint"]["admin_secret_ref"] = secret_ref
 
 
-def _copy_influxdb_tenant_id(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_tenant_id(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     tenant_id = _optional_int_range(params, "tenant_id", 1, None)
     if tenant_id is not None:
         normalized["tenant_id"] = tenant_id
         normalized["command_fingerprint"]["tenant_id"] = tenant_id
 
 
-def _copy_influxdb_retention(params: dict[str, Any], normalized: dict[str, Any]) -> None:
+def _copy_influxdb_retention(
+    params: dict[str, Any], normalized: dict[str, Any]
+) -> None:
     retention = _optional_int_range(params, "retention_seconds", 3600, 315360000)
     if retention is not None:
         normalized["retention_seconds"] = retention
@@ -2072,8 +2857,7 @@ def _normalize_samba_username(raw_username: object) -> str:
     username = str(raw_username or "").strip()
     if not username or not _SAMBA_IDENTIFIER_RE.fullmatch(username):
         raise RPCExecutionError(
-            "username must be a safe Samba/AD identifier without shell "
-            "metacharacters.",
+            "username must be a safe Samba/AD identifier without shell metacharacters.",
             code="RPC_PARAM_INVALID",
         )
     return username
@@ -2137,8 +2921,7 @@ def _extract_samba_password_fingerprint(params: dict[str, Any]) -> dict[str, Any
     password_bytes = params.get("password_bytes")
     if not isinstance(password_bytes, int) or isinstance(password_bytes, bool):
         raise RPCExecutionError(
-            "password_bytes must be an integer byte count computed by the "
-            "server.",
+            "password_bytes must be an integer byte count computed by the server.",
             code="RPC_PARAM_INVALID",
         )
     if password_bytes < 1 or password_bytes > 4096:
@@ -3215,9 +3998,7 @@ def _normalize_ubuntu_upgrade_26_execution(
         normalized["dry_run"] = dry_run
         normalized["reboot_after_upgrade"] = reboot_after_upgrade
         normalized["command_fingerprint"]["dry_run"] = dry_run
-        normalized["command_fingerprint"]["reboot_after_upgrade"] = (
-            reboot_after_upgrade
-        )
+        normalized["command_fingerprint"]["reboot_after_upgrade"] = reboot_after_upgrade
 
     if procedure_name == UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE:
         if "expected_version_id" in params:
@@ -4077,6 +4858,1059 @@ def _copy_optional_credential_override(
     if credential_pk is not None:
         normalized["rpc_ssh_credential_pk"] = credential_pk
         normalized["command_fingerprint"]["rpc_ssh_credential_pk"] = credential_pk
+
+
+_STAGING_BACKEND_TOKEN_ROTATION_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+
+def _normalize_staging_backend_token_rotation_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize only SSH routing metadata for secret-silent token rotation."""
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the nms-front-door device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    if not isinstance(target, str):
+        raise RPCExecutionError(
+            "The staging backend token rotation target must be a string.",
+            code="RPC_TARGET_INVALID",
+        )
+    target = target.strip()
+    if target != "nms-front-door" or any(
+        ord(character) < 32 or ord(character) == 127 for character in target
+    ):
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the nms-front-door target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+        or getattr(assigned_object, "name", None) != target
+    ):
+        raise RPCExecutionError(
+            "Staging backend token rotation requires the existing nms-front-door device.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "Staging backend token rotation params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params) - _STAGING_BACKEND_TOKEN_ROTATION_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            "Staging backend token rotation accepts no caller parameters; "
+            f"unexpected field(s): {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "target": target,
+            "assigned_object_id": assigned_object_id,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+    return normalized
+
+
+_GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+_GITEA_RUNNER_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+
+def validate_gitea_runner_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate the exact isolated-runner VM selected by reviewed policy."""
+    from .. import gitea_runner_contract as contract
+
+    if (
+        target_model_label != contract.RUNNER_TARGET_OBJECT["content_type"]
+        or assigned_object_id != contract.RUNNER_TARGET_ID
+        or isinstance(assigned_object_id, bool)
+        or target is None
+        or getattr(target, "pk", None) != contract.RUNNER_TARGET_ID
+        or getattr(target, "name", None) != contract.RUNNER_TARGET_NAME
+        or (
+            target_display is not None and target_display != contract.RUNNER_TARGET_NAME
+        )
+    ):
+        raise RPCExecutionError(
+            "Gitea runner registration requires the exact isolated-runner VM.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    relations = (
+        (
+            "cluster",
+            contract.RUNNER_CLUSTER_ID,
+            contract.RUNNER_CLUSTER_NAME,
+        ),
+        ("device", contract.RUNNER_NODE_ID, contract.RUNNER_NODE_NAME),
+        ("tenant", contract.RUNNER_TENANT_ID, contract.RUNNER_TENANT_NAME),
+        ("role", contract.RUNNER_ROLE_ID, contract.RUNNER_ROLE_NAME),
+    )
+    relation_values: dict[str, object] = {}
+    for field, expected_id, expected_name in relations:
+        relation = getattr(target, field, None)
+        relation_id = getattr(target, f"{field}_id", None)
+        if (
+            relation is None
+            or relation_id != expected_id
+            or isinstance(relation_id, bool)
+            or getattr(relation, "pk", None) != expected_id
+            or getattr(relation, "name", None) != expected_name
+        ):
+            raise RPCExecutionError(
+                f"Gitea runner target {field} does not match reviewed policy.",
+                code="RPC_TARGET_INVALID",
+            )
+        relation_values[field] = relation
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Gitea runner target must be active before registration.",
+            code="RPC_TARGET_INVALID",
+        )
+    raw_vcpus = getattr(target, "vcpus", None)
+    if isinstance(raw_vcpus, bool):
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        vcpus = float(raw_vcpus)
+    except (TypeError, ValueError) as exc:
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    memory = getattr(target, "memory", None)
+    disk = getattr(target, "disk", None)
+    if (
+        vcpus != contract.RUNNER_VCPUS
+        or type(memory) is not int
+        or memory != contract.RUNNER_MEMORY_MIB
+        or type(disk) is not int
+        or disk != contract.RUNNER_DISK_MIB
+    ):
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    custom_fields = getattr(target, "custom_field_data", None)
+    if not isinstance(custom_fields, dict):
+        raise RPCExecutionError(
+            "Gitea runner target custom fields are unavailable.",
+            code="RPC_TARGET_INVALID",
+        )
+    proxmox_vmid = _strict_target_int(
+        custom_fields.get("proxmox_vm_id"),
+        field="custom_field_data.proxmox_vm_id",
+        expected=contract.RUNNER_PROXMOX_VMID,
+    )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        host = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Gitea runner target requires an explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4:
+        raise RPCExecutionError(
+            "Gitea runner target requires an explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.RUNNER_TARGET_NAME,
+        "target_object": dict(contract.RUNNER_TARGET_OBJECT),
+        "runner_cluster_id": getattr(relation_values["cluster"], "pk"),
+        "runner_node_id": getattr(relation_values["device"], "pk"),
+        "runner_node": getattr(relation_values["device"], "name"),
+        "runner_proxmox_vmid": proxmox_vmid,
+        "runner_tenant_id": getattr(relation_values["tenant"], "pk"),
+        "runner_role_id": getattr(relation_values["role"], "pk"),
+        "runner_vcpus": vcpus,
+        "runner_memory_mib": memory,
+        "runner_disk_mib": disk,
+        "runner_ipv4": str(host),
+    }
+
+
+def _validate_locked_known_hosts_entry(entry: str, *, expected_host: str) -> None:
+    """Require one exact, unmarked Ed25519 OpenSSH host-key record."""
+    if (
+        not entry
+        or entry != entry.strip()
+        or "\n" in entry
+        or "\r" in entry
+        or "\t" in entry
+        or len(entry) > 512
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH service requires one bounded host-key entry.",
+            code="RPC_TARGET_INVALID",
+        )
+    fields = entry.split(" ")
+    if len(fields) != 3 or any(not field for field in fields):
+        raise RPCExecutionError(
+            "Runner registration known-hosts entry is malformed.",
+            code="RPC_TARGET_INVALID",
+        )
+    host, algorithm, encoded_key = fields
+    if host != expected_host or algorithm != "ssh-ed25519" or len(encoded_key) > 256:
+        raise RPCExecutionError(
+            "Runner registration known-hosts entry does not match the target.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        decoded_key = base64.b64decode(encoded_key, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RPCExecutionError(
+            "Runner registration known-hosts key is malformed.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    algorithm_bytes = b"ssh-ed25519"
+    expected_prefix = (
+        len(algorithm_bytes).to_bytes(4, "big")
+        + algorithm_bytes
+        + (32).to_bytes(4, "big")
+    )
+    if len(decoded_key) != len(expected_prefix) + 32 or not decoded_key.startswith(
+        expected_prefix
+    ):
+        raise RPCExecutionError(
+            "Runner registration known-hosts key is not an Ed25519 wire record.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _require_locked_ssh_identity_material(
+    identity: object,
+    method: str,
+) -> None:
+    storage_backend = str(getattr(identity, "storage_backend", "local") or "local")
+    if storage_backend == "local" and method == "password":
+        present = bool(getattr(identity, "password_encrypted", ""))
+    elif storage_backend == "local":
+        present = bool(getattr(identity, "ssh_private_key_encrypted", ""))
+        if method == "key_with_passphrase":
+            present = present and bool(
+                getattr(identity, "ssh_private_key_passphrase_encrypted", "")
+            )
+    else:
+        present = False
+    if not present:
+        raise RPCExecutionError(
+            "Runner registration SSH identity requires local revision-bound material.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _resolve_locked_ssh_identity(
+    *,
+    assigned_object_type_id: object,
+    assigned_object_id: int,
+    expected_host: str,
+    policy_ref: str,
+) -> dict[str, Any]:
+    """Return a non-secret approval snapshot for one exact SSH service."""
+    from .. import gitea_upgrade_contract
+
+    try:
+        from netbox_network.models import DeviceService
+    except (ImportError, AttributeError) as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH policy is unavailable.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if type(assigned_object_type_id) is not int or assigned_object_type_id <= 0:
+        raise RPCExecutionError(
+            "Runner registration requires a concrete target content type.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        queryset = DeviceService.objects.filter(
+            assigned_object_type_id=assigned_object_type_id,
+            assigned_object_id=assigned_object_id,
+            service_type=DeviceService.SERVICE_SSH,
+            enabled=True,
+        ).select_related("management_host", "credential")
+        services = list(queryset[:2])
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH policy could not be resolved.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if len(services) != 1:
+        raise RPCExecutionError(
+            "Runner registration requires exactly one enabled target-owned SSH service.",
+            code="RPC_TARGET_INVALID",
+        )
+    service = services[0]
+    raw_host = getattr(getattr(service, "management_host", None), "address", None)
+    try:
+        host = ip_address(str(raw_host).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH service has an invalid management host.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4 or str(host) != expected_host:
+        raise RPCExecutionError(
+            "Runner registration SSH service does not match the locked host.",
+            code="RPC_TARGET_INVALID",
+        )
+    port = getattr(service, "port", None)
+    known_hosts_entry = str(getattr(service, "ssh_known_hosts_entry", "") or "")
+    if (
+        type(port) is not int
+        or port != 22
+        or getattr(service, "ssh_strict_host_key_checking", None) is not True
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH service must use strict port 22 policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    _validate_locked_known_hosts_entry(
+        known_hosts_entry,
+        expected_host=expected_host,
+    )
+    identity = getattr(service, "credential", None)
+    identity_id = getattr(service, "credential_id", None)
+    principal = str(getattr(identity, "username", "") or "")
+    method = str(getattr(identity, "auth_method", "") or "")
+    if (
+        identity is None
+        or type(identity_id) is not int
+        or identity_id <= 0
+        or not principal
+        or principal != principal.strip()
+        or len(principal) > 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in principal)
+        or method not in gitea_upgrade_contract.SUPPORTED_SSH_METHODS
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH identity is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    _require_locked_ssh_identity_material(identity, method)
+    return {
+        "ssh_service_id": _positive_model_pk(service, "SSH service"),
+        "ssh_service_revision": _model_revision(service, "SSH service"),
+        "ssh_identity_id": identity_id,
+        "ssh_identity_revision": _model_revision(identity, "SSH identity"),
+        "ssh_storage_backend": "local",
+        "ssh_principal": principal,
+        "ssh_method": method,
+        "ssh_host": str(host),
+        "ssh_port": port,
+        "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
+        "ssh_policy_ref": policy_ref,
+    }
+
+
+def _gitea_runner_fence_is_quiescent(
+    fence: object,
+    *,
+    delay_seconds: int,
+) -> bool:
+    """Require a terminal owner and a full post-failure remote safety window."""
+    blocking_execution_id = getattr(fence, "blocking_execution_id", None)
+    blocking_execution = getattr(fence, "blocking_execution", None)
+    last_updated = getattr(fence, "last_updated", None)
+    fence_state = str(getattr(fence, "state", "") or "")
+    blocking_status = str(getattr(blocking_execution, "status", "") or "")
+    terminal_statuses = {
+        "cancelled",
+        "expired",
+        "failed",
+        "rejected",
+        "succeeded",
+    }
+    return bool(
+        isinstance(blocking_execution_id, int)
+        and not isinstance(blocking_execution_id, bool)
+        and getattr(blocking_execution, "pk", None) == blocking_execution_id
+        and (
+            blocking_status in terminal_statuses
+            or (fence_state == "pending" and blocking_status == "running")
+        )
+        and isinstance(last_updated, datetime)
+        and last_updated.tzinfo is not None
+        and last_updated
+        <= datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
+    )
+
+
+def _normalize_gitea_runner_registration_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize and bind both sides of the composite registration."""
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VirtualMachine
+
+    from .. import gitea_runner_contract as contract
+
+    params = execution.params if isinstance(execution.params, dict) else {}
+    unexpected = sorted(
+        str(key)[:64]
+        for key in params
+        if key not in _GITEA_RUNNER_INTERNAL_PARAM_KEYS
+        and key not in {"operation", "scope"}
+    )
+    operation = params.get("operation")
+    scope = params.get("scope")
+    if (
+        unexpected
+        or operation not in contract.OPERATIONS
+        or scope not in contract.SCOPE_TO_GITEA_SCOPE
+    ):
+        raise RPCExecutionError(
+            "Gitea runner lifecycle requires one exact operation and reviewed scope.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    from ..models import RPCGiteaRunnerScopeFence
+
+    canonical_scope = contract.SCOPE_TO_GITEA_SCOPE[scope]
+    try:
+        fence = RPCGiteaRunnerScopeFence.objects.get(canonical_scope=canonical_scope)
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Gitea runner scope fence is unavailable.",
+            code="RPC_SCOPE_FENCE_UNAVAILABLE",
+        ) from exc
+    fence_state = str(getattr(fence, "state", "") or "")
+    fence_execution_id = getattr(fence, "blocking_execution_id", None)
+    fence_reconciliation_execution_id = getattr(
+        fence,
+        "reconciliation_execution_id",
+        None,
+    )
+    fence_digest = str(getattr(fence, "expected_token_sha256", "") or "")
+    if not fence_digest:
+        fence_digest = contract.FENCE_UNKNOWN_SHA256
+    if operation == "register" and (
+        fence_state != RPCGiteaRunnerScopeFence.STATE_CLEAR
+        or fence_execution_id is not None
+        or fence_reconciliation_execution_id is not None
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope requires reconciliation before registration.",
+            code="RPC_SCOPE_FENCE_BLOCKED",
+        )
+    if operation == "reconcile" and (
+        fence_state
+        not in {
+            RPCGiteaRunnerScopeFence.STATE_PENDING,
+            RPCGiteaRunnerScopeFence.STATE_BLOCKED,
+        }
+        or not isinstance(fence_execution_id, int)
+        or isinstance(fence_execution_id, bool)
+        or fence_reconciliation_execution_id is not None
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope has no blocked operation to reconcile.",
+            code="RPC_SCOPE_FENCE_CLEAR",
+        )
+    if operation == "reconcile" and not _gitea_runner_fence_is_quiescent(
+        fence,
+        delay_seconds=contract.RECONCILIATION_QUIESCENCE_SECONDS,
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope is still inside its remote-operation safety window.",
+            code="RPC_SCOPE_FENCE_BUSY",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    type_label = (
+        f"{getattr(assigned_object_type, 'app_label', '')}."
+        f"{getattr(assigned_object_type, 'model', '')}"
+    )
+    target_metadata = validate_gitea_runner_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=type_label,
+        assigned_object_id=getattr(execution, "assigned_object_id", None),
+        target_display=getattr(execution, "target_display", None),
+    )
+    runner_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+        assigned_object_id=contract.RUNNER_TARGET_ID,
+        expected_host=str(target_metadata["runner_ipv4"]),
+        policy_ref=contract.RUNNER_SSH_POLICY_REF,
+    )
+
+    try:
+        gitea_target = VirtualMachine.objects.select_related("cluster", "device").get(
+            pk=contract.GITEA_TARGET_ID
+        )
+        gitea_content_type = ContentType.objects.get_for_model(
+            VirtualMachine,
+            for_concrete_model=False,
+        )
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Gitea runner registration could not resolve the locked Gitea VM.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    gitea_metadata = validate_gitea_upgrade_target(
+        gitea_target,
+        target_model_label=contract.GITEA_TARGET_OBJECT["content_type"],
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        target_display=contract.GITEA_TARGET_NAME,
+    )
+    gitea_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(gitea_content_type, "pk", None),
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        expected_host=contract.GITEA_IPV4_ADDRESS,
+        policy_ref=contract.GITEA_SSH_POLICY_REF,
+    )
+    if runner_ssh.get("ssh_principal") != "nms-runner-bootstrap":
+        raise RPCExecutionError(
+            "Runner registration SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    if gitea_ssh.get("ssh_principal") != "nms-gitea-runner-control":
+        raise RPCExecutionError(
+            "Gitea token-control SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        **target_metadata,
+        "operation": operation,
+        "scope": scope,
+        "gitea_scope": canonical_scope,
+        "gitea_target": gitea_metadata["target"],
+        "gitea_target_object": gitea_metadata["target_object"],
+        "gitea_ipv4": gitea_metadata["ipv4"],
+        "fence_state": fence_state,
+        "fence_expected_sha256": fence_digest,
+        "fence_execution_id": fence_execution_id,
+        "register_helper_sha256": contract.RUNNER_REGISTER_HELPER_SHA256,
+        "token_reset_helper_sha256": contract.GITEA_TOKEN_RESET_HELPER_SHA256,
+        **{f"runner_{key}": value for key, value in runner_ssh.items()},
+        **{f"gitea_{key}": value for key, value in gitea_ssh.items()},
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "assigned_object_id": contract.RUNNER_TARGET_ID,
+        "target_object_sha256": contract.RUNNER_TARGET_OBJECT_SHA256,
+        "runner_target_object_sha256": contract.RUNNER_TARGET_OBJECT_SHA256,
+        "gitea_target_object_sha256": contract.GITEA_TARGET_OBJECT_SHA256,
+        **normalized,
+    }
+    return normalized
+
+
+def _strict_target_int(value: object, *, field: str, expected: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        raise RPCExecutionError(
+            f"Production Gitea target {field} must be exactly {expected}.",
+            code="RPC_TARGET_INVALID",
+        )
+    return value
+
+
+def _target_relation(
+    target: object,
+    *,
+    field: str,
+    expected_id: int,
+    expected_name: str,
+) -> object:
+    relation = getattr(target, field, None)
+    relation_id = getattr(target, f"{field}_id", None)
+    _strict_target_int(relation_id, field=f"{field}_id", expected=expected_id)
+    if (
+        relation is None
+        or getattr(relation, "pk", None) != expected_id
+        or getattr(relation, "name", None) != expected_name
+    ):
+        raise RPCExecutionError(
+            "Production Gitea target "
+            f"{field} must be {expected_name} (PK {expected_id}).",
+            code="RPC_TARGET_INVALID",
+        )
+    return relation
+
+
+def _target_tag_slugs(target: object) -> set[str] | None:
+    """Return stable ORM tag slugs, or None for pure stubs without a manager."""
+    tags = getattr(target, "tags", None)
+    values_list = getattr(tags, "values_list", None)
+    if not callable(values_list):
+        return None
+    try:
+        return {str(value) for value in values_list("slug", flat=True)}
+    except (AttributeError, TypeError, ValueError):
+        raise RPCExecutionError(
+            "Production Gitea target tags could not be validated.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def validate_gitea_upgrade_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate and return the exact point-in-time production VM identity."""
+    from .. import gitea_upgrade_contract as contract
+
+    if target_model_label != contract.TARGET_OBJECT["content_type"]:
+        raise RPCExecutionError(
+            "Production Gitea upgrade requires a virtualization.virtualmachine target.",
+            code="RPC_TARGET_INVALID",
+        )
+    _strict_target_int(
+        assigned_object_id,
+        field="assigned_object_id",
+        expected=contract.TARGET_OBJECT_ID,
+    )
+    if (
+        target is None
+        or getattr(target, "pk", None) != contract.TARGET_OBJECT_ID
+        or getattr(target, "name", None) != contract.TARGET_NAME
+    ):
+        raise RPCExecutionError(
+            "Production Gitea upgrade requires VM PK 170 named Gitea.",
+            code="RPC_TARGET_INVALID",
+        )
+    if target_display is not None and target_display != contract.TARGET_NAME:
+        raise RPCExecutionError(
+            "Production Gitea target display must be exactly Gitea.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    cluster = _target_relation(
+        target,
+        field="cluster",
+        expected_id=contract.CLUSTER_ID,
+        expected_name=contract.CLUSTER_NAME,
+    )
+    node = _target_relation(
+        target,
+        field="device",
+        expected_id=contract.NODE_ID,
+        expected_name=contract.NODE_NAME,
+    )
+
+    custom_fields = getattr(target, "custom_field_data", None)
+    if not isinstance(custom_fields, dict):
+        raise RPCExecutionError(
+            "Production Gitea target custom fields are unavailable.",
+            code="RPC_TARGET_INVALID",
+        )
+    vmid = _strict_target_int(
+        custom_fields.get("proxmox_vm_id"),
+        field="custom_field_data.proxmox_vm_id",
+        expected=contract.PROXMOX_VMID,
+    )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        ipv4 = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Production Gitea target primary_ip4 is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if ipv4.version != 4 or str(ipv4) != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            f"Production Gitea target primary_ip4 must be {contract.IPV4_ADDRESS}.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Production Gitea target must be active.",
+            code="RPC_TARGET_INVALID",
+        )
+    tag_slugs = _target_tag_slugs(target)
+    if tag_slugs is not None and "production" not in tag_slugs:
+        raise RPCExecutionError(
+            "Production Gitea target must carry the production tag.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.TARGET_NAME,
+        "target_object": dict(contract.TARGET_OBJECT),
+        "vmid": vmid,
+        "cluster_id": getattr(cluster, "pk"),
+        "node": getattr(node, "name"),
+        "ipv4": str(ipv4),
+    }
+
+
+def _normalize_gitea_production_upgrade_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize the exact immutable production Gitea upgrade transaction."""
+    from .. import gitea_upgrade_contract as contract
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "Production Gitea upgrade params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        str(key)[:64]
+        for key in params
+        if key not in _GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            "Production Gitea upgrade accepts no caller parameters; "
+            f"unexpected field(s): {', '.join(unexpected[:8])}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    type_label = (
+        f"{getattr(assigned_object_type, 'app_label', '')}."
+        f"{getattr(assigned_object_type, 'model', '')}"
+    )
+    if type_label == ".":
+        type_label = str(getattr(execution, "target_model_label", "") or "")
+    target_metadata = validate_gitea_upgrade_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=type_label,
+        assigned_object_id=getattr(execution, "assigned_object_id", None),
+        target_display=getattr(execution, "target_display", None),
+    )
+    ssh_identity = _resolve_gitea_upgrade_ssh_identity(execution)
+    normalized: dict[str, Any] = {
+        **target_metadata,
+        "expected_source_version": contract.EXPECTED_SOURCE_VERSION,
+        "target_version": contract.TARGET_VERSION,
+        "artifact_sha256": contract.ARTIFACT_SHA256,
+        **ssh_identity,
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "target": contract.TARGET_NAME,
+        "assigned_object_id": contract.TARGET_OBJECT_ID,
+        "target_object_sha256": contract.TARGET_OBJECT_SHA256,
+        "vmid": contract.PROXMOX_VMID,
+        "cluster_id": contract.CLUSTER_ID,
+        "node": contract.NODE_NAME,
+        "ipv4": contract.IPV4_ADDRESS,
+        "expected_source_version": contract.EXPECTED_SOURCE_VERSION,
+        "target_version": contract.TARGET_VERSION,
+        "artifact_sha256": contract.ARTIFACT_SHA256,
+        **ssh_identity,
+    }
+    return normalized
+
+
+def _resolve_gitea_upgrade_ssh_identity(execution: RPCExecution) -> dict[str, Any]:
+    """Resolve and validate the public identity of Gitea's sole SSH service.
+
+    Secret material is checked only for presence and never returned. The
+    resulting public snapshot is persisted in normalized params, the approval
+    decision, and the signed lease fingerprint so any service/identity drift
+    invalidates the approved operation before dispatch.
+    """
+    from .. import gitea_upgrade_contract as contract
+
+    try:
+        from netbox_network.models import DeviceService
+    except (ImportError, AttributeError) as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy cannot be resolved because "
+            "netbox-network DeviceService is unavailable.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+
+    assigned_object_type_id = getattr(execution, "assigned_object_type_id", None)
+    if assigned_object_type_id is None:
+        assigned_object_type_id = getattr(
+            getattr(execution, "assigned_object_type", None), "pk", None
+        )
+    if assigned_object_type_id is None:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy requires a concrete target content type.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    try:
+        queryset = DeviceService.objects.filter(
+            assigned_object_type_id=assigned_object_type_id,
+            assigned_object_id=contract.TARGET_OBJECT_ID,
+            service_type=DeviceService.SERVICE_SSH,
+            enabled=True,
+        ).select_related("management_host", "credential")
+        services = list(queryset[:2])
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH policy could not be resolved.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if len(services) != 1:
+        raise RPCExecutionError(
+            "Production Gitea requires exactly one enabled target-owned SSH service.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    service = services[0]
+    management_host = getattr(service, "management_host", None)
+    raw_host = getattr(management_host, "address", None)
+    try:
+        host = ip_address(str(raw_host).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires an explicit IPv4 management host.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4 or str(host) != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            "Production Gitea SSH management host does not match the locked target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    port = getattr(service, "port", None)
+    if type(port) is not int or port != 22:
+        raise RPCExecutionError(
+            "Production Gitea SSH service must explicitly use port 22.",
+            code="RPC_TARGET_INVALID",
+        )
+    if getattr(service, "ssh_strict_host_key_checking", None) is not True:
+        raise RPCExecutionError(
+            "Production Gitea SSH service must enforce strict host-key checking.",
+            code="RPC_TARGET_INVALID",
+        )
+    known_hosts_entry = str(getattr(service, "ssh_known_hosts_entry", "") or "")
+    _validate_gitea_known_hosts_entry(known_hosts_entry)
+
+    identity = getattr(service, "credential", None)
+    identity_id = getattr(service, "credential_id", None)
+    if identity is None or type(identity_id) is not int or identity_id <= 0:
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires a stored SSH identity.",
+            code="RPC_TARGET_INVALID",
+        )
+    principal = str(getattr(identity, "username", "") or "")
+    if (
+        not principal
+        or principal != principal.strip()
+        or len(principal) > 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in principal)
+    ):
+        raise RPCExecutionError(
+            "Production Gitea SSH identity requires a bounded principal.",
+            code="RPC_TARGET_INVALID",
+        )
+    method = str(getattr(identity, "auth_method", "") or "")
+    if method not in contract.SUPPORTED_SSH_METHODS:
+        raise RPCExecutionError(
+            "Production Gitea SSH identity uses an unsupported method.",
+            code="RPC_TARGET_INVALID",
+        )
+    _require_gitea_ssh_identity_material(identity, method)
+
+    return {
+        "ssh_service_id": _positive_model_pk(service, "SSH service"),
+        "ssh_service_revision": _model_revision(service, "SSH service"),
+        "ssh_identity_id": identity_id,
+        "ssh_identity_revision": _model_revision(identity, "SSH identity"),
+        "ssh_principal": principal,
+        "ssh_method": method,
+        "ssh_host": str(host),
+        "ssh_port": port,
+        "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
+        "ssh_policy_ref": contract.SSH_POLICY_REF,
+    }
+
+
+def _require_gitea_ssh_identity_material(identity: object, method: str) -> None:
+    storage_backend = str(getattr(identity, "storage_backend", "local") or "local")
+    if storage_backend == "passbolt":
+        material_present = bool(
+            str(getattr(identity, "passbolt_resource_id", "") or "")
+        )
+    elif storage_backend == "local":
+        if method == "password":
+            material_present = bool(getattr(identity, "password_encrypted", ""))
+        else:
+            material_present = bool(getattr(identity, "ssh_private_key_encrypted", ""))
+            if method == "key_with_passphrase":
+                material_present = material_present and bool(
+                    getattr(identity, "ssh_private_key_passphrase_encrypted", "")
+                )
+    else:
+        material_present = False
+    if not material_present:
+        raise RPCExecutionError(
+            "Production Gitea SSH identity has no usable stored material.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _validate_gitea_known_hosts_entry(entry: str) -> None:
+    """Require one exact, unmarked OpenSSH host-key record for Gitea's IP."""
+    from .. import gitea_upgrade_contract as contract
+
+    if (
+        not entry
+        or entry != entry.strip()
+        or "\n" in entry
+        or "\r" in entry
+        or "\t" in entry
+        or len(entry) > 8192
+    ):
+        raise RPCExecutionError(
+            "Production Gitea SSH service requires one bounded pinned known-hosts entry.",
+            code="RPC_TARGET_INVALID",
+        )
+    fields = entry.split(" ")
+    if len(fields) != 3 or any(not field for field in fields):
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry must contain exactly host, algorithm, and key.",
+            code="RPC_TARGET_INVALID",
+        )
+    host, algorithm, encoded_key = fields
+    if host != contract.IPV4_ADDRESS:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry must pin only the locked IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+    if algorithm not in contract.SUPPORTED_SSH_HOST_KEY_ALGORITHMS:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry uses an unsupported host-key algorithm.",
+            code="RPC_TARGET_INVALID",
+        )
+    if len(encoded_key) > contract.SSH_HOST_KEY_ENCODED_MAX_LENGTH:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts key token is oversized.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        decoded_key = base64.b64decode(encoded_key, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RPCExecutionError(
+            "Production Gitea known-hosts entry contains malformed key material.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    algorithm_length = int.from_bytes(decoded_key[:4], "big")
+    algorithm_end = 4 + algorithm_length
+    key_length_end = algorithm_end + 4
+    key_length = (
+        int.from_bytes(decoded_key[algorithm_end:key_length_end], "big")
+        if key_length_end <= len(decoded_key)
+        else -1
+    )
+    if (
+        algorithm_length != len(contract.SSH_HOST_KEY_ALGORITHM)
+        or decoded_key[4:algorithm_end]
+        != contract.SSH_HOST_KEY_ALGORITHM.encode("ascii")
+        or key_length != contract.SSH_HOST_KEY_BYTES
+        or len(decoded_key) != key_length_end + contract.SSH_HOST_KEY_BYTES
+    ):
+        raise RPCExecutionError(
+            "Production Gitea known-hosts key is not an exact Ed25519 wire record.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _positive_model_pk(value: object, label: str) -> int:
+    pk = getattr(value, "pk", None)
+    if type(pk) is not int or pk <= 0:
+        raise RPCExecutionError(
+            f"Production Gitea {label} requires a stable positive ID.",
+            code="RPC_TARGET_INVALID",
+        )
+    return pk
+
+
+def _model_revision(value: object, label: str) -> str:
+    revision = getattr(value, "last_updated", None)
+    if revision is None or not hasattr(revision, "isoformat"):
+        raise RPCExecutionError(
+            f"Production Gitea {label} requires a stable revision.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        if revision.tzinfo is None or revision.utcoffset() is None:
+            raise ValueError("naive revision")
+        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace(
+            "+00:00", "Z"
+        )
+    except (AttributeError, ValueError, OverflowError) as exc:
+        raise RPCExecutionError(
+            f"Production Gitea {label} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if not rendered or len(rendered) > 64:
+        raise RPCExecutionError(
+            f"Production Gitea {label} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    return rendered
 
 
 def _copy_optional_ssh_overrides(

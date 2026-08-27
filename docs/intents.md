@@ -39,9 +39,11 @@ direct `RPCExecution` POST uses
 (`netbox_rpc.application.command_handlers.create_execution`) — never a side
 channel. That means each child independently re-runs **every** existing gate:
 the `execute_rpcprocedure` permission check, the #166 authoritative opt-in +
-selected-backend enforcement, the procedure's `enabled` check, the
-`approval_required` permission gate (`approve_rpcprocedure`), `params_schema`
-validation, and the #167 backend capability check. An intent grouping an
+selected-backend enforcement, the procedure's `enabled` check, its approval
+policy, `params_schema` validation, and the #167 backend capability check.
+Legacy `approval_required` procedures retain the requester permission gate;
+staging token rotation instead returns a pending child and requires a distinct
+later approval. An intent grouping an
 `approval_required` or destructive procedure does **not** auto-run that
 child — the same `PermissionDenied`/`ValidationError` a direct create would
 raise propagates out of `execute_intent()` unmodified, aborting the run. There
@@ -61,16 +63,14 @@ fan-out in one outer transaction would risk RQ jobs left dangling against rows
 a later sibling's failure rolled back). Cancel an unwanted stray child
 individually via the existing `cancel` command.
 
-**Origin marker.** After a child is created — deliberately *after*
-`params_schema` validation has already run against the caller's `params`
-unmodified, since many seeded procedures set
-`"additionalProperties": false` and would reject an unexpected key — the
-underscore-prefixed `_intent` / `_intent_name` keys are patched into the
-child's stored `params`. This is a plain-field update, not part of the
-event-sourced projection (only `normalized_params` is), so it does not touch
-the aggregate or its event stream. The [Procedure Runs
-tab](../AGENTS.md#procedure-runs-tab-query-side) then attributes the run as
-`Intent: <name>` instead of `Direct`.
+**Origin relation.** `create_execution()` writes the child execution's
+read-only `source_intent` foreign key in the same insert as its caller params.
+Attribution never enters or mutates `params`, so schemas with
+`"additionalProperties": false` remain valid and family-specific final-payload
+guards cannot be bypassed by a later update. The [Procedure Runs
+tab](../AGENTS.md#procedure-runs-tab-query-side) resolves that relation and
+attributes the run as `Intent: <name>` instead of `Direct`. Legacy `_intent` /
+`_intent_name` params markers remain readable for historical rows only.
 
 ## Seeded intents
 

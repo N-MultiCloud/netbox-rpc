@@ -222,7 +222,7 @@ def unseed_netbox_plugin_install(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_rpc", "0068_rpcnetboxpluginallowlist"),
+        ("netbox_rpc", "0082_rpcnetboxpluginallowlist"),
     ]
 
     operations = [

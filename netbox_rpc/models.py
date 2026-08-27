@@ -13,6 +13,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from netbox.models import NetBoxModel
 
+from . import transport as _transport
 from .command_contract import (
     COMMAND_RUNTIME_KEYS,
     extract_placeholders,
@@ -194,30 +195,31 @@ class RPCProcedure(NetBoxModel):
         (EFFECT_DESTRUCTIVE, "Destructive"),
     )
 
-    # Transport driver selected for the execution pipeline on nms-backend. This is
-    # explicit data on the procedure (never encoded inside handler_id). "asyncssh"
-    # is the historical default and reproduces the legacy single-/multi-command SSH
-    # behaviour; the other drivers opt into the pluggable driver layer.
-    # Linux/server SSH drivers (backend capability "linux-shell").
-    TRANSPORT_ASYNCSSH = "asyncssh"
-    TRANSPORT_PARAMIKO = "paramiko"
-    TRANSPORT_SUBPROCESS = "subprocess"
-    TRANSPORT_FABRIC = "fabric"
-    # Network CLI / orchestration drivers (backend capability "network-cli").
-    TRANSPORT_SCRAPLI = "scrapli"
-    TRANSPORT_NETMIKO = "netmiko"
-    TRANSPORT_NAPALM = "napalm"
-    TRANSPORT_NORNIR = "nornir"
-    TRANSPORT_DRIVER_CHOICES = (
-        (TRANSPORT_ASYNCSSH, "AsyncSSH (default)"),
-        (TRANSPORT_PARAMIKO, "Paramiko"),
-        (TRANSPORT_SUBPROCESS, "subprocess (OpenSSH)"),
-        (TRANSPORT_FABRIC, "Fabric"),
-        (TRANSPORT_SCRAPLI, "Scrapli"),
-        (TRANSPORT_NETMIKO, "Netmiko"),
-        (TRANSPORT_NAPALM, "NAPALM"),
-        (TRANSPORT_NORNIR, "Nornir"),
-    )
+    # Transport driver selected for the execution pipeline on netbox-rpc-backend.
+    # This is explicit data on the procedure (never encoded inside handler_id).
+    #
+    # Ansible is the default: it routes the same audited command through an
+    # Ansible control node, which brings vendor-aware connection handling and the
+    # module ecosystem. The raw drivers remain first-class and are the fallback
+    # tier — "asyncssh" reproduces the historical single-/multi-command SSH
+    # behaviour exactly.
+    #
+    # The vocabulary and the driver -> backend-capability map live in
+    # ``transport`` so the chain resolver in ``domain.normalization`` shares one
+    # source of truth with these choices and stays importable without Django.
+    TRANSPORT_ANSIBLE = _transport.TRANSPORT_ANSIBLE
+    TRANSPORT_ANSIBLE_NETWORK = _transport.TRANSPORT_ANSIBLE_NETWORK
+    TRANSPORT_ASYNCSSH = _transport.TRANSPORT_ASYNCSSH
+    TRANSPORT_PARAMIKO = _transport.TRANSPORT_PARAMIKO
+    TRANSPORT_SUBPROCESS = _transport.TRANSPORT_SUBPROCESS
+    TRANSPORT_FABRIC = _transport.TRANSPORT_FABRIC
+    TRANSPORT_SCRAPLI = _transport.TRANSPORT_SCRAPLI
+    TRANSPORT_NETMIKO = _transport.TRANSPORT_NETMIKO
+    TRANSPORT_NAPALM = _transport.TRANSPORT_NAPALM
+    TRANSPORT_NORNIR = _transport.TRANSPORT_NORNIR
+    TRANSPORT_DRIVER_CHOICES = _transport.TRANSPORT_DRIVER_CHOICES
+    LINUX_SHELL_DRIVERS = _transport.LINUX_SHELL_DRIVERS
+    NETWORK_CLI_DRIVERS = _transport.NETWORK_CLI_DRIVERS
 
     # Output parser the nms-backend pipeline applies to raw command output when the
     # driver did not already return structured data. "none" leaves output untouched
@@ -263,10 +265,24 @@ class RPCProcedure(NetBoxModel):
     transport_driver = models.CharField(
         max_length=20,
         choices=TRANSPORT_DRIVER_CHOICES,
-        default=TRANSPORT_ASYNCSSH,
+        default=TRANSPORT_ANSIBLE,
         help_text=(
-            "Transport driver the nms-backend execution pipeline uses for this "
-            "procedure. AsyncSSH preserves the legacy behaviour."
+            "Transport driver the netbox-rpc-backend execution pipeline uses for "
+            "this procedure. Ansible is the default; AsyncSSH preserves the "
+            "legacy raw-SSH behaviour."
+        ),
+    )
+    transport_pinned = models.BooleanField(
+        default=False,
+        verbose_name="Transport driver pinned",
+        help_text=(
+            "This procedure's transport driver is fixed and must not be changed "
+            "by estate-wide defaults or by driver migrations. Set it for "
+            "procedures whose backend handler depends on one specific driver — "
+            "for example one that disables fallback and relies on AsyncSSH's "
+            "credential isolation, or that streams a long-running command's "
+            "output live. Leaving the driver chain empty is not enough on its "
+            "own: the plugin-wide default chain would still apply."
         ),
     )
     transport_driver_chain = ArrayField(
@@ -725,6 +741,15 @@ class RPCExecution(NetBoxModel):
         on_delete=models.PROTECT,
         related_name="executions",
     )
+    source_intent = models.ForeignKey(
+        "RPCIntent",
+        on_delete=models.SET_NULL,
+        related_name="source_executions",
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Intent that created this execution; null for direct runs.",
+    )
     assigned_object_type = models.ForeignKey(
         ContentType,
         on_delete=models.PROTECT,
@@ -737,6 +762,13 @@ class RPCExecution(NetBoxModel):
         fk_field="assigned_object_id",
     )
     requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
@@ -777,6 +809,33 @@ class RPCExecution(NetBoxModel):
     def __str__(self) -> str:
         return f"{self.procedure.name} #{self.pk}"
 
+    def save(self, *args, **kwargs) -> None:
+        """Enforce OpenBao secret ingress on every final ORM payload write.
+
+        The application command validates before it reaches the ORM so API
+        callers receive a DRF validation error. This model boundary covers
+        script/job code that constructs an execution directly and any future
+        save path that changes ``params``. QuerySet updates intentionally do
+        not run model methods; production code therefore never updates
+        execution params after creation.
+        """
+
+        update_fields = kwargs.get("update_fields")
+        if self._state.adding or update_fields is None or "params" in update_fields:
+            from .openbao_validation import (
+                OpenBaoSecretIngressError,
+                validate_openbao_params_for_persistence,
+            )
+
+            try:
+                validate_openbao_params_for_persistence(
+                    self.procedure.name,
+                    self.params,
+                )
+            except OpenBaoSecretIngressError as exc:
+                raise ValidationError({"params": str(exc)}) from exc
+        super().save(*args, **kwargs)
+
     def get_absolute_url(self) -> str:
         from django.urls import reverse
 
@@ -803,11 +862,9 @@ class RPCExecution(NetBoxModel):
             return f"{self.target_model_label}:{self.assigned_object_id}"
         return str(getattr(target, "name", None) or target)
 
-    # Underscore-prefixed internal keys the intent executor
-    # (``command_handlers.execute_intent()``, issue #130) stamps into ``params``
-    # to record that a run originated from an ``RPCIntent`` rather than a
-    # direct API/UI request. Prefixed to avoid colliding with a procedure's own
-    # declared parameters.
+    # Legacy origin keys remain readable for executions created before
+    # ``source_intent`` moved attribution out of params. New executions never
+    # write either key.
     _INTENT_PARAM_KEYS = ("_intent_name", "_intent")
 
     # Underscore-prefixed internal key command_handlers.create_execution()
@@ -826,12 +883,12 @@ class RPCExecution(NetBoxModel):
         """Best-effort intent name when this run was dispatched via an intent.
 
         A run created directly (API/UI ``RPCExecution`` POST) has no marker and
-        this returns ``None``. A run created by the intent executor (see
-        ``AGENTS.md`` → Intents and ``docs/intents.md``) has its origin
-        recorded in ``params`` under one of ``_INTENT_PARAM_KEYS`` after
-        creation, so this surfaces the intent name and the procedure Runs tab
-        can attribute the run to it.
+        this returns ``None``. New intent runs use the structured
+        ``source_intent`` relation; the legacy params markers are a read-only
+        compatibility fallback for rows created before that relation existed.
         """
+        if self.source_intent_id is not None:
+            return str(self.source_intent.name)
         params = self.params or {}
         for key in self._INTENT_PARAM_KEYS:
             value = params.get(key)
@@ -859,6 +916,101 @@ class RPCExecution(NetBoxModel):
         result = self.result or {}
         steps = result.get("steps")
         return steps if isinstance(steps, list) else []
+
+
+class RPCGiteaRunnerScopeFence(NetBoxModel):
+    """Durable conflict fence for one reusable Gitea registration token scope."""
+
+    STATE_CLEAR = "clear"
+    STATE_PENDING = "pending"
+    STATE_BLOCKED = "blocked"
+    STATE_CHOICES = (
+        (STATE_CLEAR, "Clear"),
+        (STATE_PENDING, "Pending token acquisition"),
+        (STATE_BLOCKED, "Reset reconciliation required"),
+    )
+
+    canonical_scope = models.CharField(max_length=200, unique=True)
+    state = models.CharField(
+        max_length=16,
+        choices=STATE_CHOICES,
+        default=STATE_CLEAR,
+    )
+    blocking_execution = models.ForeignKey(
+        RPCExecution,
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    reconciliation_execution = models.ForeignKey(
+        RPCExecution,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    expected_token_sha256 = models.CharField(max_length=64, blank=True)
+    last_reset_state = models.CharField(max_length=64, blank=True)
+    last_prior_token_id = models.PositiveBigIntegerField(null=True, blank=True)
+    last_replacement_token_id = models.PositiveBigIntegerField(null=True, blank=True)
+    last_prior_active_sha256 = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("canonical_scope",)
+        constraints = (
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        state="clear",
+                        blocking_execution__isnull=True,
+                        expected_token_sha256="",
+                    )
+                    | models.Q(
+                        state__in=("pending", "blocked"),
+                        blocking_execution__isnull=False,
+                    )
+                ),
+                name="netbox_rpc_gitea_scope_fence_state_consistent",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(reconciliation_execution__isnull=True)
+                    | models.Q(state="blocked")
+                ),
+                name="netbox_rpc_gitea_scope_fence_reconcile_consistent",
+            ),
+        )
+        verbose_name = "RPC Gitea Runner Scope Fence"
+        verbose_name_plural = "RPC Gitea Runner Scope Fences"
+
+    def __str__(self) -> str:
+        return f"{self.canonical_scope}:{self.state}"
+
+    def clean(self) -> None:
+        super().clean()
+        digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+        errors: dict[str, str] = {}
+        if self.state == self.STATE_CLEAR:
+            if self.blocking_execution_id is not None:
+                errors["blocking_execution"] = (
+                    "A clear Gitea runner scope cannot retain a blocking execution."
+                )
+            if self.expected_token_sha256:
+                errors["expected_token_sha256"] = (
+                    "A clear Gitea runner scope cannot retain an expected token digest."
+                )
+        elif self.blocking_execution_id is None:
+            errors["blocking_execution"] = (
+                "A pending or blocked Gitea runner scope requires its execution."
+            )
+        for field_name in ("expected_token_sha256", "last_prior_active_sha256"):
+            value = str(getattr(self, field_name, "") or "")
+            if value and digest_pattern.fullmatch(value) is None:
+                errors[field_name] = "Enter one lowercase SHA-256 digest."
+        if errors:
+            raise ValidationError(errors)
 
 
 class RPCExecutionEvent(NetBoxModel):
@@ -950,10 +1102,10 @@ class RPCApprovalRequest(NetBoxModel):
     Created exactly once when an approval-required execution is requested. It
     pins every value a distinct second-actor approval must decide against, plus
     a tamper-evident ``payload_hash`` over those protected fields. Any later
-    change to the procedure version/effect, target snapshot, normalized
-    params/command fingerprint, backend, or credential policy recomputes to a
-    different hash and therefore invalidates the request (a fresh request is
-    required — see :meth:`matches_current`). References only: it stores
+    change to the procedure policy or schema hashes, target snapshot,
+    normalized params/command fingerprint, backend, or credential policy
+    recomputes to a different hash and therefore invalidates the request (a
+    fresh request is required — see :meth:`matches_current`). References only: it stores
     credential-policy/backend *references*, never secrets. Rows are append-only:
     direct updates and deletes are rejected at the ORM layer, mirroring
     ``RPCExecutionEvent`` (execution-cascade deletes still work — the collector
@@ -971,6 +1123,9 @@ class RPCApprovalRequest(NetBoxModel):
     # Procedure snapshot — captured values, never a live read at decision time.
     procedure_id = models.PositiveBigIntegerField()
     procedure_version = models.CharField(max_length=64, blank=True)
+    procedure_policy_sha256 = models.CharField(max_length=128, blank=True)
+    params_schema_sha256 = models.CharField(max_length=128, blank=True)
+    result_schema_sha256 = models.CharField(max_length=128, blank=True)
     effect = models.CharField(max_length=20)
     # Target snapshot.
     target_type_id = models.PositiveBigIntegerField()
@@ -981,6 +1136,7 @@ class RPCApprovalRequest(NetBoxModel):
     command_fingerprint = models.JSONField(default=dict, blank=True)
     # Authoritative backend + credential policy — references, not secrets.
     backend_id = models.PositiveBigIntegerField(null=True, blank=True)
+    backend_target_sha256 = models.CharField(max_length=128, blank=True)
     credential_policy_ref = models.CharField(max_length=200, blank=True)
     # Requester + expiry + optimistic-concurrency stream version at request time.
     requested_by_id = models.PositiveBigIntegerField(null=True, blank=True)
@@ -994,6 +1150,9 @@ class RPCApprovalRequest(NetBoxModel):
     PROTECTED_FIELDS = (
         "procedure_id",
         "procedure_version",
+        "procedure_policy_sha256",
+        "params_schema_sha256",
+        "result_schema_sha256",
         "effect",
         "target_type_id",
         "target_id",
@@ -1001,6 +1160,7 @@ class RPCApprovalRequest(NetBoxModel):
         "normalized_params",
         "command_fingerprint",
         "backend_id",
+        "backend_target_sha256",
         "credential_policy_ref",
         "requested_by_id",
     )
@@ -1216,6 +1376,56 @@ class RpcPluginSettings(NetBoxModel):
             "single configured RPCBackend) is used instead."
         ),
     )
+    # ── Estate-wide transport policy ─────────────────────────────────────────
+    #
+    # This is what makes "Ansible is the default" an operator-visible, reversible
+    # decision rather than a constant compiled into the plugin: clearing these
+    # restores raw-driver behaviour estate-wide with no migration and no
+    # redeploy. A procedure's own chain always wins, and a procedure marked
+    # transport_pinned is never touched by either.
+    default_transport_driver_chain = ArrayField(
+        base_field=models.CharField(
+            max_length=32, choices=RPCProcedure.TRANSPORT_DRIVER_CHOICES
+        ),
+        default=list,
+        blank=True,
+        verbose_name="Default Linux driver chain",
+        help_text=(
+            "Ordered driver priority + fallback chain applied to procedures that "
+            "define no chain of their own and whose driver serves the Linux "
+            "shell capability. Leave empty to keep each procedure's single "
+            "driver. Recommended: ansible, asyncssh."
+        ),
+    )
+    default_network_driver_chain = ArrayField(
+        base_field=models.CharField(
+            max_length=32, choices=RPCProcedure.TRANSPORT_DRIVER_CHOICES
+        ),
+        default=list,
+        blank=True,
+        verbose_name="Default network CLI driver chain",
+        help_text=(
+            "Ordered driver priority + fallback chain applied to procedures that "
+            "define no chain of their own and whose driver serves the network "
+            "CLI capability. Recommended: ansible-network, scrapli."
+        ),
+    )
+    ansible_platform_map = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Ansible platform map",
+        help_text=(
+            "Maps a NetBox Platform slug to the Ansible connection settings for "
+            "devices on that platform, following the netbox.netbox collection's "
+            'conventions: {"junos": {"network_os": '
+            '"junipernetworks.junos.junos", "connection": '
+            '"ansible.netcommon.netconf"}}. Recognised keys per entry: '
+            "network_os, connection, become, become_method. A platform that is "
+            "not mapped simply gets no network OS, and the execution backend "
+            "then falls back to a raw driver instead of guessing a vendor CLI "
+            "dialect."
+        ),
+    )
     comments = models.TextField(blank=True)
 
     class Meta:
@@ -1230,6 +1440,30 @@ class RpcPluginSettings(NetBoxModel):
         from django.urls import reverse
 
         return reverse("plugins:netbox_rpc:rpcpluginsettings", args=[self.pk])
+
+    def clean(self) -> None:
+        super().clean()
+        # The execution backend silently *skips* a chain entry whose capability
+        # does not match the request, so a mismatched default would degrade to
+        # "no policy" with no error anywhere. Reject it at the edit instead.
+        errors: dict[str, str] = {}
+        for field, capability in (
+            ("default_transport_driver_chain", _transport.CAPABILITY_LINUX_SHELL),
+            ("default_network_driver_chain", _transport.CAPABILITY_NETWORK_CLI),
+        ):
+            wrong = [
+                entry
+                for entry in (getattr(self, field, None) or [])
+                if _transport.driver_capability(entry) != capability
+            ]
+            if wrong:
+                errors[field] = (
+                    "These drivers do not serve the "
+                    f"{capability} capability and would be skipped: "
+                    + ", ".join(sorted(wrong))
+                )
+        if errors:
+            raise ValidationError(errors)
 
     def save(self, *args: object, **kwargs: object) -> None:
         self.singleton_key = "default"
@@ -1253,6 +1487,26 @@ class RpcPluginSettings(NetBoxModel):
             return backends._adapt_backend(self.backend)
         return backends.resolve_backend(None)
 
+    # ── Transport policy accessors ───────────────────────────────────────────
+
+    def default_chain_for(self, capability: str) -> list[str]:
+        """Estate-wide default chain for a capability, or ``[]`` when unset."""
+
+        raw = (
+            self.default_network_driver_chain
+            if capability == _transport.CAPABILITY_NETWORK_CLI
+            else self.default_transport_driver_chain
+        )
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [str(entry).strip() for entry in raw if str(entry).strip()]
+
+    def ansible_context_for_platform(self, platform_slug: str) -> dict:
+        """Ansible connection settings for a NetBox Platform slug, or ``{}``."""
+
+        return _transport.ansible_context_from_platform_map(
+            self.ansible_platform_map, platform_slug
+        )
 
 class RPCNetBoxPluginAllowlist(NetBoxModel):
     """A NetBox plugin an operator has authorized for installation by RPC.

@@ -24,7 +24,7 @@ class Migration(migrations.Migration):
         # ancestor in 4.6.x, per the compatibility rule in AGENTS.md. Do not
         # re-anchor to a newer leaf without preserving the 4.5.8 floor.
         ("extras", "0134_owner"),
-        ("netbox_rpc", "0067_merge_huawei_bgp_and_upgrade_result_limits"),
+        ("netbox_rpc", "0081_gitea_runner_scope_fence"),
     ]
 
     operations = [

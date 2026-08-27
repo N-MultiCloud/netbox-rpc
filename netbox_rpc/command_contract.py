@@ -97,6 +97,21 @@ EXEMPT_HANDLER_RATIONALE = {
         "secret value to a fixed environment-file upsert script over stdin; the "
         "plaintext value must never be represented as argv or persisted."
     ),
+    "service.netbox.staging.rotate_backend_token": (
+        "Invokes a fixed root-owned provisioner that generates and "
+        "installs the staging NetBox service token without accepting or returning "
+        "the token value through the RPC contract."
+    ),
+    "service.gitea.production.upgrade_1_27_1": (
+        "Runs a backend-owned production Gitea upgrade transaction: exact target "
+        "validation, official artifact verification, backup, service lifecycle, "
+        "health checks, and safe rollback cannot be represented as one fixed argv."
+    ),
+    "service.gitea.runner.register": (
+        "Runs a backend-owned two-target transaction that obtains a fixed-scope "
+        "bootstrap token on Gitea and consumes it immediately on the isolated "
+        "runner without exposing token material to the RPC contract."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "
@@ -235,6 +250,15 @@ EXEMPT_HANDLER_RATIONALE = {
         "Resolves an administrative nms-secret reference, creates a family-supported token, and "
         "stores the one-time plaintext through the netbox-nms secret bridge before returning metadata."
     ),
+    "os.linux_debian_13.preflight_influxdb3_core": (
+        "Collects release, architecture, systemd, package/hold, managed-config, unit, bind, and "
+        "TLS-readability facts and derives a single posture verdict from them."
+    ),
+    "os.linux_debian_13.install_influxdb3_core": (
+        "Verifies the repository key fingerprint, resolves the pinned apt candidate, renders a "
+        "managed configuration plus systemd drop-in, restarts, probes readiness, and holds the "
+        "package — sequencing no fixed argv can express."
+    ),
     "service.akvorado.1.config_read": (
         "Reads the backend-owned Akvorado config path and returns bounded file content."
     ),
@@ -294,6 +318,44 @@ EXEMPT_HANDLER_RATIONALE = {
         "single fixed argv row."
     ),
 }
+
+# Every OpenBao command is mediated by backend-owned credential resolution,
+# bounded output scrubbing, and (for bao subcommands) a fixed remote helper that
+# reads the host-side token without placing it in argv.  The representative
+# command rows advertise that orchestration without pretending the public row
+# is the executable command contract.
+EXEMPT_HANDLER_RATIONALE.update(
+    {
+        f"service.openbao_1.{operation}": (
+            "Uses backend-owned target credential resolution and bounded OpenBao "
+            "orchestration that cannot be represented safely as one public argv row."
+        )
+        for operation in (
+            "inspect",
+            "seal_status",
+            "health",
+            "policies_list",
+            "auth_list",
+            "secrets_list",
+            "audit_list",
+            "raft_list_peers",
+            "raft_autopilot_state",
+            "snapshots_list",
+            "auth_enable",
+            "secrets_enable",
+            "audit_enable",
+            "snapshot_create",
+            "service_action",
+            "seal",
+            "step_down",
+            "raft_remove_peer",
+            "policy_delete",
+            "auth_disable",
+            "secrets_disable",
+            "audit_disable",
+        )
+    }
+)
 EXEMPT_HANDLER_IDS = frozenset(EXEMPT_HANDLER_RATIONALE)
 
 

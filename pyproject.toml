@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools >= 77.0.3"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-rpc"
-version = "0.1.6"
+version = "0.1.7"
 requires-python = ">=3.12.0"
 dependencies = [
     "jsonschema>=4.0",
@@ -53,7 +53,13 @@ include = ["netbox_rpc*"]
 # include-package-data only picks up VCS/MANIFEST-tracked files for sdists;
 # wheels need the template globs declared explicitly or /plugins/rpc/ fails
 # with TemplateDoesNotExist on non-editable installs.
-netbox_rpc = ["templates/netbox_rpc/*.html"]
+netbox_rpc = [
+    # The production deploy gateway reads this embedded contract out of the
+    # built wheel; without it every deploy fails closed with "required
+    # deployment manifest is missing".
+    "_nmulticloud_deploy.json",
+    "templates/netbox_rpc/*.html",
+]
 
 [tool.pytest.ini_options]
 # Put the repository root on sys.path so `pytest tests/` (the console-script

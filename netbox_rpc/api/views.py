@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from drf_spectacular.types import OpenApiTypes
@@ -7,6 +8,7 @@ from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -20,6 +22,7 @@ from ..application.command_handlers import (
 )
 from ..application.queries import execution_events
 from ..domain.normalization import code_gate_unavailable_reason
+from ..constants import NETBOX_STAGING_ROTATE_BACKEND_TOKEN
 from .serializers import (
     RPCBackendSerializer,
     RPCIntentRunSerializer,
@@ -225,6 +228,8 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
         "procedure",
         "assigned_object_type",
         "requested_by",
+        "approved_by",
+        "source_intent",
     ).prefetch_related("procedure__commands", "tags")
     serializer_class = RPCExecutionSerializer
     filterset_class = filtersets.RPCExecutionFilterSet
@@ -247,10 +252,20 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
     def approve(self, request: Request, pk: str | None = None) -> Response:
         # get_object() applies NetBox object restrictions: an actor without
         # object-scoped view access to this execution 404s before deciding.
+        execution = self.get_object()
+        decision_data = request.data
+        if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN and (
+            not isinstance(decision_data, Mapping) or bool(decision_data)
+        ):
+            raise ValidationError(
+                {"detail": "Staging token rotation decisions accept no request body."}
+            )
         execution = approve_execution(
-            self.get_object(),
+            execution,
             request.user,
-            reason=str(request.data.get("reason") or ""),
+            reason=str(decision_data.get("reason") or "")
+            if isinstance(decision_data, Mapping)
+            else "",
         )
         serializer = self.get_serializer(execution)
         return Response(serializer.data)
@@ -258,10 +273,20 @@ class RPCExecutionViewSet(NetBoxModelViewSet):
     @extend_schema(responses={200: RPCExecutionSerializer})
     @action(detail=True, methods=["post"], url_path="reject")
     def reject(self, request: Request, pk: str | None = None) -> Response:
+        execution = self.get_object()
+        decision_data = request.data
+        if execution.procedure.name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN and (
+            not isinstance(decision_data, Mapping) or bool(decision_data)
+        ):
+            raise ValidationError(
+                {"detail": "Staging token rotation decisions accept no request body."}
+            )
         execution = reject_execution(
-            self.get_object(),
+            execution,
             request.user,
-            reason=str(request.data.get("reason") or ""),
+            reason=str(decision_data.get("reason") or "")
+            if isinstance(decision_data, Mapping)
+            else "",
         )
         serializer = self.get_serializer(execution)
         return Response(serializer.data)

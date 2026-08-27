@@ -43,6 +43,7 @@ class RPCProcedureTable(NetBoxTable):
     effect = columns.ChoiceFieldColumn()
     approval_required = columns.BooleanColumn()
     transport_driver = columns.ChoiceFieldColumn()
+    transport_pinned = columns.BooleanColumn()
     output_parser = columns.ChoiceFieldColumn()
 
     class Meta(NetBoxTable.Meta):
@@ -59,6 +60,7 @@ class RPCProcedureTable(NetBoxTable):
             "approval_required",
             "transport_driver",
             "transport_driver_chain",
+            "transport_pinned",
             "output_parser",
             "description",
             "tags",

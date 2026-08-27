@@ -1,17 +1,21 @@
 name: Integration tests (NetBox DB-backed)
 
-# Runs the DB-backed integration suite (netbox_rpc/tests/) against the
-# self-hosted NetBox install via `manage.py test`. The fast pure-domain suite
-# (tests/) is run separately by ci.yml.
+# Manual, non-gating diagnostics only. This workflow touches a privileged host
+# and must never execute candidate pull-request or push code. It is not the
+# canonical Gitea pull-request DB gate. That gate requires a separately
+# provisioned isolated untrusted runner with disposable digest-pinned
+# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5 closure.
 #
-# The compatibility job is the fail-closed Gitea gate: it provisions its own
-# NetBox checkout and database services for every supported version. The
-# environment-specific /opt/netbox job remains additive and soft-skips when the
-# runner or database secret is not configured.
+# Both jobs are operator-requested diagnostics restricted to the canonical main
+# ref. They are never required pull-request evidence or a branch-protection
+# gate. Trusted Gitea runner/ref eligibility remains the authority; these
+# candidate-visible checks are defense in depth only.
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: integration-${{ github.ref }}
@@ -20,6 +24,7 @@ concurrency:
 jobs:
   integration:
     name: manage.py test netbox_rpc
+    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && github.ref == 'refs/heads/main' }}
     runs-on: mirror-host
     env:
       NETBOX_ROOT: /opt/netbox
@@ -30,7 +35,10 @@ jobs:
       NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij-abcdef
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Preflight (soft-skip if unconfigured)
         id: preflight
@@ -38,12 +46,12 @@ jobs:
         run: |
           set -eo pipefail
           if [ ! -x "${NETBOX_ROOT}/venv/bin/python" ]; then
-            echo "::notice::NetBox venv not found at ${NETBOX_ROOT}; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "::notice::NetBox venv not found at ${NETBOX_ROOT}; skipping this optional operator diagnostic."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -z "${NETBOX_DB_PASSWORD}" ]; then
-            echo "::notice::NETBOX_DB_PASSWORD secret is not configured; skipping the DB-backed suite (covered by GitHub Actions test.yml)."
+            echo "::notice::NETBOX_DB_PASSWORD secret is not configured; skipping this optional operator diagnostic."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -75,6 +83,7 @@ jobs:
 
   compatibility:
     name: NetBox ${{ matrix.netbox-version }} compatibility
+    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && github.ref == 'refs/heads/main' }}
     runs-on: mirror-host
     timeout-minutes: 30
     strategy:
@@ -133,8 +142,10 @@ jobs:
             sudo -n -u postgres psql -d postgres -c "CREATE DATABASE ${db} OWNER ${NETBOX_DB_USER} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
           done
       - name: Checkout plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
           path: plugin
 
       - name: Set up uv and Python 3.12
@@ -174,10 +185,8 @@ jobs:
           # The gate proves cross-version installability AND fresh-database
           # behavioral correctness: system checks, a complete migration run
           # (including all seed migrations), then the full DB-backed behavioral
-          # suite on a freshly built database. The previously-deferred fresh-DB
-          # failures (#186) were product/test bugs, now fixed (PRs #190, #191);
-          # the suite's pydantic/cryptography deps come from `.ci-venv`'s
-          # `plugin[test]` install above.
+          # suite on a freshly built database. The suite's pydantic/cryptography
+          # deps come from `.ci-venv`'s `plugin[test]` install above.
           python netbox/netbox/manage.py check
           python netbox/netbox/manage.py migrate --no-input
           python netbox/netbox/manage.py test netbox_rpc --no-input

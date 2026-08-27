@@ -6,7 +6,10 @@ sync when architecture, commands, or workflows change.
 Project-facing SSH RPC architecture, naming, security, and testing guidance
 lives in `README.md`; keep it aligned with the agent notes below.
 The DDD/CQRS/Event Sourcing architecture contract lives in
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/architecture.md`](docs/architecture.md), which also carries the
+**System Architecture** diagrams: the component view across netbox-rpc /
+netbox-rpc-backend / managed targets, the execution lifecycle, and driver-chain
+resolution with the Ansible-first policy and its raw-driver fallback.
 
 ## Standalone usage
 
@@ -54,6 +57,17 @@ command behavior changes.
 > `services.passbolt.import_secrets`, and `services.passbolt.cleanup`) also
 > require explicit operator approval and must never expose DB dump contents,
 > GPG/JWT material, or DB passwords in params, logs, events, or results.
+> `service.gitea.production.upgrade_1_27_1` is likewise destructive and must
+> never be enabled, created, approved, or dispatched autonomously. It is seeded
+> disabled and accepts no caller parameters; see
+> `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
+> signed-lease, activation, and rollback contract.
+> `service.gitea.runner.register` has the same autonomous-action prohibition.
+> It is seeded and code-gated disabled, accepts only an exact lifecycle
+> operation plus reviewed scope, binds runner VM 399 and Gitea VM 170, and
+> never exposes the reusable registration token. Its durable fence,
+> expected-token rotation/reconciliation, and activation order are mandatory; see
+> `docs/gitea-runner-registration.md`.
 
 @AGENTS.md
 
@@ -66,49 +80,151 @@ tag predates the workflow). Registry-only: production deploys stay with
 `deploy-production.yml`. Verify a published version with `nms git packages`
 and confirm the wheel contains `templates/netbox_rpc/*.html` (package-data).
 
-## Automatic Production Deployment
+## Production Deployment (source-aware)
 
-**Starting with the deploy-production workflow**, new commits to `main` automatically deploy to the production NetBox instance (deploy target configured per-environment via the `deploy-production` workflow's `DEPLOY_*` variables/secrets).
+Pushes to `main` trigger `.gitea/workflows/deploy-production.yml`, which deploys
+the merged commit to the production NetBox instance.
 
-**Deploy job in `.gitea/workflows/deploy-production.yml`:**
-- Triggers on `push: [main]` branch updates
-- Also supports manual dispatch via `workflow_dispatch` with optional `ref` input
-- Runs on `prod-deploy` runner with SSH access to production host
-- Executes: `ssh <prod-deploy-host> -- deploy-plugin <plugin-name> "$REF"`
+**This plugin is on the source-aware deploy contract — the generic plugin
+helper is deliberately refused for it.** `deploy-netbox-plugin` rejects both
+`rpc` and `netbox-rpc` up front ("so direct sudo cannot enter the generic plugin
+helper"), so `deploy-plugin rpc <ref>` fails with:
 
-**Deploy parameters:**
-- REF: can be a version tag (v0.1.0), branch name (main/develop), or 7+ character commit SHA
-- Default: uses current commit SHA if not specified in manual dispatch
-
-**Security hardening:**
-- REF is passed via environment variable, not direct GitHub Actions context interpolation
-- Bash case statement validates ref format before SSH (whitelist: version tags, branch names, commit SHAs)
-- StrictHostKeyChecking=accept-new prevents MITM attacks
-- Quoted variable interpolation prevents shell injection
-
-**Deployment on production server (`<prod-deploy-host>`):**
-1. Git fetch/checkout of the specified ref in the plugin submodule
-2. pip install -e to refresh editable install and pick up new dependencies
-3. manage.py migrate to apply any pending migrations
-4. manage.py collectstatic to collect new/updated static files
-5. systemctl reload netbox-production (graceful gunicorn reload)
-6. systemctl restart netbox-rq (RQ worker restart for code changes)
-7. Health check: curl -sf http://127.0.0.1:18001/api/ to verify service is responding
-
-**Monitoring and verification:**
-- Watch the `deploy-production.yml` workflow run in Gitea Actions
-- Check the `deploy` job logs for SSH output and health check results
-- Verify production is healthy: `ssh <prod-deploy-host> -- health netbox`
-- Check service logs: `ssh <prod-deploy-host> -- logs netbox`
-
-**Manual deployment trigger:**
-```bash
-# Deploy a specific tag or branch via workflow dispatch
-nms git actions run <plugin> .gitea/workflows/deploy-production.yml \
-  -r main -f ref=v0.1.0
-
-# Or SSH directly to production
-ssh <prod-deploy-host> -- deploy-plugin <plugin-name> v0.1.0
 ```
+error: rpc production accepts only fixed source-aware deploy actions
+```
+
+The two accepted host-side actions are:
+
+| Action | Argument | Runs |
+|---|---|---|
+| `deploy-netbox-rpc-package` | exact canonical version | `python-package-deploy netbox-rpc package <version>` |
+| `deploy-netbox-rpc-main` | **exact 40-hex commit SHA** | `python-package-deploy netbox-rpc git <sha>` |
+
+`-main` takes a commit SHA, never a branch name.
+
+**Invocation is local-first.** The `prod-deploy` runner runs on the target host
+as root and invokes `/opt/nmulticloud/deploy/bin/python-package-deploy`
+directly; the SSH branch is only a fallback for a runner placed on another host.
+This mirrors `netbox-rpc-backend`'s workflows.
+
+**Deploy source.** A `main` push deploys `main_branch` with `github.sha` — the
+merged commit is by definition not yet published as a package. A manual
+`workflow_dispatch` offers the estate-standard choice, defaulting to the
+immutable `latest_package` (which requires an exact `package_version`).
+
+**Source build lock (required for `main_branch`).** The `git <sha>` path builds
+the wheel inside an isolated, pristine snapshot of the commit and installs the
+build backend with `--require-hashes`. It therefore refuses to run unless the
+commit carries `.gitea/deploy/python-build.lock.json`; without it the deploy
+fails with:
+
+```
+error: source build lock or pyproject is unreadable
+```
+
+The file is canonical JSON (`sort_keys`, `,`/`:` separators, one trailing
+newline) and must pin every applicable `[build-system] requires` entry to an
+exact `==` version whose sha256 matches the artifact on PyPI:
+
+```json
+{"dependencies":[{"hashes":["<sha256>"],"requirement":"setuptools==83.0.0"}],"frontend":{"name":"uv","version":"0.12.5"},"python_version":"3.12.13","schema":1}
+```
+
+`python_version` and `frontend.version` must equal the gateway's pinned
+`BUILD_PYTHON_VERSION` / `UV_BUILD_VERSION`. Bumping `[build-system] requires`
+past the pinned version — or the gateway bumping its own pins — requires
+regenerating this file, or every `main_branch` deploy fails closed.
+
+The `latest_package` path does **not** read this lock; it is separately blocked
+on the deploy attestation ("completion") package (issue #258).
+
+**Embedded deployment manifest (required for every path).** The gateway then
+reads `netbox_rpc/_nmulticloud_deploy.json` **out of the built wheel**. It
+synthesises one only for a pre-contract legacy wheel captured during
+first-activation recovery — "new package and main candidates must publish the
+manifest themselves" — so a wheel without it fails with:
+
+```
+error: required deployment manifest is missing for netbox-rpc
+```
+
+The manifest declares package identity (name, version, repository, cp312 /
+manylinux_2_17_x86_64 runtime target, a sha256 over the wheel's sorted
+`Requires-Dist`), the fixed plugin strategy triple
+(`dependency_mode="host-provided-no-install"`, empty `dependencies`,
+`database_strategy="expand-only-rollback-compatible"`,
+`static_strategy="append-only-hashed"`), and a path+sha256 row for **every**
+migration and static file in the wheel. The gateway recomputes those digests
+from the archive and refuses any mismatch, so the manifest cannot drift from
+what is actually shipped.
+
+Ordinary CI enforces the same boundary before deployment:
+`tests/test_deploy_manifest_contract.py` runs the canonical generator check,
+builds a real wheel with the hash-locked `setuptools` backend from
+`.gitea/ci-requirements.lock`, compares the exact archive maps, and mutation-tests
+a stale embedded manifest. Keep that test and build dependency in the locked CI
+closure whenever this contract changes.
+
+Generate it — never hand-edit it:
+
+```bash
+.gitea/scripts/generate_deploy_manifest.py --write    # rewrites the lock + manifest
+.gitea/scripts/generate_deploy_manifest.py            # --check; non-zero if stale
+```
+
+`pyproject.toml` must keep `_nmulticloud_deploy.json` in
+`[tool.setuptools.package-data]`, or the file exists in the repository and is
+silently absent from the wheel.
+
+**The migration attestation is a review gate, not a generated value.** Every
+migration row is declared `rollback_compatible: true`, and
+`DeploymentContent.from_mapping()` rejects any other value — so the manifest can
+only be built by attesting that the whole migration graph is expand-only.
+`.gitea/deploy/migration-compatibility.json` pins the count and a canonical
+digest of those rows; adding a migration makes the manifest generator fail
+with "migration compatibility policy is stale" until a human reviews the new
+migration and renews the file:
+
+```bash
+.gitea/scripts/generate_deploy_manifest.py --show-migration-attestation > \
+  .gitea/deploy/migration-compatibility.json
+```
+
+Renew it only after confirming the new migration is additive: no `RemoveField`,
+`DeleteModel`, `RenameField`/`RenameModel`, no narrowing `AlterField`, and no
+data-destroying `RunPython`/`RunSQL`. Dropping a stale constraint (as `0034`
+does) and adding a nullable column with a backfill (as `0031` does) are both
+expand-only; removing a column an older plugin version still reads is not.
+
+**Repository variables** (Settings → Actions → Variables), all optional:
+
+| Variable | Default |
+|---|---|
+| `DEPLOY_PACKAGE_BIN` | `/opt/nmulticloud/deploy/bin/python-package-deploy` |
+| `DEPLOY_STATUS_BIN` | `/opt/nmulticloud/deploy/bin/status-app` |
+| `DEPLOY_SSH_HOST` | `nmc-prod-207` |
+
+> The legacy `DEPLOY_PLUGIN_BIN` variable is **no longer used** by this
+> workflow. It points at `deploy-netbox-plugin`, which refuses this plugin.
+
+**Status reporting** queries the `netbox` app, not `netbox-rpc` — the host-side
+validator accepts only its known app names and `netbox-rpc` is not one, and the
+service whose health matters after a plugin deploy is NetBox itself.
+
+**Manual dispatch:**
+
+```bash
+# Deploy the current main commit
+nms git api POST /repos/N-MultiCloud/netbox-rpc/actions/workflows/deploy-production.yml/dispatches \
+  --body-json '{"ref":"main","inputs":{"deploy_source":"main_branch","package_version":""}}'
+
+# Deploy a published package version
+nms git api POST /repos/N-MultiCloud/netbox-rpc/actions/workflows/deploy-production.yml/dispatches \
+  --body-json '{"ref":"main","inputs":{"deploy_source":"latest_package","package_version":"0.1.6"}}'
+```
+
+**Monitoring:** watch the run in Gitea Actions; the final step prints the
+deploy-target status.
 
 For comprehensive deploy infrastructure documentation, see `/root/personal-context/nmulticloud-context/CLAUDE.md` section "Automatic Plugin Deployment to Production".

@@ -87,6 +87,7 @@ class ApprovalWorkflowTests(TestCase):
         )
         ex.refresh_from_db()
         assert ex.status == ExecutionStatus.APPROVED.value
+        assert ex.approved_by_id == self.approver.pk
         assert "ExecutionApproved" in event_names(ex)
 
     def test_reject_is_terminal_and_cannot_be_approved(self):
@@ -159,6 +160,7 @@ class ApprovalWorkflowTests(TestCase):
         ex.refresh_from_db()
         rebuilt = event_store.rebuild_projection(ex)
         assert rebuilt.status == ExecutionStatus.APPROVED.value
+        assert rebuilt.approved_by_id == self.approver.pk
         assert rebuilt.status == ex.status  # projection parity
 
     def test_request_must_be_first_event(self):

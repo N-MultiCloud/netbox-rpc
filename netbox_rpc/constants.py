@@ -109,6 +109,29 @@ PASSBOLT_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Approval-gated, secret-silent staging NetBox service-token rotation. The
+# caller supplies no routing metadata; the backend resolves the exact target's
+# pinned SSH service and invokes the fixed root-owned provisioner.
+NETBOX_STAGING_ROTATE_BACKEND_TOKEN = "service.netbox.staging.rotate_backend_token"
+NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
+    "service.netbox.staging.rotate_backend_token"
+)
+
+# Disabled, approval-bound production Gitea binary upgrade. The exact VM,
+# versions, official artifact digest, and target-owned credential policy are
+# server-normalized and signed; the caller supplies no params.
+GITEA_PRODUCTION_UPGRADE_1_27_1 = "service.gitea.production.upgrade_1_27_1"
+GITEA_PRODUCTION_UPGRADE_1_27_1_HANDLER = GITEA_PRODUCTION_UPGRADE_1_27_1
+GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
+GITEA_RUNNER_REGISTER_HANDLER = GITEA_RUNNER_REGISTER
+PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
+    {
+        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        GITEA_PRODUCTION_UPGRADE_1_27_1,
+        GITEA_RUNNER_REGISTER,
+    }
+)
+
 SAMBA_1_CONFIG_READ = "service.samba.1.config_read"
 SAMBA_1_CONFIG_READ_HANDLER = "service.samba_1.config_read"
 SAMBA_1_CONFIG_TEST = "service.samba.1.config_test"
@@ -257,6 +280,21 @@ INFLUXDB_1_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Debian 13 InfluxDB 3 Core installation catalog (migration 0072). These stand
+# up a Core 3 instance; the typed service.influxdb.1.* family above manages one
+# that already exists, and service.influxdb.1.bootstrap remains the only place
+# an administrative token is created and vaulted.
+INFLUXDB3_DEBIAN13_PREFLIGHT = "os.linux.debian.13.preflight_influxdb3_core"
+INFLUXDB3_DEBIAN13_PREFLIGHT_HANDLER = "os.linux_debian_13.preflight_influxdb3_core"
+INFLUXDB3_DEBIAN13_INSTALL = "os.linux.debian.13.install_influxdb3_core"
+INFLUXDB3_DEBIAN13_INSTALL_HANDLER = "os.linux_debian_13.install_influxdb3_core"
+INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = frozenset(
+    {
+        INFLUXDB3_DEBIAN13_PREFLIGHT,
+        INFLUXDB3_DEBIAN13_INSTALL,
+    }
+)
+
 AKVORADO_1_CONFIG_READ = "service.akvorado.1.config_read"
 AKVORADO_1_CONFIG_DEPLOY = "service.akvorado.1.config_deploy"
 AKVORADO_1_STATUS_STACK = "service.akvorado.1.status_stack"
@@ -267,6 +305,36 @@ AKVORADO_1_PROCEDURE_NAMES = frozenset(
         AKVORADO_1_CONFIG_DEPLOY,
         AKVORADO_1_STATUS_STACK,
         AKVORADO_1_RESTART_STACK,
+    }
+)
+
+# OpenBao 1 host-management catalog.  The backend registration uses an
+# underscored family (service.openbao_1.*); these are the dotted NetBox
+# procedure names used for normalization and authorization.
+OPENBAO_1_PROCEDURE_NAMES = frozenset(
+    {
+        "service.openbao.1.inspect",
+        "service.openbao.1.seal_status",
+        "service.openbao.1.health",
+        "service.openbao.1.policies_list",
+        "service.openbao.1.auth_list",
+        "service.openbao.1.secrets_list",
+        "service.openbao.1.audit_list",
+        "service.openbao.1.raft_list_peers",
+        "service.openbao.1.raft_autopilot_state",
+        "service.openbao.1.snapshots_list",
+        "service.openbao.1.auth_enable",
+        "service.openbao.1.secrets_enable",
+        "service.openbao.1.audit_enable",
+        "service.openbao.1.snapshot_create",
+        "service.openbao.1.service_action",
+        "service.openbao.1.seal",
+        "service.openbao.1.step_down",
+        "service.openbao.1.raft_remove_peer",
+        "service.openbao.1.policy_delete",
+        "service.openbao.1.auth_disable",
+        "service.openbao.1.secrets_disable",
+        "service.openbao.1.audit_disable",
     }
 )
 

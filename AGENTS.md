@@ -151,23 +151,25 @@ three read-only `RPCExecution` presentation properties:
 - `source_label` / `intent_reference` — how the run was issued. A run created
   directly (API/UI `RPCExecution` POST) reads as `Direct`. A run created by the
   intent executor (`command_handlers.execute_intent()`, see **Intents** above)
-  reads as `Intent: <name>`, because `execute_intent()` stamps the
-  underscore-prefixed `_intent_name`/`_intent` marker into that child's stored
-  `params` after creation. Do **not** reuse a bare `intent` params key for a
-  procedure's own parameter — only the underscore-prefixed internal keys are
-  treated as origin markers.
+  reads as `Intent: <name>` through the execution's read-only `source_intent`
+  foreign key. Intent attribution is persisted in the original execution insert
+  and never mixed into caller `params`. The underscore-prefixed `_intent_name` /
+  `_intent` keys remain a read-only compatibility fallback for historical rows;
+  new execution paths must not write them.
 - `result_steps` — returns `result.steps[]` (empty when absent/malformed). The
   execution detail template renders it as a **Command Output** card (command,
   operation, exit code, stdout, stderr). Keep this output bounded/redacted per the
   event-data rule above; never surface secrets or unbounded raw output.
 
-Any future intent executor that records an origin marker in `params` must keep it
-under the `_intent`-prefixed keys so this attribution stays correct.
+Any future intent executor must use `source_intent`; post-creation `params`
+mutation is forbidden because it can bypass family-specific persistence guards.
 
 ## DDD / CQRS / Event Sourcing
 
 - Treat `RPCExecution` as the command aggregate and current-state read
-  projection. The detailed contract is in `docs/architecture.md`.
+  projection. The detailed contract is in `docs/architecture.md`, whose
+  **System Architecture** section diagrams the whole current path —
+  component view, execution lifecycle, and driver-chain resolution.
 - Typed execution events live in `netbox_rpc.domain.events`; the canonical
   projection fold is `netbox_rpc.domain.projection.apply()` /
   `rebuild()`. `event_store.rebuild_projection()` and `reproject()` are the
@@ -189,10 +191,13 @@ under the `_intent`-prefixed keys so this attribution stays correct.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
   secrets, private key material, or unbounded raw command output.
-- A truthy backend response must validate its raw inner `result` against the
-  procedure's `result_schema` before `ExecutionSucceeded` is appended. Schema
-  mismatch fails closed as `RPC_RESULT_SCHEMA_MISMATCH` with a bounded,
-  value-free diagnostic.
+- Every present backend `result` must validate against the procedure's
+  `result_schema`, including false outer envelopes. A truthy response may append
+  `ExecutionSucceeded` only after validation; a false response remains failed
+  while projecting its valid closed result. Schema mismatch fails closed as
+  `RPC_RESULT_SCHEMA_MISMATCH` without projecting malformed data and with a
+  bounded, value-free diagnostic. Event messages have a separate redacted
+  4096-character hard cap.
 - `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
   (with its `RPCIntentProcedure` through model) are intentional
   reference-data/configuration entities: plain NetBox CRUD, NetBox ObjectChange
@@ -201,13 +206,16 @@ under the `_intent`-prefixed keys so this attribution stays correct.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
-### Two-person approval workflow — foundation (#164)
+### Two-person approval workflow (#164, #221/#224/#235 scoped enforcement)
 
 The execution aggregate carries an additive **approval-workflow** surface (the
-foundation of the P0 two-person-approval epic #163). This is infrastructure
-only — it does **not** yet change behaviour; routing `approval_required`
-procedures through it (enforcement, API/UI, signed dispatch leases) is the paired
-work in #165–#168.
+foundation of the P0 two-person-approval epic #163). Issues #221 and #224
+activate the complete two-person route for
+`service.netbox.staging.rotate_backend_token` and
+`service.gitea.production.upgrade_1_27_1`, plus the disabled
+`service.gitea.runner.register`; other legacy
+`approval_required` procedures retain their existing requester permission gate
+until they are migrated deliberately.
 
 - **States** (`domain.value_objects.ExecutionStatus`): `requested`,
   `pending_approval`, `approved`, `rejected`, `expired` precede the existing
@@ -227,20 +235,32 @@ work in #165–#168.
   still works), stores references not secrets, and `matches_current()` detects a
   snapshot-invalidating drift.
 - **Aggregate transitions** (`domain.aggregate`): `request` → `request_approval`
-  (never enqueues) → `approve` / `reject` / `expire`. `approve`/`reject` enforce
+  (never enqueues) → `approve` / `reject` / `expire`. A protected procedure's
+  successful `approve` atomically adds `ExecutionApproved` then
+  `ExecutionQueued`, after which the application enqueues one RQ job and adds
+  `JobEnqueued`. `approve`/`reject` enforce
   **segregation of duties** (the requester cannot decide their own request) and
   `approve` re-checks the snapshot; the decision is serialised with a
   `select_for_update` row lock + in-transaction status recheck so
   double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
   to a single deterministic event.
+  For each protected procedure, validate the immutable backend target before
+  sending authenticated capability traffic and reuse that exact resolved target
+  through snapshot/lease/dispatch. Approval must obtain an uncached compatible
+  capability while holding the row lock; failure leaves pending state and its
+  event stream unchanged and must not enqueue.
 - **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
   `approve` / `reject` actions (`command_handlers.approve_execution` /
   `reject_execution`) — no mutable status CRUD (PUT/PATCH/DELETE stay 405).
   Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
   to the execution's procedure on top of the aggregate's segregation-of-duties
   and single-decision concurrency guards; `get_object()` already object-restricts
-  the execution row. The endpoints are dormant in production until the request
-  routing that produces `pending_approval` executions lands (#166+).
+  the execution row. The staging rotation, production Gitea upgrade, and
+  isolated-runner registration use
+  this API: creation requires execute permission scoped to the exact procedure and never accepts
+  a same-request bypass; a distinct actor with approval permission scoped to
+  that procedure must decide it. Other procedures are not implicitly migrated
+  to this lifecycle.
 - **Authoritative opt-in + selected backend (#166)**: `RpcPluginSettings.enabled`
   and its selected backend are now enforced by `command_handlers`. At execution
   **creation** a disabled integration is rejected (403) and an unconfigured
@@ -253,6 +273,9 @@ work in #165–#168.
   unambiguous), so enforcing the gate never rejects an already-active install;
   fresh installs keep the `enabled=False` default. Tests that create/dispatch
   executions must call `_common.enable_rpc_integration()`.
+  Once a queued execution is claimed, a resolver exception must be converted to
+  bounded `RPC_BACKEND_RESOLUTION_FAILED` and appended as `ExecutionFailed`;
+  never persist resolver text or leave the projection in `running`.
 - **Backend capability handshake (#167)**: `capabilities.py` consumes a manifest
   the paired `netbox-rpc-backend` advertises at `GET {backend_url}/capabilities`
   (per handler: `handler_id`/`version`/`effect`/`contract_hash`, plus a top-level
@@ -287,9 +310,11 @@ work in #165–#168.
   ownership:** the issuer generates + ledgers the nonce; the verifier owns the
   consumed-nonce (accept-once) store. **Graceful degradation / prod-safe:** with
   no signing key configured (current prod), `issue_dispatch_lease` returns
-  `None`, the worker POSTs `{}` byte-for-byte as before (ID-only dispatch), and
-  leases stay inert until an operator configures a key *and* the backend
-  advertises verification (rollout mirrors #167). Keys, audience, and TTL come
+  `None`, ordinary procedures POST `{}` byte-for-byte as before (ID-only
+  dispatch). **Staging token rotation is the fail-closed exception:** a missing
+  signing key produces `RPC_DISPATCH_LEASE_REQUIRED` and no backend request.
+  It cannot run until the control plane provisions the issuer private key and
+  verifier public key. Keys, audience, and TTL normally come
   from `PLUGINS_CONFIG["netbox_rpc"]` (`dispatch_lease_signing_keys` /
   `dispatch_lease_audience` / `dispatch_lease_ttl_seconds`). Threat model, ADR,
   and rotation/rollback/retirement ops live in
@@ -298,6 +323,20 @@ work in #165–#168.
   lineage) is `netbox_rpc/tests/fixtures/dispatch_lease/`. Tests that mint a
   lease patch `dispatch_lease._plugin_setting`; crypto/DB-backed tests live in
   the integration tier (`cryptography` + pydantic are not in the pure-domain env).
+  If and only if `dispatch_lease_signing_keys` is absent, the issuer may instead
+  receive `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_FILE`,
+  `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_ID`, and
+  `NETBOX_RPC_DISPATCH_LEASE_SIGNING_KEY_VERSION`. All three are required. The
+  absolute file path is descriptor-walked without following symlinks, preflighted
+  before a nonblocking open, and accepted only for a regular, single-link,
+  root/current-euid-owned file no larger than 16 KiB with permissions no broader
+  than `0640`; trusted path ancestors are root/current-euid-owned and not
+  group/other writable (root-owned sticky directories are allowed). Reads are
+  bounded and metadata is compared before/after. Missing OS primitives,
+  malformed lineage/PEM, unsafe metadata, races, FIFOs/devices, or partial env
+  configuration return no key without exposing contents. An explicit empty or
+  malformed plugin setting remains authoritative and does not fall through to
+  the environment.
 
 ## Intents
 
@@ -334,9 +373,10 @@ done; the procedures (with their commands) declare *how*. See
   never bypass approval on a destructive procedure. `sequential` and `parallel`
   both fan out synchronously in sequence order today (v1); the mode distinction
   for true concurrent/chained dispatch is a documented future enhancement, not
-  required by this safety contract. A successful child is stamped with the
-  underscore-prefixed `_intent`/`_intent_name` origin marker in `params` *after*
-  creation (so it never collides with `params_schema` validation) — see
+  required by this safety contract. A successful child stores the intent in the
+  read-only `RPCExecution.source_intent` foreign key in the same insert as the
+  rest of the execution; attribution never enters or mutates `params`, so closed
+  `params_schema` validation remains intact — see
   "Procedure Runs Tab" below and `docs/intents.md` → "Running an intent" for
   the full request/response contract. Seeded by additive migration `0039_rpcintent` (depends on the
   `0038_merge_rpc_procedure_commands` leaf; no live imports, no `netbox_nms`
@@ -404,6 +444,10 @@ the agent must confirm with the user:
 | `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
+| `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
+| `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
+| `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
+| `service.gitea.runner.register` | Confirm stopped/accepted runner VM PK 399 (`nmultifibra-ci-untrusted-01`), exact `register`/`reconcile` operation and allowlisted scope, canonical durable fence, both pinned target-owned SSH identities, isolated scheduling domain, reviewed runner/reset helper generations, and expected-token invalidation proof. Never enable, create, approve, or dispatch autonomously. |
 
 ### Other Write Procedures
 
@@ -434,12 +478,162 @@ checksums, and migrate/healthcheck/cleanup status.
 See [`docs/passbolt-migration-runbook.md`](docs/passbolt-migration-runbook.md)
 for the operator command sequence. Use placeholder values in docs and tests.
 
+### Staging Backend Token Rotation
+
+`service.netbox.staging.rotate_backend_token` is a destructive,
+approval-required recovery procedure for the staging backend's NetBox service
+token. It targets only the existing, requester-viewable `nms-front-door`
+`dcim.device` and accepts no caller parameters. The backend resolves the
+device's enabled SSH service, credential reference, port, and strict pinned
+known-host policy from managed inventory and invokes the fixed root-owned
+provisioner. Token creation and installation stay entirely outside RPC params,
+argv, results, events, and logs.
+
+The result schema is closed and contains only `ok`, the constant procedure ID,
+constant `target="nms-front-door"`, `rotated`, and `stage`. Exact states are:
+success (`true/true/complete`), pre-commit failure
+(`false/false/execute`), committed-but-recovery-failed
+(`false/true/complete`), and post-dispatch uncertainty
+(`false/null/indeterminate`). The nullable indeterminate state prevents
+automation from treating a transport/timeout ambiguity as proof the old token
+remains active and blindly retrying a destructive rotation. Operators and agents
+must reconcile staging readiness before any new request. They must not attach raw
+token values, upstream bodies, command output, or filesystem contents to the
+execution. Approval is required even for recovery, and agents must never create
+or approve this execution autonomously.
+
+The envelope and nested result must use matching strict boolean `ok` values;
+this privileged procedure accepts no backend progress events. Its approval
+snapshot binds a concrete backend row and the non-secret backend URL/TLS
+identity, plus the full transport/output/representative-command policy. A job
+payload cannot override that destination after approval.
+
+Creation records `ExecutionRequested` then `ApprovalRequested`, persists an
+immutable non-secret approval snapshot, returns `pending_approval`, and does
+not enqueue. It rejects backend/request/trace/comments/tags/custom-field
+metadata (even empty values), and approval/rejection accept no caller reason;
+fixed bounded phrases are the only durable decision messages. Both the execute and approve permissions must include this exact
+procedure; an object permission constrained to some other procedure does not
+grant access. The requester cannot approve their own request even if they hold
+the approval permission. A distinct approver records an immutable
+`approved_by` identity, then the same decision transaction records
+`ExecutionApproved` and `ExecutionQueued`; only afterward is one RQ job
+enqueued. The snapshot includes canonical hashes for the complete immutable
+procedure policy, transport/output pipeline, representative command,
+params/result schemas, and concrete backend URL/TLS identity. Admission,
+approval, worker claim, and pre-lease validation require the exact enabled
+name, handler, version, device target, destructive effect, 1800-second timeout,
+approval bit, and schemas, as well as distinct non-null requester/approver identities. Those identities are exposed read-only
+on the execution API and bound into the signed one-time dispatch lease.
+
+Unlike ordinary procedures' backwards-compatible ID-only dispatch, this
+procedure never falls back when dispatch-lease keys are absent or invalid.
+`RPC_DISPATCH_LEASE_REQUIRED` is the expected fail-closed result until the root
+deployment provisions coordinated issuer/verifier keys; the backend is not
+called in that state.
+
+### Production Gitea 1.27.1 Upgrade
+
+`service.gitea.production.upgrade_1_27_1` is a disabled-by-default,
+destructive, approval-required procedure for the exact production `Gitea`
+`virtualization.virtualmachine` PK 170. It accepts no caller params. The server
+normalizer validates VMID 222, cluster PK 6 / `PVE-CLUSTER-02`, node device PK
+27 / `pve03`, primary IPv4 `10.0.30.96`, active status, and the production tag;
+then it pins source 1.26.2, target 1.27.1, official artifact SHA-256
+`86a7ac26e7f9c9cca0f56c4fac07fff205d5fc3bca0e54af23a204f07b833bc9`,
+and the non-secret SSH policy reference
+`target-owned-ssh:virtualization.virtualmachine:170` into normalized params and
+the command fingerprint. It also resolves exactly one enabled target-owned
+`netbox_network.DeviceService` in a single query and freezes its public
+service/identity IDs and UTC revisions, principal/method, exact management
+host/port, and pinned-known-host digest. Raw known-host and secret material are
+never persisted. Callers cannot override any of these fields.
+
+The Gitea capability hash extends the legacy command payload with
+`gitea_upgrade_contract.SEMANTIC_CAPABILITY_EXTENSION`: static target/topology,
+source/target/artifact, guest paths/unit/health URLs, handler/process budgets,
+the exact Ed25519 host-pin parser, closed caller/normalized/fingerprint
+schemas, all six result tuples, exact backend 1 at loopback URL
+`http://127.0.0.1:16005` with TLS verification disabled, and versioned
+length/SHA-256 identities for the exact 59,952-byte backend script and complete
+63,492-byte canonical fixed argv. The public Nginx vhost is not a supported
+dispatch path. The checked-in fixture is the byte-exact cross-repository
+canonical JSON and digest. Never change or reserialize only one side. Other
+handler capability hashes remain unchanged.
+
+The exact target/fingerprint, complete immutable procedure/command/schema
+policy, authoritative backend ID plus URL/TLS hash, SSH-policy
+reference, and distinct actor identities are bound into the approval snapshot
+and signed one-time dispatch lease. For Gitea only, the procedure-policy hash
+also contains the canonical semantic-extension digest; executable-, backend-,
+rollback-, or schema-only drift therefore invalidates requested, pending,
+approved, and queued work before enqueue or lease issuance. The existing signed
+lease `contract_hash` carries the same semantics; do not add a redundant caller
+or lease field. No ID-only fallback is permitted. The
+closed result has only `ok`, constant `procedure`, constant `target="Gitea"`,
+`changed`, `healthy`, and `stage`, with six exact states documented in
+[`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md).
+Schema-valid false/indeterminate states remain on failed executions; malformed
+results and all backend progress events fail closed. Capability and dispatch
+redirects are forbidden. The catalog validates the exact five-key backend wire
+envelope, discards backend `error_code`/`error_message`, and derives bounded
+durable diagnostics only from the validated result tuple; remote diagnostic
+text must never enter the event ledger or execution projection.
+
+Migration `0073` seeds `enabled=False`. Ordered activation is backend gate and
+exact capability first, then an explicit operator enables the catalog row.
+For this procedure, an absent, unreachable, or malformed capability manifest is
+not graceful: admission and the uncached worker pre-dispatch check both require
+`COMPATIBLE`.
+Rollback disables the catalog row first, reconciles in-flight work, then closes
+the backend gate. Never create, approve, enable, or dispatch this production
+procedure autonomously. Read-timeout, ambiguous HTTP, and non-JSON outcomes
+after sending are persisted as the exact closed `indeterminate` tuple. A
+post-dispatch indeterminate or committed unhealthy
+state is not safe to retry until an operator reconciles the installed binary,
+service/database health, and backup.
+
+### Isolated Gitea Runner Registration
+
+`service.gitea.runner.register` is a disabled-by-default, destructive,
+two-person composite operation. The assigned object is exact runner VM PK 399;
+the independently pinned token source is Gitea VM PK 170. The caller supplies
+only `register` or `reconcile` plus one of eight reviewed scopes. Server
+normalization and the signed lease
+bind both target objects and separate target-owned SSH service/credential
+identity snapshots. A canonical durable fence serializes aliases and blocks
+retry after uncertainty. The backend verifies the exact native runner and
+Gitea expected-token reset helpers, obtains the reusable token with fixed Gitea
+argv, streams it only over bounded stdin, and attempts rotation before every
+post-token return. No token, remote output, host override, label,
+path, or command may enter params, fingerprints, argv, environment, events,
+logs, or results.
+
+Migrations `0080`/`0081`, the catalog code gate, and the backend configuration
+gate all start dark. The operation depends on the deployed `netbox-network`
+issue `#23` credential-identity response. Only a definitive pre-token failure or
+an exact reset proof clears the fence; indeterminate outcomes require a fresh,
+distinctly approved `reconcile` plus runner-list/local-state inspection before
+retry. Reconciliation is not admitted from a fresh `pending` fence or before
+the blocking execution's 360-second remote-quiescence interval has elapsed.
+For stale `pending` recovery after that interval, reservation locks
+the fence and original execution together, terminalizes a still-`running` lost
+worker, moves the fence to `blocked`, and records the reconciliation owner in
+the same transaction. Once it owns the fence, late original transitions are rejected.
+Activation is forbidden while application repositories can schedule
+`prod-deploy`, `mirror-host`, or equivalent privileged labels. Follow
+[`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md) for the
+closed states, deployment order, reset evidence, and rollback sequence. Agents
+must never enable, create, approve, or dispatch it autonomously.
+
 ### Permission Invariant
 
 Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
 a human operator has explicitly granted it for a specific, bounded task. Holding
-this permission allows bypassing the `approval_required` API gate — it must never
-be used autonomously on destructive procedures.
+this permission satisfies the legacy single-actor gate for most
+`approval_required` procedures — it must never be used autonomously on
+destructive procedures. It does **not** bypass a protected procedure's
+pending approval or distinct-actor check.
 
 ---
 
@@ -478,6 +672,215 @@ be used autonomously on destructive procedures.
   content, private keys, unsafe paths, and Core-only plugin scope on OSS 2 are
   rejected before persistence. The older generic allowlist row remains useful
   for compatibility, but new InfluxDB workflows must use this typed family.
+- **Gitea Actions runner recovery** is seeded by migration `0073`, which adds all
+  20 `gitea-act-runner-*.service` units to `RPCLinuxServiceAllowlist` so the
+  generic Ubuntu-24 systemd procedures can control them. No new procedure or
+  backend handler — these are reference data the existing `restart_service`
+  normalizer and handler already consume.
+  - **Why.** An `act_runner` executes with `maxParallel=1` — one job at a time,
+    everything else queued behind it. If that job **hangs**, the process keeps
+    heartbeating, so Gitea still reports the runner `online` with correct
+    labels while no further job ever starts. Observed 2026-08-17 on
+    `gitea-act-runner-nmc-netbox-rpc-backend`: claimed task 18865 at 17:04:59Z,
+    logged nothing after 17:05:26Z, still holding its worker ~7 hours later with
+    ten runs queued — including a `deploy-production.yml` for an already-merged
+    `develop → main` promotion.
+  - **Uptime is not the signal.** A sibling runner started in the same second was
+    completing jobs normally. Diagnose from the journal: a runner holding a task
+    while logging nothing for hours is hung; one emitting step output is working.
+  - **Why it matters more than a crash.** A crashed runner is visibly down. A
+    wedged one looks healthy, so a promotion merges, reports success, and never
+    deploys: production keeps serving the previous build while the repository
+    says otherwise. Before `0073` there was no audited way to restart one — the
+    allowlist held only `netbox` and `netbox-rq` — and the estate rule is to
+    extend the tooling rather than SSH to the host.
+  - **Operational warning.** Restarting a runner **aborts any job it is
+    currently executing**. Check `status_service` and the repository's
+    queued/running runs before restarting one that may be mid-build.
+  - **Do not restart a runner from a job running on it.** These runners are
+    per-repository, so an Actions job that restarts its own runner kills its own
+    execution, and the restart can be reported as a failed job even when it
+    worked. Dispatch recovery with `nms rpc` against the runner **host**.
+  - Slugs equal the unit basename (`gitea-act-runner-<repo>`), asserted by
+    `tests/test_gitea_runner_service_allowlist_seed.py`, which also fails if the
+    seeded set drifts from the runner **daemons** actually defined on disk.
+  - **The drift check compares daemons, not every unit matching the glob.** The
+    `gitea-act-runner-*` prefix is also used by maintenance units — currently
+    `gitea-act-runner-recycle.service`, a `Type=oneshot` job driven by
+    `gitea-act-runner-recycle.timer` that recycles idle-but-wedged runners. Those
+    are the recovery mechanism, not a recoverable target, so they are deliberately
+    **not** in the allowlist: `restart_service` on a one-shot is meaningless.
+    `_is_runner_daemon()` classifies a unit by its `ExecStart` launching
+    `gitea-runner … daemon` and not being `Type=oneshot`, and
+    `EXPECTED_NON_DAEMON_UNITS` pins the exemption set exactly — so a **new**
+    non-daemon unit fails the test and forces a deliberate decision rather than
+    silently widening it. Adding a maintenance unit under this prefix therefore
+    requires updating that set, not the seed migration.
+- **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
+  (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
+  above manages an instance that already *exists*; these two stand one up, so a
+  fresh Core 3 guest no longer requires an interactive SSH session. Both target
+  `dcim.device` and `virtualization.virtualmachine`.
+  - `os.linux.debian.13.preflight_influxdb3_core`
+    (`os.linux_debian_13.preflight_influxdb3_core`, **read**, no approval, 60s)
+    reports posture: `/etc/os-release` `ID`/`VERSION_ID`, dpkg architecture,
+    systemd presence, whether `influxdb3-core` is installed/held and at which
+    version, the managed-config marker, unit load/active/enabled state, the
+    configured bind/node-id/data-dir, and TLS-material readability, plus a
+    derived `ready` verdict and bounded `blockers[]`. It is deliberately **both**
+    the pre-install gate and the post-install verification read — there is no
+    separate `verify_*` procedure, because the operator installer's precondition
+    block and its completion report read the same facts.
+  - `os.linux.debian.13.install_influxdb3_core`
+    (`os.linux_debian_13.install_influxdb3_core`, **write**,
+    **`approval_required=True`**, 900s) is the audited installer:
+    fingerprint-verified InfluxData repository key
+    (`24C975CBA61A024EE1B631787C3D57159FC2F927`), pinned `influxdb3-core`
+    install, managed `/etc/influxdb3/influxdb3-core.conf`, systemd drop-in,
+    restart, readiness probe, and `apt-mark hold`. Optional params mirror the
+    operator script's environment variables — `node_id`, `data_dir`, `http_bind`,
+    `tls_cert`/`tls_key`, `enable_plugins`, `disable_telemetry`,
+    `wal_flush_interval`, `log_filter`, `package_version`, `hold_package`,
+    `upgrade_package`, `force_reconfigure`, `allow_plaintext_remote`. Its
+    `result_schema` carries the installer's completion report (package/binary
+    version, unit state, bind, node id, data dir, config path, plugins enabled,
+    package held, `ready`, `stage`).
+
+  **Neither procedure accepts the shared `rpc_ssh_*` connection overrides — this
+  is deliberate and must not be "restored".** Unlike the agent-install, ookla, and
+  nmap procedures, these two declare no `rpc_ssh_credential_pk`, `rpc_ssh_host`,
+  `rpc_ssh_port`, `rpc_ssh_known_hosts_entry`, or
+  `rpc_ssh_strict_host_key_checking`, and the normalizer rejects them explicitly
+  (`RPC_PARAM_INVALID`, naming the offending keys) before the generic
+  unknown-parameter check. The execution backend must resolve host, port,
+  credential, and known-host policy from the execution's **assigned NetBox
+  object** alone, exactly as
+  `network.device.huawei.router.ne8000.f1a.show_bgp_peer` does. Reason: a
+  caller-supplied `rpc_ssh_credential_pk` is not object-scoped against the
+  requesting user (the open gap tracked in issue #203), so honouring one would let
+  a requester use a credential they cannot view; and a caller-supplied
+  `rpc_ssh_host` would move an approved installation off the audited target
+  entirely. Because the installer is `approval_required=True`, both would be
+  approved against one target and executed against another. Adding these params
+  back requires #203 (or equivalent object-scoped authorization) to land first.
+
+  **No credential, anywhere in this pair (hard invariant).** Neither
+  `params_schema` declares a token, password, secret reference, or
+  `generate_admin_token`-style flag, and neither `result_schema` returns one.
+  The first administrative token is created and vaulted **only** by the
+  pre-existing `service.influxdb.1.bootstrap` (`family="core3"`, migration
+  `0056`), which stores the plaintext through the netbox-nms secret bridge and
+  returns an `nms-secret:` reference. The sanctioned sequence is
+  `preflight` → `install` → `service.influxdb.1.bootstrap`. Do not add token
+  generation to the installer: one token contract per product family is the
+  point, and `tests/test_influxdb3_debian13_procedures.py` asserts the absence
+  of every secret-shaped key in params, results, and the normalized payload.
+
+  **Normalizer invariants** (`_normalize_influxdb3_debian13_execution`): every
+  value is re-validated in the pure domain, so a `params_schema` edit alone can
+  never widen what reaches the backend. Every path parameter must be
+  **canonical**: a segment equal to `.` or `..` is rejected, and the value must
+  equal its own `posixpath.normpath()`. This is load-bearing, not cosmetic —
+  `data_dir` is then compared against the forbidden roots `/home`, `/root`,
+  `/run`, `/tmp`, `/var/tmp` (the packaged unit sandboxes those trees, so the
+  service would not start), and a literal prefix comparison alone would let
+  `/var/./tmp/influxdb3` or `/var/lib/../tmp/influxdb3` through while they resolve
+  *inside* a forbidden root. Requiring canonical input rather than normalizing it
+  also means the value that is stored, fingerprinted, approved, and executed is
+  the same string the operator read. A dot **inside** a segment
+  (`/etc/influxdb3/tls/server.crt`) stays legal. `tls_cert`/`tls_key` are
+  both-or-neither absolute paths on *both* procedures. Unknown parameters are
+  rejected here as well as by `additionalProperties: false`, tolerating the
+  platform-stamped `_timeout_seconds_snapshot` key plus legacy `_intent` /
+  `_intent_name` markers on historical executions. Most importantly the
+  normalizer reproduces the installer's own security gate: **a remote
+  `http_bind` with no TLS is refused** (`RPC_PARAM_INVALID`) unless the caller
+  explicitly sets `allow_plaintext_remote=true`; an omitted `http_bind` is
+  evaluated as the loopback default rather than left undefined. An
+  out-of-family procedure name reaching this normalizer fails closed with
+  `RPC_PROCEDURE_NOT_NORMALIZABLE` rather than inheriting the installer's
+  parameter set. Every seed `pattern` is anchored with `(?![\s\S])`, not `$`,
+  because `jsonschema` applies `pattern` via `re.search` and Python's `$` also
+  matches before a single trailing newline.
+
+  **Seeded `enabled=False` behind a three-point code gate.** No
+  `os.linux_debian_13.*` handler exists in `netbox-rpc-backend` yet, so an enabled
+  row would be advertised by `/procedures/available/` and every execution would
+  queue only to fail on an unknown handler. Capability discovery does **not** cover
+  this: a backend that advertises no manifest yields verification `UNKNOWN` and
+  admission proceeds. `_INFLUXDB3_DEBIAN13_AVAILABLE = False` in
+  `netbox_rpc.domain.normalization` is therefore checked through the shared
+  `code_gate_unavailable_reason()` at all three enforcement points — admission
+  (`create_execution()`), advertisement (`RPCProcedureViewSet.available()`), and
+  worker claim (inside this normalizer) — so flipping the mutable
+  `RPCProcedure.enabled` flag alone cannot make them dispatchable. Enable the gate
+  and the flag **together**, in an *additive* migration, as part of the coordinated
+  rollout that ships the handlers and their approved capability contract. Do not
+  edit `0072`'s data defaults in place (Django tracks an applied migration by name,
+  so an in-place edit silently skips databases that already ran it — the `0060`/
+  `0061` lesson).
+
+  **The assigned object is authorization-checked and pinned.** The requester
+  chooses `assigned_object_id`, and these procedures derive their SSH target
+  *exclusively* from it, so `create_execution()` resolves the exact device/VM
+  through `model.objects.restrict(user, "view")` before the row is written —
+  `_require_viewable_assigned_object()` in `command_handlers.py`, whose
+  `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` set now covers both the Akvorado family
+  and this one. (It was `_require_akvorado_assigned_object` before; the rename is
+  the whole point — any family with no `rpc_ssh_*` escape hatch belongs in it.)
+  Without that check a requester could aim an approval-gated installation at a
+  device they cannot even view. The normalizer then **re-validates** the identity at
+  worker claim and forwards `target_object = {content_type, object_id}`, with flat
+  `target_content_type`/`target_object_id` scalars in the command fingerprint, so an
+  approved run is pinned to the object that was approved. `target` remains an
+  audit-only display value and must never be used for host resolution.
+
+  **Result-schema invariants.** The installer's `result_schema` carries a closed
+  `oneOf` envelope (same shape as
+  `service.netbox.staging.rotate_backend_token`): a nested `ok=true` must also
+  report `installed=true`, `ready=true`, and `stage="complete"`, and `installed`,
+  `ready`, `stage`, and `package_held` are all **required**. On its own that is not
+  enough, because a `result_schema` can only constrain the *nested* object while
+  `event_store` selects `ExecutionSucceeded` from the **outer** response `ok` — so
+  `record_backend_response()` additionally requires outer/nested `ok` agreement for
+  this family via the shared `_envelope_ok_state_mismatch()` helper (extracted from
+  the staging-rotation validator, which keeps its extra events prohibition). Both
+  values must be strict booleans, so a truthy non-boolean cannot pass `bool()`
+  coercion silently. Together these mean a response of `ok=true` wrapping a failed
+  or partial install is rejected instead of recorded as a successful installation. A
+  genuine failure stays fully representable through the `ok=false` branch, including
+  a partial `stage` and a bounded `error`. Every result string additionally carries an
+  explicit `maxLength` (or a closed `enum`/`const`), because `event_store` silently
+  clamps unbounded strings at 4096 characters — an unbounded audit field would be
+  truncated with no validation error, and an unbounded contract lets a malformed
+  backend return an arbitrarily large valid result. `procedure` is a `const`, so a
+  backend cannot relabel which procedure ran.
+
+  **Reverse migration is non-destructive.** `0072`'s reverse is a single
+  table-level `queryset.update(enabled=False)`; it never deletes. Two independent
+  reasons, both recorded in the migration's own docstring: `RPCExecution.procedure`
+  is `on_delete=PROTECT`, so deleting a procedure that has run raises
+  `ProtectedError` and aborts the downgrade — and audited execution history must
+  never be destroyed to allow one; and deleting through the historical model is
+  unsafe *even when the row is unreferenced*, because the deletion collector walks
+  related models and raises `ValueError` for a related app with no migrations
+  (this actually failed the NetBox 4.5.8 compatibility job). An `except
+  ProtectedError` guard catches only the first of those. See the historical-model
+  rule under **CI / Testing**.
+
+  Both handler IDs are `EXEMPT_HANDLER_RATIONALE` entries seeded with one
+  representative `["backend-orchestrated", …]` command row each — key-fingerprint
+  verification, `apt-cache madison` candidate resolution, and
+  validate/write/restart/health/hold sequencing have no faithful fixed-argv
+  form. Both procedures are also `_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` and
+  envelope-state-strict members, so adding a third procedure to this family means
+  reviewing those three registries too, not just the seed migration.
+  **Catalog-first: the matching `os.linux_debian_13.*` handler does not
+  exist in `netbox-rpc-backend` yet** and lands separately, exactly as with the
+  whole `service.influxdb.1.*` family and the Samba catalog. The paired
+  `netbox-packer` profile `influxdb-core-3.11.0-debian-13` (VMID 9052) bakes the
+  same production posture into a first-boot cloud-init template for new guests;
+  this catalog is for hosts that already exist.
 - Akvorado service management uses the typed `service.akvorado.1.*` catalog
   seeded by migration `0057`, targeting `dcim.device` and
   `virtualization.virtualmachine`. Four procedures: `config_read` (read, no
@@ -498,12 +901,15 @@ be used autonomously on destructive procedures.
   `AkvoradoIntegration`/`AkvoradoExporterProfile` models store non-secret
   metadata only and never perform config/lifecycle actions directly.
 - InfluxDB service management is provided by the generic Ubuntu 24 systemd
-  procedures through the seeded `RPCLinuxServiceAllowlist` row
-  `service_slug="influxdb"` -> `systemd_unit="influxdb.service"`, targeting
-  `dcim.device` and `virtualization.virtualmachine`. Do not add
-  InfluxDB-specific shell text; use the existing fixed systemctl handlers or add
-  a new typed procedure if a future operation cannot be modeled as service
-  lifecycle control.
+  procedures through two seeded `RPCLinuxServiceAllowlist` rows, both targeting
+  `dcim.device` and `virtualization.virtualmachine`:
+  `slug="influxdb"` -> `systemd_unit="influxdb.service"` (**OSS 2**, migration
+  `0053`) and `slug="influxdb3-core"` -> `systemd_unit="influxdb3-core.service"`
+  (**Core 3**, migration `0071`). The two products ship different units, so pick
+  the row that matches the family — the OSS 2 row cannot control a Core 3
+  instance. Do not add InfluxDB-specific shell text; use the existing fixed
+  systemctl handlers or add a new typed procedure if a future operation cannot be
+  modeled as service lifecycle control.
 - NetBox stack service management is provided the same way, through the allowlist
   rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
   (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
@@ -859,6 +1265,48 @@ be used autonomously on destructive procedures.
   every container, DB, env var, host, user, port, and path parameter; no real
   secret contents are accepted, returned, logged, or stored. Operator commands
   live in `docs/passbolt-migration-runbook.md`.
+- Staging NetBox service-token recovery is seeded by migration `0068` as
+  `service.netbox.staging.rotate_backend_token` (destructive, 1800s, approval
+  required) for the `dcim.device` target. Its
+  schema and normalizer reject every caller parameter, require the exact
+  existing/viewable `nms-front-door` device, and expose only closed non-secret status
+  metadata (`ok`, constant `procedure`, constant `target`, nullable `rotated`,
+  and `execute`/`complete`/`indeterminate` `stage`). The indeterminate tuple is
+  reserved for post-dispatch transport/timeout uncertainty and must not be
+  treated as safe to retry. The backend owns the fixed root-only
+  provisioner and target-owned SSH resolution; this catalog never transports
+  the token itself.
+  Creation rejects request/trace IDs, backend overrides, comments, tags,
+  custom fields, and any other caller metadata outside the exact target plus
+  empty-params shape. Approval/rejection bodies carry no operator note and use
+  a fixed bounded audit reason. The exact enabled name/handler/version/target,
+  destructive effect, 1800-second timeout, approval bit, and params/result
+  schemas are enforced at admission, approval, worker claim, and pre-lease
+  time. Canonical policy/schema hashes are protected by the immutable approval
+  snapshot. Valid closed failure/indeterminate results remain on failed
+  executions; malformed nested results are rejected and not projected. The
+  reverse migration is non-destructive: it runs a table-level
+  `queryset.update(enabled=False)` and never deletes, so it neither destroys
+  audited history nor enters Django's deletion collector. It previously called
+  `procedure.delete()` behind an `except ProtectedError` guard, which handled the
+  PROTECT case but *not* the collector's `ValueError` (a `ValueError` is not a
+  `ProtectedError`) — see the historical-model rule under **CI / Testing**.
+- Production Gitea binary upgrade is seeded disabled by migration `0073` as
+  `service.gitea.production.upgrade_1_27_1` (destructive, 1800s, approval
+  required), targeting only `virtualization.virtualmachine` PK 170 (`Gitea`).
+  Its exact empty params, six-state closed result, immutable VM/topology/version/
+  artifact/credential fingerprint, concrete backend hash, two-person approval,
+  mandatory signed lease, backend-event prohibition, activation ordering, and
+  rollback rules are specified in
+  [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md).
+  The representative command is backend-orchestrated because download,
+  checksum, backup, service lifecycle, health, and rollback are one fixed
+  transaction rather than one faithful argv. Migration `0073` is intentionally
+  irreversible: its reverse raises before any catalog inspection or mutation,
+  so operator replacement, rename, or references cannot produce a falsely
+  unapplied migration with deleted, surviving, or orphaned rows. Removal or
+  repair requires a reviewed forward migration with explicit ownership
+  evidence.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve
@@ -1298,23 +1746,107 @@ be used autonomously on destructive procedures.
 
 ## CI / Testing
 
+> **The pure-domain tier is blind to every database constraint.** Seed-migration tests
+> here drive fake managers (plain dicts), so they enforce no column width, no NOT NULL,
+> no uniqueness, and no FK integrity. A seeded value that violates one passes locally
+> and fails only when a real database applies the migration — which means CI at best,
+> and the production deploy at worst, since the plugin auto-deploys on merge to `main`
+> and runs migrations via `ExecStartPre`. This is not theoretical: a 291-character
+> seeded `description` shipped through a green pure-domain suite and failed the
+> DB-backed compatibility job with
+> `DataError: value too long for type character varying(255)`. When adding a seed,
+> assert field lengths against the model explicitly (see
+> `tests/test_influxdb3_debian13_procedures.py::test_seeded_descriptions_fit_the_model_column`,
+> which reads `max_length` out of `models.py`).
+>
+> **Never delete through a historical model in a data migration.** `Model.delete()` and
+> `QuerySet.delete()` both run Django's deletion collector, which walks related models —
+> and a related model whose app has no migrations is rendered from the *real* app
+> registry rather than from the migration state. The collector then filters that real
+> model by a historical instance and Django raises
+> `ValueError: Cannot query "<Model> object (N)": Must be "<Model>" instance`. This
+> failed the NetBox 4.5.8 compatibility job, which migrates backwards past a seed with
+> its rows present. Prefer `queryset.update(enabled=False)` in a reverse: it touches one
+> table, never invokes the collector, and never destroys audited history.
+
 Two tiers (see `docs/architecture.md` → Testing):
 
 1. **Pure-domain unit tests** (`tests/`, `pytest`) — stub Django/NetBox, no
    database. `.gitea/workflows/ci.yml` runs `py_compile` + `pytest tests/ -q` on
-   the `mirror-host` runner; the portable `.github/workflows/test.yml` `unit` job
-   mirrors it. Cover the domain logic (projection fold/rebuild, typed events,
-   aggregate invariants, value objects, queries, normalization). Add new
-   domain/CQRS logic here. Use `monkeypatch`/`SimpleNamespace` stubs as in
+   the sole scalar runner label `ci-untrusted-python312`; it must queue rather
+   than fall back to a mirror, production-deploy, generic self-hosted, or hosted
+   runner when that label is unavailable. Checkout is pinned by full action SHA,
+   uses the triggering commit SHA, and does not persist credentials. The runner
+   must pre-provision exact CPython 3.12.14 at `/usr/local/bin/python3.12` and
+   uv 0.12.5 at `/usr/local/bin/uv`; the workflow verifies those fixed
+   executables and never selects them through ambient `PATH`, downloads, or
+   bootstraps a toolchain. Dependencies, including the exact build backend used
+   by the wheel regression, come only
+   from `.gitea/ci-requirements.lock`, the canonical CPython 3.12 / x86_64 glibc
+   2.34 wheel closure, installed with hashes, wheel-only resolution, an empty
+   inherited environment, no uv config/project sources/cache, and
+   `UV_PYTHON_DOWNLOADS=never`. Syntax and tests likewise run through `env -i`
+   with Python isolated mode (`-I`) and user-site disabled. Pytest runs with a
+   reviewed, hashed `.gitea/pytest-ci.ini`, empty `PYTEST_ADDOPTS`, disabled
+   plugin autoload, and only the explicitly loaded locked `pytest-asyncio`
+   plugin, so ambient/candidate Python paths, plugins, or project options cannot
+   turn execution into a collect-only or deselected false green.
+   `tests/test_ci_workflow_security.py`
+   parses YAML with duplicate/alias/flow constructs rejected and mutation-tests
+   the complete fail-closed contract. `tests/test_deploy_manifest_contract.py`
+   checks the canonical generated files, builds the wheel with that locked
+   backend, and requires the manifest's migration/static paths and SHA-256
+   digests to equal the exact archive; its hostile stale-manifest mutation must
+   fail. Renew this gate whenever a migration or static file changes.
+   Provisioning the dedicated runner is an
+   external workspace prerequisite; an offline runner means ordinary CI remains
+   queued, not rerouted. These candidate-side files are defense in depth, not
+   runner authority: the Gitea repository/organization runner policy must make
+   mirror and production-capable runners ineligible for pull-request jobs and
+   allow this workflow to match only the isolated label. Ordinary CI remains
+   blocked/queued until that trusted platform policy is proven. The portable
+   `.github/workflows/test.yml` `unit` job mirrors the test scope. Cover the
+   domain logic (projection fold/rebuild, typed events, aggregate invariants,
+   value objects, queries, normalization). Add new domain/CQRS logic here. Use
+   `monkeypatch`/`SimpleNamespace` stubs as in
    `tests/test_jobs_systemd_normalization.py`.
 
 2. **DB-backed integration tests** (`netbox_rpc/tests/`, `manage.py test
    netbox_rpc`) — a real NetBox + PostgreSQL test database. Cover `event_store`,
    the rebuild oracle, the append-only ledger, the command handlers, and the
-   command-only REST API. `.gitea/workflows/integration.yml` runs them against
-   the self-hosted NetBox; `.github/workflows/test.yml` `integration` job runs
-   them portably with a Postgres service against NetBox 4.5.8 and 4.6.5.
+   command-only REST API. The required canonical Gitea pull-request gate needs
+   an externally provisioned isolated untrusted runner, disposable digest-pinned
+   PostgreSQL/Redis, and an exact hash-locked NetBox 4.5.8/4.6.5 dependency
+   closure; it remains blocked until that trusted platform contract exists.
+   The GitHub `.github/workflows/test.yml` matrix is supplementary post-mirror
+   evidence, not canonical pre-merge evidence. The privileged
+   `.gitea/workflows/integration.yml` is an operator-requested,
+   canonical-`main`-only, manual non-gating diagnostic: it must never gain a
+   PR/push trigger or count as branch-protection evidence. Its candidate-visible
+   ref guard is defense in depth; trusted Gitea runner/ref eligibility remains
+   authoritative.
    Config: `tests/ci/netbox_configuration.py`.
+
+   **The Gitea integration workflow must stay serialised on a repo-wide
+   concurrency group, and must not double-trigger.** Its compatibility matrix
+   provisions **fixed-name** databases (`test_netbox_compat_458` / `_465`) and
+   **fixed** Redis DB indexes on the runner host, so the contended resource is
+   the *host*, not the ref. Two mistakes to avoid, both of which were live
+   defects:
+   - Keying `concurrency.group` on `github.ref`. A branch push
+     (`refs/heads/<branch>`) and its pull request (`refs/pull/<n>/head`) are
+     different refs, so they landed in different groups, never cancelled each
+     other, and raced — `database "test_netbox_compat_458" is being accessed by
+     other users`, then `already exists`. Pull-ref runs passed **1 time in 8**
+     while `main` stayed green, because a `main` push has no paired PR ref.
+   - Leaving `on: push` unscoped, which triggered that second run in the first
+     place. `push` is restricted to `main`; `pull_request` already covers every
+     branch, on the ref a reviewer actually gates on.
+
+   `cancel-in-progress` is deliberately **false**: this is a gate, not a
+   preview, so a newer run waits its turn instead of killing a `main` gate that
+   is mid-flight. If the matrix is ever given run-scoped database names and
+   Redis indexes, the serialisation can be relaxed — not before.
 
 Tests must never connect to real Linux hosts, containers, VMs, or Huawei OLTs;
 the integration tests mock the RQ enqueue and the backend dispatch.
@@ -1350,6 +1882,105 @@ Proxmox/Proxbox data and lifecycle) — never ad-hoc `ssh`/`pvesh`/`qm` or direc
 NetBox/Proxmox API calls. This mirrors the estate-wide policy in
 `/root/personal-context/CLAUDE.md`.
 
+## OpenBao Procedure Catalogue (`service.openbao.1.*`)
+
+Twenty-two OpenBao procedures are seeded (migrations `0077` allowlist, `0078`
+procedures + command rows), targeting **`dcim.device` only**. The paired
+backend's strict OpenBao credential lookup currently rejects VM identities;
+`virtualization.virtualmachine` must not be advertised until the backend has an
+equivalent identity-checked VM credential resolver. Their handlers live in `netbox-rpc-backend`
+(`rpc/openbao_handlers.py`), registered as `service.openbao_1.<op>` — the usual
+dotted-catalogue-name / underscored-handler-id convention.
+
+The seeded subset is ten reads (`inspect`, `seal_status`, `health`,
+`policies_list`, `auth_list`, `secrets_list`, `audit_list`, `raft_list_peers`,
+`raft_autopilot_state`, `snapshots_list`), five writes (`auth_enable`,
+`secrets_enable`, `audit_enable`, `snapshot_create`, `service_action`), and
+seven destructive procedures (`seal`, `step_down`, `raft_remove_peer`,
+`policy_delete`, `auth_disable`, `secrets_disable`, `audit_disable`).
+
+Migration `0077` also adds an `RPCLinuxServiceAllowlist` row
+(`openbao` → `openbao.service`), which makes the **existing** generic
+`os.linux.ubuntu.24.*_service` and `journal_tail` procedures work against an
+OpenBao host with no new procedure, normalizer, or handler — the same mechanism
+as the `netbox` / `netbox-rq` rows in `0058`. The OpenBao-specific
+`service_action` mixes restart with the generic catalogue's approval-gated
+start/stop/reload/enable/disable actions, so the whole procedure is
+`approval_required=True`; an execute-only caller cannot use it to stop or
+disable `openbao.service`.
+
+Both seed migrations fail forward on a pre-existing canonical procedure name or
+allowlist slug instead of adopting operator-owned state. Both are explicitly
+irreversible: after use, `RPCExecution.procedure` protects catalogue history,
+and neither migration has a durable ownership ledger that could safely restore
+or delete an operator-edited row. Removal or repair requires a reviewed forward
+migration.
+
+### Eight procedures are deliberately NOT seeded
+
+`config_deploy`, `rekey`, `config_read`, `policy_read`, `initialize`, `unseal`,
+and `snapshot_restore` each carry an unresolved defect in the execution backend:
+ownership loss on activation,
+commit-before-durable-capture, a digest that verifies a low-entropy credential
+offline, a truncated share retained below its pattern's length floor, a writable
+parent allowing the initialisation output to be replaced, and missing
+accept-once dispatch respectively. `policy_write` is the eighth withheld
+procedure. It was the only seeded procedure accepting free-form text, where
+shape detection cannot guarantee that encoded, split, or homoglyph-obscured
+secrets will never be persisted without also rejecting legitimate content.
+Withholding it means no seeded procedure accepts free-form text, making the
+no-secret-persistence guarantee structural rather than signature-dependent.
+The replacement free-form content design and the other backend defects are
+tracked in `netbox-rpc-backend` **#80**.
+
+**Withholding the row is the control.** `RPCExecution` has a foreign key to
+`RPCProcedure`, and the backend executes only what this plugin dispatches, so a
+handler with no row cannot be invoked through the sanctioned path.
+`tests/test_openbao_catalog.py` asserts all eight stay absent, so a later
+migration cannot reintroduce one before #80 closes.
+
+State the limit honestly: this is an operational hold, not a code-level lock. An
+operator holding `add_rpcprocedure` could hand-create a row pointing at one of
+them. That is an explicit, audited act rather than ambient exposure — but it is
+not impossible.
+
+### This plugin is the primary control for connection overrides
+
+OpenBao `params_schema` rows declare **no** `rpc_ssh_*` property and set
+`"additionalProperties": false`, and the normalizer emits none. **This
+deliberately differs from the InfluxDB precedent**, which merges shared
+`_SSH_PROPERTIES` into every schema — do not "restore consistency" by copying
+that here.
+
+The reason is ordering: caller-supplied host-key entries were the vector for two
+separate key-material bypasses in the backend, and the backend refuses them now
+— but this plugin persists `RPCExecution.params` **before** the backend ever
+validates them. So the backend's refusal is layer two; declining to declare the
+fields here is the layer that actually prevents persistence. Estate-wide
+enforcement for every other procedure family is tracked in **#253**.
+
+`openbao_validation.validate_openbao_params_for_persistence()` is the primary
+secret-ingress control. `create_execution()` runs it after schema validation and
+all platform-owned parameter stamps, immediately before `serializer.save()`, for
+every `service.openbao.1.*` procedure. `RPCExecution.save()` repeats it over the
+final ORM payload for direct script/job creation and params-save paths. All nested
+dictionary keys and values are
+classified by field name and by secret shape (OpenBao token prefixes, long
+base64, long hex, private keys, authorization material, and credential-bearing
+URLs). Accepted JSON documents are parsed and their decoded keys/values are
+walked; HCL-style quoted strings are lexically decoded before assignment
+classification, and escaped assignment identifiers are refused. This closes
+escaped-name routes such as a JSON `pass\u0077ord` key before any raw value can
+enter `RPCExecution.params`. The scanner returns immediately for non-OpenBao
+procedures. For top-level schema-declared identifier fields (`policy_name`,
+`mount_path`, `peer_id`, `snapshot_name`), length plus the base64 alphabet is not
+sufficient evidence: low-entropy operational identifiers up to the advertised
+128-character limit are accepted, while provider tokens, high-entropy
+base64/base64url, and long hex remain refused. Every scanned string is capped
+at 1 MiB of **UTF-8 bytes** before the more expensive classifiers run. The
+seeded schemas impose much narrower typed and enum-constrained limits; none
+accepts free-form text.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in
@@ -1370,18 +2001,86 @@ normalizer, executions will fail at runtime with
 execution pipeline. **Never encode the driver inside `handler_id`** — it is its
 own model data:
 
-- `transport_driver` — the single default driver: `asyncssh` (default),
-  `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or `scrapli`, `netmiko`,
-  `napalm`, `nornir` (network CLI). AsyncSSH reproduces the legacy
-  single-/multi-command SSH behaviour.
+- `transport_driver` — the procedure's own driver: `ansible` (**default**),
+  `asyncssh`, `paramiko`, `subprocess`, `fabric` (Linux/server SSH) or
+  `ansible-network`, `scrapli`, `netmiko`, `napalm`, `nornir` (network CLI).
+  AsyncSSH reproduces the legacy single-/multi-command SSH behaviour. The
+  vocabulary and the driver → backend-capability map live in
+  **`netbox_rpc/transport.py`**, not on the model, so the chain resolver shares
+  one source of truth with the model's choices and stays importable (and
+  testable) without Django. They mirror the capability each driver declares in
+  netbox-rpc-backend's `drivers/` registry — a **cross-repo contract**, since
+  the backend only falls back to a capability-matching driver.
 - `transport_driver_chain` — an ordered **priority + fallback chain** of the
   same driver names (index 0 tried first), configured on the `RPCProcedure`
-  page. `_apply_driver_pipeline_overrides()` injects it into
-  `normalized_params["transport_driver_chain"]` (and `command_fingerprint`)
-  **only when non-empty**, so legacy procedures keep a byte-for-byte identical
-  payload. The `netbox-rpc-backend` executor tries the drivers in order, skips
+  page. The `netbox-rpc-backend` executor tries the drivers in order, skips
   capability-mismatched entries, advances on an unavailable/connection error,
   and stops on a command-level result.
+- `transport_pinned` — excludes a procedure from the estate-wide policy below.
+- **Estate-wide Ansible-first policy (`RpcPluginSettings`).**
+  `default_transport_driver_chain` / `default_network_driver_chain` (seeded
+  `["ansible"]` / `["ansible-network"]` by migration `0075`) make Ansible the
+  default *way* to reach devices and VMs without rewriting a single procedure
+  row. `domain.normalization.resolve_driver_chain()` resolves the effective
+  chain at dispatch time, most specific first:
+
+  1. the procedure's own `transport_driver_chain` — operator intent, verbatim;
+  2. the settings default for the driver's capability, with the procedure's own
+     `transport_driver` **appended** as its fallback;
+  3. nothing — the backend uses the single `transport_driver`, then its own
+     built-in capability default.
+
+  Because it is a setting rather than a migration rewrite, **rollback is one
+  edit**: clearing the two chains restores raw-driver behaviour estate-wide with
+  no migration to undo and no per-procedure values lost.
+
+  **A chain of only Ansible drivers automatically gains the capability's raw
+  driver** (`asyncssh` / `scrapli`). Without that, making Ansible the default
+  would turn an optional dependency into a hard one — a host without
+  `ansible-core` would fail outright instead of degrading.
+
+  **`transport_pinned` procedures never reach step 2.** Two are pinned by
+  migration `0075`, and both must stay that way:
+
+  - `service.netbox.staging.rotate_backend_token` — dispatches with
+    `allow_fallback=False`, `capture_output=False`, `strict_auth=True`. The
+    backend defines its boundary as *successful AsyncSSH process creation*, and
+    `strict_auth` maps to AsyncSSH options (including trivial-auth rejection)
+    that OpenSSH has no equivalent of. The backend's Ansible driver **refuses**
+    `strict_auth` for exactly this reason, so an unpinned row would fail loudly
+    rather than weaken silently — but a refused driver is still a broken
+    procedure, and `allow_fallback=False` leaves no second chance.
+  - `os.linux.ubuntu.24.upgrade_26.run_upgrade` (live) —
+    `allow_fallback=params.dry_run`, so a live upgrade must never be
+    redispatched onto a second driver, and it streams the upgrade's terminal
+    output live, which the Ansible driver cannot provide incrementally.
+
+  The pin is a **declared property**, not a name list consulted at dispatch, so
+  a future procedure with the same requirement opts out by setting the flag.
+  Neither pinned procedure's normalized payload changes, so their approval
+  snapshots and policy hashes are unaffected.
+- **`normalized_params["_ansible"]` — NetBox Platform → Ansible connection.**
+  The execution backend has no view of what a target *is* (its SSH credential
+  carries no platform), so when the resolved chain contains an Ansible driver,
+  `_apply_ansible_context()` resolves the target device's NetBox Platform
+  through `RpcPluginSettings.ansible_platform_map` and injects
+  `{connection, network_os, become, become_method}`. The map follows the
+  official `netbox.netbox` collection's conventions and is operator-editable, so
+  the extractor drops unrecognised keys and **never raises** — an unmapped
+  platform, a malformed map, or a malformed entry all inject nothing, and the
+  backend then reports its network driver unavailable and falls back to a raw
+  driver rather than guessing a vendor CLI dialect.
+
+  Injection is **gated on the resolved chain containing an Ansible driver**, so
+  every non-Ansible procedure keeps a byte-for-byte identical
+  `normalized_params` payload — the same discipline the other pipeline overrides
+  follow.
+
+  Note: `_DEFAULT_TRANSPORT_DRIVER` in `domain/normalization.py` is still
+  `"asyncssh"` even though the *model* default is now `"ansible"`. It means "the
+  driver the backend assumes when the key is absent from the payload", which is
+  a property of netbox-rpc-backend, not of this model. Changing it to match the
+  model default would make every asyncssh procedure stop pinning its driver.
 - `output_parser` — `none` (default, raw), `auto` (native JSON/XML → jc →
   TextFSM → TTP → Genie → regex chain), or a pinned backend (`json`, `xml`,
   `jc`, `textfsm`, `ttp`, `genie`, `regex`).
@@ -1455,6 +2154,18 @@ from `approval_required=True` to `False` unless the user has
   reconciled by forward migration `0034_decouple_netbox_nms_fk_constraints`,
   which drops only stale PostgreSQL foreign-key constraints and preserves the
   populated integer columns and indexes.
+- A reverse data migration must not pass a historical model instance into a
+  deletion collector that can see current-plugin reverse relations. Migration
+  `0073` is deliberately irreversible because it has no durable row-ownership
+  ledger: its reverse raises before inspection or mutation, preventing an
+  operator replacement, rename, or reference from being deleted or left while
+  the migration is recorded unapplied. Use a reviewed forward repair migration
+  when catalog ownership cannot be proven durably.
+- To test the reverse callable of an older migration below an irreversible
+  migration, obtain that migration's historical project state and invoke its
+  actual `RunPython.reverse_code` directly inside an isolated database test.
+  Do not downgrade the complete graph through the later irreversible boundary;
+  that tests the boundary instead of the older reverse behavior.
 
 ## Event Sequence Integrity
 
