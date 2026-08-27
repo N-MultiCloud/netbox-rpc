@@ -62,6 +62,12 @@ command behavior changes.
 > disabled and accepts no caller parameters; see
 > `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
 > signed-lease, activation, and rollback contract.
+> `service.gitea.runner.register` has the same autonomous-action prohibition.
+> It is seeded and code-gated disabled, accepts only an exact lifecycle
+> operation plus reviewed scope, binds runner VM 399 and Gitea VM 170, and
+> never exposes the reusable registration token. Its durable fence,
+> expected-token rotation/reconciliation, and activation order are mandatory; see
+> `docs/gitea-runner-registration.md`.
 
 @AGENTS.md
 

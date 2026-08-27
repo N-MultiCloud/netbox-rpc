@@ -99,6 +99,11 @@ EXEMPT_HANDLER_RATIONALE = {
         "validation, official artifact verification, backup, service lifecycle, "
         "health checks, and safe rollback cannot be represented as one fixed argv."
     ),
+    "service.gitea.runner.register": (
+        "Runs a backend-owned two-target transaction that obtains a fixed-scope "
+        "bootstrap token on Gitea and consumes it immediately on the isolated "
+        "runner without exposing token material to the RPC contract."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

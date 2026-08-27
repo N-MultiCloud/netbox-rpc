@@ -900,6 +900,101 @@ class RPCExecution(NetBoxModel):
         return steps if isinstance(steps, list) else []
 
 
+class RPCGiteaRunnerScopeFence(NetBoxModel):
+    """Durable conflict fence for one reusable Gitea registration token scope."""
+
+    STATE_CLEAR = "clear"
+    STATE_PENDING = "pending"
+    STATE_BLOCKED = "blocked"
+    STATE_CHOICES = (
+        (STATE_CLEAR, "Clear"),
+        (STATE_PENDING, "Pending token acquisition"),
+        (STATE_BLOCKED, "Reset reconciliation required"),
+    )
+
+    canonical_scope = models.CharField(max_length=200, unique=True)
+    state = models.CharField(
+        max_length=16,
+        choices=STATE_CHOICES,
+        default=STATE_CLEAR,
+    )
+    blocking_execution = models.ForeignKey(
+        RPCExecution,
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    reconciliation_execution = models.ForeignKey(
+        RPCExecution,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    expected_token_sha256 = models.CharField(max_length=64, blank=True)
+    last_reset_state = models.CharField(max_length=64, blank=True)
+    last_prior_token_id = models.PositiveBigIntegerField(null=True, blank=True)
+    last_replacement_token_id = models.PositiveBigIntegerField(null=True, blank=True)
+    last_prior_active_sha256 = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("canonical_scope",)
+        constraints = (
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        state="clear",
+                        blocking_execution__isnull=True,
+                        expected_token_sha256="",
+                    )
+                    | models.Q(
+                        state__in=("pending", "blocked"),
+                        blocking_execution__isnull=False,
+                    )
+                ),
+                name="netbox_rpc_gitea_scope_fence_state_consistent",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(reconciliation_execution__isnull=True)
+                    | models.Q(state="blocked")
+                ),
+                name="netbox_rpc_gitea_scope_fence_reconcile_consistent",
+            ),
+        )
+        verbose_name = "RPC Gitea Runner Scope Fence"
+        verbose_name_plural = "RPC Gitea Runner Scope Fences"
+
+    def __str__(self) -> str:
+        return f"{self.canonical_scope}:{self.state}"
+
+    def clean(self) -> None:
+        super().clean()
+        digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+        errors: dict[str, str] = {}
+        if self.state == self.STATE_CLEAR:
+            if self.blocking_execution_id is not None:
+                errors["blocking_execution"] = (
+                    "A clear Gitea runner scope cannot retain a blocking execution."
+                )
+            if self.expected_token_sha256:
+                errors["expected_token_sha256"] = (
+                    "A clear Gitea runner scope cannot retain an expected token digest."
+                )
+        elif self.blocking_execution_id is None:
+            errors["blocking_execution"] = (
+                "A pending or blocked Gitea runner scope requires its execution."
+            )
+        for field_name in ("expected_token_sha256", "last_prior_active_sha256"):
+            value = str(getattr(self, field_name, "") or "")
+            if value and digest_pattern.fullmatch(value) is None:
+                errors[field_name] = "Enter one lowercase SHA-256 digest."
+        if errors:
+            raise ValidationError(errors)
+
+
 class RPCExecutionEvent(NetBoxModel):
     LEVEL_DEBUG = "debug"
     LEVEL_INFO = "info"

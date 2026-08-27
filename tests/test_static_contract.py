@@ -15,10 +15,7 @@ def load_constants() -> dict:
 
 def test_execution_params_have_no_post_creation_mutation_path() -> None:
     def is_params_attribute(target: ast.AST) -> bool:
-        return (
-            isinstance(target, ast.Attribute)
-            and target.attr == "params"
-        ) or (
+        return (isinstance(target, ast.Attribute) and target.attr == "params") or (
             isinstance(target, ast.Subscript)
             and isinstance(target.value, ast.Attribute)
             and target.value.attr == "params"
@@ -59,7 +56,7 @@ def test_execution_params_have_no_post_creation_mutation_path() -> None:
     models = read("netbox_rpc/models.py")
     handler = read("netbox_rpc/application/command_handlers.py")
     migration = read("netbox_rpc/migrations/0079_rpcexecution_source_intent.py")
-    assert 'source_intent = models.ForeignKey(' in models
+    assert "source_intent = models.ForeignKey(" in models
     assert "validate_openbao_params_for_persistence(" in models
     assert "source_intent=source_intent" in handler
     assert '("netbox_rpc", "0078_seed_openbao_procedures")' in migration
@@ -1030,9 +1027,7 @@ def test_intent_is_reference_data_not_event_sourced() -> None:
 
 def test_intent_sequence_has_min_validator_and_check_constraint() -> None:
     models = read("netbox_rpc/models.py")
-    migration = read(
-        "netbox_rpc/migrations/0040_rpcintentprocedure_sequence_min.py"
-    )
+    migration = read("netbox_rpc/migrations/0040_rpcintentprocedure_sequence_min.py")
     assert "MinValueValidator(1)" in models
     assert "netbox_rpc_intentprocedure_sequence_gte_1" in models
     assert "condition=models.Q(sequence__gte=1)" in models
@@ -1091,7 +1086,7 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    assert len(extras_dependencies) == 5
+    assert len(extras_dependencies) == 6
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
@@ -1103,6 +1098,8 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
         # remains an ancestor of the 4.6 migration graph.
         assert "0134_owner" in migration_sources[name]
+
+
 def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
     # The migration graph uses extras.0134 because it is present in both
     # NetBox 4.5.8 and 4.6.x. Do not move these anchors back to 4.6-only

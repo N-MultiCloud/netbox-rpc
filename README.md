@@ -188,6 +188,32 @@ The procedure catalog is intentionally narrow:
   migration with explicit ownership evidence. See
   [`docs/gitea-production-upgrade-1.27.1.md`](docs/gitea-production-upgrade-1.27.1.md)
   for activation order, exact states, security, and rollback invariants.
+- `service.gitea.runner.register` — disabled-by-default, destructive,
+  two-person registration or reconciliation of one of eight exact
+  isolated-runner scopes on `nmultifibra-ci-untrusted-01`, VM PK 399. It
+  accepts only `operation` (`register` or `reconcile`) plus the allowlisted
+  `scope`; callers cannot supply the token, label, host, credential, command,
+  path, or backend. Aliases share a canonical, migration-seeded durable scope
+  fence, so no second registration or reconciliation can race an unresolved
+  token lifecycle. Reconciliation requires a terminal blocked execution or a
+  stale `pending` worker reservation plus a 360-second remote-quiescence window.
+  Under the fence lock, stale-`pending` takeover first terminalizes the lost
+  execution, moves the fence to `blocked`, and records the reconciliation owner;
+  that ownership rejects every late original transition. The server freezes separate target-owned SSH
+  service/credential identity snapshots for runner VM 399 and Gitea VM 170,
+  and the backend revalidates both at point of use. It verifies the reviewed
+  native runner and Gitea reset-helper digests, obtains the reusable scope token
+  with fixed argv, forwards it only over bounded stdin, and always attempts an
+  expected-token rotation before returning. Tokens and remote output never
+  enter params, argv, environment, events, logs, or results. Closed results
+  bind the non-secret reset proof to the fence; uncertainty blocks later
+  registration until a separately approved, quiescence-gated `reconcile`
+  succeeds. Migrations
+  `0080`/`0081`, a false code gate, and a false backend gate keep it inert until
+  the exact host generation,
+  `netbox-network` credential-identity API, signed lease, and scheduling-domain
+  isolation are deployed together. See
+  [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -1214,7 +1240,8 @@ guards before an execution record is created and the RQ job is enqueued:
 1. **Enabled** — disabled procedures are rejected (HTTP 400).
 2. **Approval** — legacy procedures with `approval_required=True` require the
    caller to hold `netbox_rpc.approve_rpcprocedure`. Protected staging-token
-   rotation and production Gitea upgrade procedures instead record
+   rotation, production Gitea upgrade, and isolated-runner registration
+   procedures instead record
    `requested → pending_approval` without enqueueing; only a distinct actor
    with that permission may record
    `approved → queued` and enqueue it.

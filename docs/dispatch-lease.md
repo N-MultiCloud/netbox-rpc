@@ -117,6 +117,16 @@ cross-repo contract.
   backend diagnostic fields are discarded before event persistence; catalog
   failure diagnostics are fixed by the validated closed result tuple.
 
+  `service.gitea.runner.register` also requires the mandatory lease. Its
+  approval snapshot and lease bind runner VM 399, Gitea VM 170, both exact
+  target-owned SSH service/credential identity snapshots, the allowlisted
+  operation/scope, canonical durable fence snapshot, reviewed runner/reset
+  helper digests, fixed token/helper argv, runtime ceilings, and the closed
+  semantic capability hash. It is seeded and code-gated disabled; deploy the
+  matching backend capability and host generation before opening either gate.
+  Any result that cannot prove expected-token invalidation leaves the fence
+  blocked until a separately approved reconciliation succeeds.
+
 ## Operations
 
 Configure signing keys in `PLUGINS_CONFIG["netbox_rpc"]`:

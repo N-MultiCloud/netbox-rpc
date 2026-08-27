@@ -229,7 +229,8 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
 - `create_execution(...)` checks execute permission, enabled state, approval
   policy, and JSON schema. Ordinary procedures emit `ExecutionQueued`, enqueue
   the RQ job, and emit `JobEnqueued` or `ExecutionEnqueueFailed`. Protected
-  staging-token rotation and production Gitea upgrade procedures emit
+  staging-token rotation, production Gitea upgrade, and isolated-runner
+  registration procedures emit
   `ExecutionRequested` then `ApprovalRequested` and return
   `pending_approval` without enqueueing;
 - `run_execution(execution)` starts the aggregate, resolves the backend,
@@ -254,9 +255,10 @@ objectless `user.has_perm(...)` admission checks do not preserve a concrete
 procedure constraint; completing general object-scoped two-person enforcement
 remains work under epic #163.
 
-Issues #221 and #224 deliberately activate the full existing approval
+Issues #221, #224, and #235 deliberately activate the full existing approval
 foundation for `service.netbox.staging.rotate_backend_token` and
-`service.gitea.production.upgrade_1_27_1` only:
+`service.gitea.production.upgrade_1_27_1`, plus the disabled
+`service.gitea.runner.register`, only:
 
 - creation needs execute permission scoped to this exact procedure but cannot
   be self-approved inline; it records an immutable snapshot and
@@ -274,16 +276,16 @@ foundation for `service.netbox.staging.rotate_backend_token` and
 - the `ExecutionApproved` projection persists `approved_by`; requester and
   approver IDs are read-only execution API fields and signed lease claims;
 - admission, approval, worker claim, and pre-lease checks require the exact
-  enabled name, handler, version, device target, destructive effect,
-  1800-second timeout, approval bit, transport/output pipeline, representative
-  command hash, and params/result schemas. The snapshot also binds the
+  enabled name, handler, version, exact target, destructive effect,
+  procedure-specific timeout, approval bit, transport/output pipeline,
+  representative command hash, and params/result schemas. The snapshot also binds the
   concrete backend ID and a non-secret URL/TLS identity fingerprint. They also
   require non-null distinct actors and revalidate the approval snapshot. Each
   authenticated capability probe validates the protected target first and the
   same resolved target is reused for snapshot, lease, and dispatch;
 - approval and rejection accept no caller reason for this procedure; their
   durable event uses a fixed bounded audit phrase;
-- both protected procedures require a signed one-time lease. Missing signing-key
+- all protected procedures require a signed one-time lease. Missing signing-key
   configuration fails with `RPC_DISPATCH_LEASE_REQUIRED` before the backend is
   contacted; ordinary procedures retain the backwards-compatible ID-only
   fallback.
@@ -309,6 +311,24 @@ backend-semantic drift invalidates requested, pending, approved, and queued
 work before enqueue or lease issuance. The lease's existing `contract_hash`
 binds those semantics without duplicating them in caller-controlled params or
 a new wire claim.
+
+Runner registration/reconciliation pins runner VM 399 and Gitea VM 170
+independently, plus
+both target-owned SSH service/credential identity snapshots, one allowlisted
+operation and scope, both reviewed helper digests, fixed token/helper argv,
+runtime ceilings, and the complete normalized/fingerprint/result schemas. The
+reusable token is never projected or emitted. A canonical durable database
+fence is reserved immediately before dispatch. The backend always attempts an
+expected-token rotation after acquisition; only its exact non-secret proof or
+a definitive pre-token failure clears the fence atomically with the terminal
+event. Uncertainty blocks registration until a distinctly approved
+`reconcile` passes the terminal-owner and 360-second remote-quiescence checks.
+A stale `pending` worker reservation is recovered under both row locks by
+terminalizing the original execution and moving the fence to `blocked` before
+ownership is recorded. Reconciliation then rotates the current token and
+returns a digest-bound proof. Late original transitions cannot clear a
+reconciliation-owned fence. See
+[`gitea-runner-registration.md`](gitea-runner-registration.md).
 
 `RPCApprovalRequest.expires_at` remains unenforced and general procedures are
 not implicitly migrated by this scoped change. See `AGENTS.md` § "Two-person
