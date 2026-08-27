@@ -283,6 +283,33 @@ def _call_backend(
         else None
     )
     is_secret_protected = is_gitea_upgrade or is_gitea_runner
+    # The org CI runner provisioning procedure resolves a vaulted registration
+    # token, so its backend response must be handled on the secret-protected
+    # path -- redirect-free, byte-bounded, reduced to a closed envelope with
+    # backend diagnostics discarded, exactly as the two procedures above are.
+    # That closed envelope does not exist yet; it belongs with the paired
+    # netbox-rpc-backend handler, which is out of scope here.
+    #
+    # Until then, refuse to dispatch rather than fall through to the GENERIC
+    # path, which follows redirects, calls unbounded resp.json(), and copies
+    # backend-controlled diagnostics (error_message, error, warnings,
+    # container_state, service_state) into the event ledger. An opaque
+    # registration credential in any of those fields is not recognised by the
+    # regex redactor and would reach the audit log.
+    #
+    # The catalog row is seeded disabled and _GITEA_ORG_CI_RUNNER_AVAILABLE is
+    # False, so this is unreachable today; it is here so that opening those
+    # gates alone cannot silently expose the leak path. See netbox-rpc #280.
+    if (
+        str(getattr(execution.procedure, "name", "") or "")
+        == "service.gitea.actions_runner.provision_org_ci_runner"
+    ):
+        raise RPCExecutionError(
+            "service.gitea.actions_runner.provision_org_ci_runner has no "
+            "secret-protected backend transport yet; it must not be dispatched "
+            "through the generic response path.",
+            code="RPC_PROCEDURE_NOT_AVAILABLE",
+        )
     runner_response_deadline: float | None = None
     request_kwargs: dict[str, Any] = {
         "headers": target.headers,

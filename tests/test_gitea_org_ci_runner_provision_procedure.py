@@ -784,31 +784,84 @@ def test_docs_attribute_this_procedure_to_migration_0084() -> None:
             )
 
 
-def test_contract_binds_the_seeded_transport_pin(migration) -> None:
-    """A live row edit to transport_pinned=False must not pass policy checks.
+def test_transport_pin_is_extracted_from_the_live_row_not_the_contract(
+    migration,
+) -> None:
+    """Guard the exact regression that a constant-comparison test would miss.
 
-    Migration 0084 is the only protected-procedure seed that sets
-    transport_pinned=True. If the immutable contract does not also bind it, the
-    pin is advertised but unenforced: flipping the row to False would pass
-    admission, approval, capability, and worker checks, after which an
-    estate-wide default driver chain could select a transport other than the
-    reviewed AsyncSSH one.
+    The point of binding `transport_pinned` is drift detection: the extracted
+    policy must read the LIVE row so that a row edited to False no longer
+    matches the contract. If `_protected_procedure_policy()` were changed to
+    `policy["transport_pinned"] = contract.TRANSPORT_PINNED`, the two sides
+    would agree unconditionally, drift detection would be silently gone, and a
+    test that only compares migration and contract constants would still pass.
+
+    This is asserted at source level because `command_handlers` pulls in the
+    full NetBox/DRF stack, which this module deliberately does not load. The
+    executable end-to-end variant (build a procedure, flip only the live value,
+    assert `_require_protected_procedure_policy()` raises) belongs in
+    `netbox_rpc/tests/`, which runs under a real NetBox environment in CI.
     """
 
+    import ast
+
+    source = (ROOT / "netbox_rpc/application/command_handlers.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_protected_procedure_policy"
+    )
+    body = ast.get_source_segment(source, func) or ""
+
+    assert "transport_pinned" in body, (
+        "_protected_procedure_policy() no longer mentions transport_pinned; the "
+        "pin is unenforced again."
+    )
+    # it must read the live row...
+    assert 'getattr(procedure, "transport_pinned"' in body, (
+        "transport_pinned must be read from the live procedure row, otherwise "
+        "the extracted policy can never disagree with the contract and drift "
+        "detection is gone."
+    )
+    # ...and must NOT source the value from the contract, which would make the
+    # comparison unconditionally true.
+    assert "contract.TRANSPORT_PINNED" not in body, (
+        "transport_pinned must not be sourced from the contract inside the "
+        "extractor; that makes the policy comparison vacuous."
+    )
+
+    # and the two sides that are compared must genuinely start out equal
     from netbox_rpc import gitea_org_ci_runner_contract as contract
 
-    assert migration._PROCEDURE_DEFAULTS["transport_pinned"] is True
     assert contract.TRANSPORT_PINNED is True
     assert contract.PROCEDURE_POLICY["transport_pinned"] is True
-    # the bound value must agree with what the migration actually seeds
-    assert (
-        contract.PROCEDURE_POLICY["transport_pinned"]
-        == migration._PROCEDURE_DEFAULTS["transport_pinned"]
+    assert migration._PROCEDURE_DEFAULTS["transport_pinned"] is True
+
+
+def test_org_ci_runner_dispatch_fails_closed_without_protected_transport() -> None:
+    """The generic backend response path must be unreachable for this procedure.
+
+    `_call_backend()` classifies only the production upgrade and the existing
+    runner registration as secret-protected. On the generic path it follows
+    redirects, calls unbounded `resp.json()`, and copies backend-controlled
+    diagnostics into the event ledger -- where an opaque registration credential
+    would not be recognised by the regex redactor.
+
+    Until the closed response envelope exists (it belongs with the paired
+    backend handler, netbox-rpc #280), dispatch must refuse rather than fall
+    through.
+    """
+
+    source = (ROOT / "netbox_rpc/jobs.py").read_text(encoding="utf-8")
+    assert "service.gitea.actions_runner.provision_org_ci_runner" in source, (
+        "jobs.py no longer guards the org CI runner procedure; it would fall "
+        "through to the generic, redirect-following, unbounded response path."
     )
-    assert (
-        contract.PROCEDURE_POLICY["transport_driver"]
-        == (migration._PROCEDURE_DEFAULTS["transport_driver"])
-    )
+    assert "RPC_PROCEDURE_NOT_AVAILABLE" in source
 
 
 def test_transport_pin_binding_is_scoped_to_this_contract() -> None:
