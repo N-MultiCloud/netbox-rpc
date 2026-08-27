@@ -159,6 +159,13 @@ migration and static file in the wheel. The gateway recomputes those digests
 from the archive and refuses any mismatch, so the manifest cannot drift from
 what is actually shipped.
 
+Ordinary CI enforces the same boundary before deployment:
+`tests/test_deploy_manifest_contract.py` runs the canonical generator check,
+builds a real wheel with the hash-locked `setuptools` backend from
+`.gitea/ci-requirements.lock`, compares the exact archive maps, and mutation-tests
+a stale embedded manifest. Keep that test and build dependency in the locked CI
+closure whenever this contract changes.
+
 Generate it — never hand-edit it:
 
 ```bash
