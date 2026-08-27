@@ -1724,7 +1724,8 @@ Two tiers (see `docs/architecture.md` → Testing):
    must pre-provision exact CPython 3.12.14 at `/usr/local/bin/python3.12` and
    uv 0.12.5 at `/usr/local/bin/uv`; the workflow verifies those fixed
    executables and never selects them through ambient `PATH`, downloads, or
-   bootstraps a toolchain. Dependencies come only
+   bootstraps a toolchain. Dependencies, including the exact build backend used
+   by the wheel regression, come only
    from `.gitea/ci-requirements.lock`, the canonical CPython 3.12 / x86_64 glibc
    2.34 wheel closure, installed with hashes, wheel-only resolution, an empty
    inherited environment, no uv config/project sources/cache, and
@@ -1736,7 +1737,12 @@ Two tiers (see `docs/architecture.md` → Testing):
    turn execution into a collect-only or deselected false green.
    `tests/test_ci_workflow_security.py`
    parses YAML with duplicate/alias/flow constructs rejected and mutation-tests
-   the complete fail-closed contract. Provisioning the dedicated runner is an
+   the complete fail-closed contract. `tests/test_deploy_manifest_contract.py`
+   checks the canonical generated files, builds the wheel with that locked
+   backend, and requires the manifest's migration/static paths and SHA-256
+   digests to equal the exact archive; its hostile stale-manifest mutation must
+   fail. Renew this gate whenever a migration or static file changes.
+   Provisioning the dedicated runner is an
    external workspace prerequisite; an offline runner means ordinary CI remains
    queued, not rerouted. These candidate-side files are defense in depth, not
    runner authority: the Gitea repository/organization runner policy must make

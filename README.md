@@ -1298,8 +1298,8 @@ queues and never falls back to a mirror or production-capable runner. The
 workflow checks out the triggering commit with a full-SHA-pinned checkout
 action and no persisted credentials, requires preprovisioned CPython 3.12.14
 at `/usr/local/bin/python3.12` plus uv 0.12.5 at `/usr/local/bin/uv`, and forbids
-ambient-`PATH` tool selection or toolchain download/bootstrap. Its exact runtime
-and test closure is `.gitea/ci-requirements.lock`, containing one compatible
+ambient-`PATH` tool selection or toolchain download/bootstrap. Its exact runtime,
+build-backend, and test closure is `.gitea/ci-requirements.lock`, containing one compatible
 hashed wheel per package for CPython 3.12 on x86_64 glibc 2.34. Installation
 uses hash checking, wheel-only resolution, an empty inherited environment, the
 explicit PyPI simple index, no uv configuration/project sources/cache, and
@@ -1315,6 +1315,12 @@ dependency change and rerun its isolated install plus
 rejects duplicate/alias/flow constructs, and mutation-tests runner, permissions,
 job count, checkout, toolchain, installer, source, pin, hash, and pytest-bypass
 regressions.
+
+`tests/test_deploy_manifest_contract.py` also runs the canonical manifest check,
+builds a wheel with the locked build backend, and compares the embedded
+migration/static path-and-digest maps to the exact archive. A migration added
+without renewing both the reviewed migration policy and generated manifest now
+fails ordinary CI before the production deploy gateway sees it.
 
 The workflow and its repository tests are defense in depth; they are not the
 runner authorization boundary because a candidate branch can modify its own
