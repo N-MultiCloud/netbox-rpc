@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import requests
 import jsonschema
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
+from urllib3.util import Timeout as Urllib3Timeout
 
 from .backends import BackendTarget
 from .domain.normalization import (
@@ -33,6 +35,115 @@ logger = logging.getLogger(__name__)
 
 RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
+
+
+class _ProtectedBackendResponseError(ValueError):
+    """Raised when a protected backend response exceeds its closed contract."""
+
+
+def _set_protected_response_socket_deadline(
+    response: requests.Response,
+    *,
+    deadline: float,
+) -> None:
+    """Apply the remaining total budget to the next one-byte socket read."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ProtectedBackendResponseError(
+            "protected backend response exceeded its total deadline"
+        )
+    raw = getattr(response, "raw", None)
+    connection = getattr(raw, "_connection", None)
+    sock = getattr(connection, "sock", None)
+    if sock is None:
+        raw_fp = getattr(raw, "_fp", None)
+        buffered = getattr(raw_fp, "fp", None)
+        socket_io = getattr(buffered, "raw", None)
+        sock = getattr(socket_io, "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if not callable(settimeout):
+        raise _ProtectedBackendResponseError(
+            "protected backend response socket is unavailable"
+        )
+    try:
+        settimeout(remaining)
+    except OSError as exc:
+        raise _ProtectedBackendResponseError(
+            "protected backend response deadline could not be applied"
+        ) from exc
+
+
+def _read_bounded_json_response(
+    response: requests.Response,
+    *,
+    deadline: float,
+    max_bytes: int,
+) -> object:
+    """Read one identity-encoded JSON body under byte and monotonic bounds."""
+    content_encoding = str(response.headers.get("Content-Encoding") or "").lower()
+    if content_encoding not in {"", "identity"}:
+        raise _ProtectedBackendResponseError(
+            "protected backend response content encoding is forbidden"
+        )
+
+    content_length_header = response.headers.get("Content-Length")
+    expected_length: int | None = None
+    if content_length_header is not None:
+        raw_length = str(content_length_header)
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            raise _ProtectedBackendResponseError(
+                "protected backend response Content-Length is invalid"
+            )
+        expected_length = int(raw_length)
+        if expected_length > max_bytes:
+            raise _ProtectedBackendResponseError(
+                "protected backend response exceeds the byte limit"
+            )
+
+    body = bytearray()
+    try:
+        chunks = iter(response.iter_content(chunk_size=1, decode_unicode=False))
+        while expected_length is None or len(body) < expected_length:
+            _set_protected_response_socket_deadline(response, deadline=deadline)
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
+            if not chunk:
+                continue
+            if not isinstance(chunk, bytes):
+                raise _ProtectedBackendResponseError(
+                    "protected backend response yielded a non-byte chunk"
+                )
+            if len(body) + len(chunk) > max_bytes:
+                raise _ProtectedBackendResponseError(
+                    "protected backend response exceeds the byte limit"
+                )
+            body.extend(chunk)
+            if expected_length is None and len(body) == max_bytes:
+                _set_protected_response_socket_deadline(response, deadline=deadline)
+                try:
+                    extra = next(chunks)
+                except StopIteration:
+                    extra = b""
+                if extra:
+                    raise _ProtectedBackendResponseError(
+                        "protected backend response exceeds the byte limit"
+                    )
+                break
+        if expected_length is not None and len(body) != expected_length:
+            raise _ProtectedBackendResponseError(
+                "protected backend response ended before Content-Length"
+            )
+        if not body:
+            raise _ProtectedBackendResponseError(
+                "protected backend response body is empty"
+            )
+        return json.loads(body)
+    finally:
+        for index in range(len(body)):
+            body[index] = 0
+
 
 __all__ = (
     "BackendTarget",
@@ -157,54 +268,146 @@ def _call_backend(
         str(getattr(execution.procedure, "name", "") or "")
         == "service.gitea.production.upgrade_1_27_1"
     )
+    is_gitea_runner = (
+        str(getattr(execution.procedure, "name", "") or "")
+        == "service.gitea.runner.register"
+    )
+    gitea_runner_scope = str(params.get("scope") or "")
+    gitea_runner_operation = str(params.get("operation") or "register")
+    execution_normalized = getattr(execution, "normalized_params", None)
+    gitea_runner_fence_digest = (
+        execution_normalized.get("fence_expected_sha256")
+        if isinstance(execution_normalized, dict)
+        else None
+    )
+    is_secret_protected = is_gitea_upgrade or is_gitea_runner
+    runner_response_deadline: float | None = None
     request_kwargs: dict[str, Any] = {
         "headers": target.headers,
         "json": body,
         "verify": target.verify_ssl,
         "timeout": timeout,
     }
-    if is_gitea_upgrade:
+    if is_secret_protected:
         # The protected Gitea lease is approved for one concrete backend
         # destination and must never be replayed by requests across a redirect.
         # Legacy procedure calls keep their byte-for-byte request behavior.
         request_kwargs["allow_redirects"] = False
+    if is_gitea_runner:
+        from . import gitea_runner_contract as runner_contract
+
+        runner_response_deadline = (
+            time.monotonic() + runner_contract.ROUTE_BUDGET_SECONDS
+        )
+        request_kwargs["stream"] = True
+        connect_timeout = min(10, runner_contract.ROUTE_BUDGET_SECONDS)
+        request_kwargs["timeout"] = Urllib3Timeout(
+            total=runner_contract.ROUTE_BUDGET_SECONDS,
+            connect=connect_timeout,
+            read=max(
+                1,
+                runner_contract.ROUTE_BUDGET_SECONDS - connect_timeout,
+            ),
+        )
     try:
         resp = requests.post(url, **request_kwargs)
     except requests.exceptions.RequestException as exc:
-        if is_gitea_upgrade:
+        if is_secret_protected:
             connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
             if isinstance(exc, connect_timeout):
+                if is_gitea_runner:
+                    return _gitea_runner_transport_failure_response(
+                        stage="generate_token",
+                        operation=gitea_runner_operation,
+                        fence_digest=gitea_runner_fence_digest,
+                        scope=gitea_runner_scope,
+                    )
                 return _gitea_transport_failure_response(stage="execute")
+            if is_gitea_runner:
+                return _gitea_runner_transport_failure_response(
+                    stage="indeterminate",
+                    operation=gitea_runner_operation,
+                    fence_digest=gitea_runner_fence_digest,
+                    scope=gitea_runner_scope,
+                )
             return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend is unreachable: {exc}",
             code="RPC_BACKEND_UNREACHABLE",
         ) from exc
-    if resp.status_code == 401 and not is_gitea_upgrade:
+    if resp.status_code == 401 and not is_secret_protected:
         raise RPCExecutionError(
             "nms-backend returned 401 Unauthorized.",
             code="RPC_BACKEND_UNAUTHORIZED",
         )
-    if is_gitea_upgrade and 300 <= resp.status_code < 400:
+    if is_secret_protected and 300 <= resp.status_code < 400:
         # The request reached the approved origin but a redirect response says
         # nothing trustworthy about whether that origin dispatched work.  Do
         # not parse or follow it; persist the exact ambiguous outcome.
+        if is_gitea_runner:
+            resp.close()
+            return _gitea_runner_transport_failure_response(
+                stage="indeterminate",
+                operation=gitea_runner_operation,
+                fence_digest=gitea_runner_fence_digest,
+                scope=gitea_runner_scope,
+            )
         return _gitea_transport_failure_response(stage="indeterminate")
     try:
-        data = resp.json()
-    except ValueError as exc:
-        if is_gitea_upgrade:
+        if is_gitea_runner:
+            from . import gitea_runner_contract as runner_contract
+
+            if runner_response_deadline is None:
+                raise _ProtectedBackendResponseError(
+                    "protected backend response deadline is unavailable"
+                )
+            data = _read_bounded_json_response(
+                resp,
+                deadline=runner_response_deadline,
+                max_bytes=runner_contract.BACKEND_RESPONSE_MAX_BYTES,
+            )
+        else:
+            data = resp.json()
+    except (ValueError, requests.exceptions.RequestException) as exc:
+        if is_secret_protected:
+            if is_gitea_runner:
+                return _gitea_runner_transport_failure_response(
+                    stage="indeterminate",
+                    operation=gitea_runner_operation,
+                    fence_digest=gitea_runner_fence_digest,
+                    scope=gitea_runner_scope,
+                )
             return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend returned non-JSON response: HTTP {resp.status_code}",
             code="RPC_BACKEND_BAD_RESPONSE",
         ) from exc
+    finally:
+        if is_gitea_runner:
+            resp.close()
     if is_gitea_upgrade:
         normalized = _normalize_gitea_closed_response(data)
         if normalized is None:
             return _gitea_transport_failure_response(stage="indeterminate")
         if not 200 <= resp.status_code < 300 and normalized["ok"] is not False:
             return _gitea_transport_failure_response(stage="indeterminate")
+        return normalized
+    if is_gitea_runner:
+        normalized = _normalize_gitea_runner_closed_response(data)
+        if normalized is None:
+            return _gitea_runner_transport_failure_response(
+                stage="indeterminate",
+                operation=gitea_runner_operation,
+                fence_digest=gitea_runner_fence_digest,
+                scope=gitea_runner_scope,
+            )
+        if not 200 <= resp.status_code < 300 and normalized["ok"] is not False:
+            return _gitea_runner_transport_failure_response(
+                stage="indeterminate",
+                operation=gitea_runner_operation,
+                fence_digest=gitea_runner_fence_digest,
+                scope=gitea_runner_scope,
+            )
         return normalized
     if resp.status_code >= 400:
         if not isinstance(data, dict):
@@ -239,6 +442,103 @@ def _gitea_transport_failure_response(*, stage: str) -> dict[str, Any]:
             "healthy": None if is_indeterminate else False,
             "stage": stage,
         },
+    }
+
+
+def _gitea_runner_transport_failure_response(
+    *,
+    stage: str,
+    operation: str,
+    fence_digest: object,
+    scope: str,
+) -> dict[str, Any]:
+    """Return a closed conservative result for a registration transport failure."""
+    from . import gitea_runner_contract as contract
+
+    safe_operation = operation if operation in contract.OPERATIONS else "register"
+    if safe_operation == "reconcile":
+        stage = "reconcile" if stage == "generate_token" else stage
+    indeterminate = stage == "indeterminate"
+    safe_scope = scope if scope in contract.SCOPES else contract.SCOPES[0]
+    if (
+        not isinstance(fence_digest, str)
+        or len(fence_digest) != 64
+        or any(character not in "0123456789abcdef" for character in fence_digest)
+    ):
+        fence_digest = contract.FENCE_UNKNOWN_SHA256
+    if safe_operation == "reconcile":
+        result = {
+            "ok": False,
+            "procedure": contract.PROCEDURE_NAME,
+            "target": contract.RUNNER_TARGET_NAME,
+            "operation": safe_operation,
+            "scope": safe_scope,
+            "registered": None,
+            "reconciled": False,
+            "token_invalidated": False,
+            "token_reset_required": True,
+            "token_sha256": fence_digest,
+            "reset_state": "indeterminate",
+            "prior_token_id": None,
+            "prior_active_sha256": None,
+            "replacement_token_id": None,
+            "stage": stage,
+        }
+        return {"ok": False, "result": result}
+    return {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": contract.PROCEDURE_NAME,
+            "target": contract.RUNNER_TARGET_NAME,
+            "operation": safe_operation,
+            "scope": safe_scope,
+            "registered": None if indeterminate else False,
+            "reconciled": None,
+            "token_invalidated": False,
+            "token_reset_required": indeterminate,
+            "token_sha256": None,
+            "reset_state": "indeterminate" if indeterminate else "not_started",
+            "prior_token_id": None,
+            "prior_active_sha256": None,
+            "replacement_token_id": None,
+            "stage": stage,
+        },
+    }
+
+
+def _normalize_gitea_runner_closed_response(data: object) -> dict[str, Any] | None:
+    """Validate the secret-silent runner response envelope and result schema."""
+    import jsonschema
+
+    from . import gitea_runner_contract as contract
+
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    result = data.get("result")
+    if (
+        type(data.get("ok")) is not bool
+        or not isinstance(result, dict)
+        or result.get("ok") is not data["ok"]
+        or data.get("events") != []
+        or not isinstance(data.get("error_code"), str)
+        or not isinstance(data.get("error_message"), str)
+        or (data["ok"] and (data["error_code"] or data["error_message"]))
+    ):
+        return None
+    try:
+        jsonschema.validate(result, contract.RESULT_SCHEMA)
+    except jsonschema.ValidationError:
+        return None
+    return {
+        "ok": data["ok"],
+        "result": result,
     }
 
 

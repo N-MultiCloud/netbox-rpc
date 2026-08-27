@@ -206,13 +206,14 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
-### Two-person approval workflow (#164, #221/#224 scoped enforcement)
+### Two-person approval workflow (#164, #221/#224/#235 scoped enforcement)
 
 The execution aggregate carries an additive **approval-workflow** surface (the
 foundation of the P0 two-person-approval epic #163). Issues #221 and #224
 activate the complete two-person route for
 `service.netbox.staging.rotate_backend_token` and
-`service.gitea.production.upgrade_1_27_1`; other legacy
+`service.gitea.production.upgrade_1_27_1`, plus the disabled
+`service.gitea.runner.register`; other legacy
 `approval_required` procedures retain their existing requester permission gate
 until they are migrated deliberately.
 
@@ -243,7 +244,7 @@ until they are migrated deliberately.
   `select_for_update` row lock + in-transaction status recheck so
   double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
   to a single deterministic event.
-  For either protected procedure, validate the immutable backend target before
+  For each protected procedure, validate the immutable backend target before
   sending authenticated capability traffic and reuse that exact resolved target
   through snapshot/lease/dispatch. Approval must obtain an uncached compatible
   capability while holding the row lock; failure leaves pending state and its
@@ -254,7 +255,8 @@ until they are migrated deliberately.
   Authorization layers `approve_rpcprocedure` **plus** object-scoped view access
   to the execution's procedure on top of the aggregate's segregation-of-duties
   and single-decision concurrency guards; `get_object()` already object-restricts
-  the execution row. The staging rotation and production Gitea upgrade use
+  the execution row. The staging rotation, production Gitea upgrade, and
+  isolated-runner registration use
   this API: creation requires execute permission scoped to the exact procedure and never accepts
   a same-request bypass; a distinct actor with approval permission scoped to
   that procedure must decide it. Other procedures are not implicitly migrated
@@ -445,6 +447,7 @@ the agent must confirm with the user:
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 | `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 | `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
+| `service.gitea.runner.register` | Confirm stopped/accepted runner VM PK 399 (`nmultifibra-ci-untrusted-01`), exact `register`/`reconcile` operation and allowlisted scope, canonical durable fence, both pinned target-owned SSH identities, isolated scheduling domain, reviewed runner/reset helper generations, and expected-token invalidation proof. Never enable, create, approve, or dispatch autonomously. |
 
 ### Other Write Procedures
 
@@ -590,13 +593,46 @@ post-dispatch indeterminate or committed unhealthy
 state is not safe to retry until an operator reconciles the installed binary,
 service/database health, and backup.
 
+### Isolated Gitea Runner Registration
+
+`service.gitea.runner.register` is a disabled-by-default, destructive,
+two-person composite operation. The assigned object is exact runner VM PK 399;
+the independently pinned token source is Gitea VM PK 170. The caller supplies
+only `register` or `reconcile` plus one of eight reviewed scopes. Server
+normalization and the signed lease
+bind both target objects and separate target-owned SSH service/credential
+identity snapshots. A canonical durable fence serializes aliases and blocks
+retry after uncertainty. The backend verifies the exact native runner and
+Gitea expected-token reset helpers, obtains the reusable token with fixed Gitea
+argv, streams it only over bounded stdin, and attempts rotation before every
+post-token return. No token, remote output, host override, label,
+path, or command may enter params, fingerprints, argv, environment, events,
+logs, or results.
+
+Migrations `0080`/`0081`, the catalog code gate, and the backend configuration
+gate all start dark. The operation depends on the deployed `netbox-network`
+issue `#23` credential-identity response. Only a definitive pre-token failure or
+an exact reset proof clears the fence; indeterminate outcomes require a fresh,
+distinctly approved `reconcile` plus runner-list/local-state inspection before
+retry. Reconciliation is not admitted from a fresh `pending` fence or before
+the blocking execution's 360-second remote-quiescence interval has elapsed.
+For stale `pending` recovery after that interval, reservation locks
+the fence and original execution together, terminalizes a still-`running` lost
+worker, moves the fence to `blocked`, and records the reconciliation owner in
+the same transaction. Once it owns the fence, late original transitions are rejected.
+Activation is forbidden while application repositories can schedule
+`prod-deploy`, `mirror-host`, or equivalent privileged labels. Follow
+[`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md) for the
+closed states, deployment order, reset evidence, and rollback sequence. Agents
+must never enable, create, approve, or dispatch it autonomously.
+
 ### Permission Invariant
 
 Do not request or accept the `netbox_rpc.approve_rpcprocedure` permission unless
 a human operator has explicitly granted it for a specific, bounded task. Holding
 this permission satisfies the legacy single-actor gate for most
 `approval_required` procedures — it must never be used autonomously on
-destructive procedures. It does **not** bypass either protected procedure's
+destructive procedures. It does **not** bypass a protected procedure's
 pending approval or distinct-actor check.
 
 ---

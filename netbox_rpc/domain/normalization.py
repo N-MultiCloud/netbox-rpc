@@ -6,7 +6,7 @@ import hashlib
 import json
 import posixpath
 import re
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
 from typing import Any
@@ -34,6 +34,7 @@ from ..constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
+    GITEA_RUNNER_REGISTER,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
     INFLUXDB_1_BOOTSTRAP,
@@ -172,6 +173,11 @@ _HUAWEI_NE8000_BGP_AVAILABLE = False
 # same coordinated rollout that deploys the handlers and their capability
 # contract, via an additive migration that also sets RPCProcedure.enabled=True.
 _INFLUXDB3_DEBIAN13_AVAILABLE = False
+# Registration remains unavailable until the composite backend handler and the
+# exact runner-host helper generation are deployed together.  The catalog row
+# is also seeded disabled; this code gate prevents an operator toggle from
+# bypassing the coordinated rollout order.
+_GITEA_RUNNER_REGISTER_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -195,6 +201,12 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "object-scoped-authorization checked against the requester "
             "(issue #203), and approval decisions are not yet bound to an "
             "allowlist-policy snapshot (issue #163)."
+        )
+    if procedure_name == GITEA_RUNNER_REGISTER and not _GITEA_RUNNER_REGISTER_AVAILABLE:
+        return (
+            "service.gitea.runner.register cannot run until the composite "
+            "secret-silent backend handler and exact isolated-runner host "
+            "generation are deployed and reviewed."
         )
     if (
         procedure_name == HUAWEI_NE8000_F1A_SHOW_BGP_PEER
@@ -483,9 +495,7 @@ _OPENBAO_INTERNAL_PARAM_KEYS = frozenset(
 _OPENBAO_AUTH_TYPES = frozenset(
     {"approle", "cert", "jwt", "kubernetes", "ldap", "oidc", "userpass"}
 )
-_OPENBAO_ENGINE_TYPES = frozenset(
-    {"database", "kv", "pki", "ssh", "transit", "totp"}
-)
+_OPENBAO_ENGINE_TYPES = frozenset({"database", "kv", "pki", "ssh", "transit", "totp"})
 _OPENBAO_AUDIT_TYPES = frozenset({"file", "syslog"})
 _OPENBAO_SERVICE_ACTIONS = frozenset(
     {"start", "stop", "restart", "reload", "enable", "disable"}
@@ -1009,6 +1019,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
         return _normalize_gitea_production_upgrade_execution(execution)
 
+    if procedure_name == GITEA_RUNNER_REGISTER:
+        return _normalize_gitea_runner_registration_execution(execution)
+
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
 
@@ -1475,9 +1488,7 @@ def _normalize_openbao_1_execution(
         "raft_autopilot_state": frozenset(),
         "snapshots_list": frozenset(),
         "auth_enable": frozenset({"auth_type", "mount_path"}),
-        "secrets_enable": frozenset(
-            {"engine_type", "mount_path", "kv_version"}
-        ),
+        "secrets_enable": frozenset({"engine_type", "mount_path", "kv_version"}),
         "audit_enable": frozenset({"audit_type", "mount_path"}),
         "snapshot_create": frozenset({"snapshot_name"}),
         "service_action": frozenset({"action"}),
@@ -1496,9 +1507,7 @@ def _normalize_openbao_1_execution(
             code="RPC_PROCEDURE_NOT_NORMALIZABLE",
         )
 
-    supplied_overrides = sorted(
-        set(params) & _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS
-    )
+    supplied_overrides = sorted(set(params) & _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS)
     if supplied_overrides:
         raise RPCExecutionError(
             "Caller-supplied SSH overrides are not accepted for OpenBao; the "
@@ -1581,10 +1590,7 @@ def _normalize_openbao_1_execution(
 
     if operation == "secrets_enable":
         engine_type = params.get("engine_type")
-        if (
-            not isinstance(engine_type, str)
-            or engine_type not in _OPENBAO_ENGINE_TYPES
-        ):
+        if not isinstance(engine_type, str) or engine_type not in _OPENBAO_ENGINE_TYPES:
             raise RPCExecutionError(
                 "engine_type is not a supported OpenBao secrets engine.",
                 code="RPC_PARAM_INVALID",
@@ -1627,9 +1633,7 @@ def _normalize_openbao_1_execution(
             normalized["command_fingerprint"]["mount_path"] = mount_path
 
     if operation in {"auth_disable", "secrets_disable", "audit_disable"}:
-        mount_path = required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip(
-            "/"
-        )
+        mount_path = required_string("mount_path", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
         normalized["mount_path"] = mount_path
         normalized["command_fingerprint"]["mount_path"] = mount_path
 
@@ -4794,6 +4798,511 @@ _GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS = frozenset(
     }
 )
 
+_GITEA_RUNNER_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
+
+def validate_gitea_runner_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate the exact isolated-runner VM selected by reviewed policy."""
+    from .. import gitea_runner_contract as contract
+
+    if (
+        target_model_label != contract.RUNNER_TARGET_OBJECT["content_type"]
+        or assigned_object_id != contract.RUNNER_TARGET_ID
+        or isinstance(assigned_object_id, bool)
+        or target is None
+        or getattr(target, "pk", None) != contract.RUNNER_TARGET_ID
+        or getattr(target, "name", None) != contract.RUNNER_TARGET_NAME
+        or (
+            target_display is not None and target_display != contract.RUNNER_TARGET_NAME
+        )
+    ):
+        raise RPCExecutionError(
+            "Gitea runner registration requires the exact isolated-runner VM.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    relations = (
+        (
+            "cluster",
+            contract.RUNNER_CLUSTER_ID,
+            contract.RUNNER_CLUSTER_NAME,
+        ),
+        ("device", contract.RUNNER_NODE_ID, contract.RUNNER_NODE_NAME),
+        ("tenant", contract.RUNNER_TENANT_ID, contract.RUNNER_TENANT_NAME),
+        ("role", contract.RUNNER_ROLE_ID, contract.RUNNER_ROLE_NAME),
+    )
+    relation_values: dict[str, object] = {}
+    for field, expected_id, expected_name in relations:
+        relation = getattr(target, field, None)
+        relation_id = getattr(target, f"{field}_id", None)
+        if (
+            relation is None
+            or relation_id != expected_id
+            or isinstance(relation_id, bool)
+            or getattr(relation, "pk", None) != expected_id
+            or getattr(relation, "name", None) != expected_name
+        ):
+            raise RPCExecutionError(
+                f"Gitea runner target {field} does not match reviewed policy.",
+                code="RPC_TARGET_INVALID",
+            )
+        relation_values[field] = relation
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Gitea runner target must be active before registration.",
+            code="RPC_TARGET_INVALID",
+        )
+    raw_vcpus = getattr(target, "vcpus", None)
+    if isinstance(raw_vcpus, bool):
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        vcpus = float(raw_vcpus)
+    except (TypeError, ValueError) as exc:
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    memory = getattr(target, "memory", None)
+    disk = getattr(target, "disk", None)
+    if (
+        vcpus != contract.RUNNER_VCPUS
+        or type(memory) is not int
+        or memory != contract.RUNNER_MEMORY_MIB
+        or type(disk) is not int
+        or disk != contract.RUNNER_DISK_MIB
+    ):
+        raise RPCExecutionError(
+            "Gitea runner target resources do not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    custom_fields = getattr(target, "custom_field_data", None)
+    if not isinstance(custom_fields, dict):
+        raise RPCExecutionError(
+            "Gitea runner target custom fields are unavailable.",
+            code="RPC_TARGET_INVALID",
+        )
+    proxmox_vmid = _strict_target_int(
+        custom_fields.get("proxmox_vm_id"),
+        field="custom_field_data.proxmox_vm_id",
+        expected=contract.RUNNER_PROXMOX_VMID,
+    )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        host = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Gitea runner target requires an explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4:
+        raise RPCExecutionError(
+            "Gitea runner target requires an explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.RUNNER_TARGET_NAME,
+        "target_object": dict(contract.RUNNER_TARGET_OBJECT),
+        "runner_cluster_id": getattr(relation_values["cluster"], "pk"),
+        "runner_node_id": getattr(relation_values["device"], "pk"),
+        "runner_node": getattr(relation_values["device"], "name"),
+        "runner_proxmox_vmid": proxmox_vmid,
+        "runner_tenant_id": getattr(relation_values["tenant"], "pk"),
+        "runner_role_id": getattr(relation_values["role"], "pk"),
+        "runner_vcpus": vcpus,
+        "runner_memory_mib": memory,
+        "runner_disk_mib": disk,
+        "runner_ipv4": str(host),
+    }
+
+
+def _validate_locked_known_hosts_entry(entry: str, *, expected_host: str) -> None:
+    """Require one exact, unmarked Ed25519 OpenSSH host-key record."""
+    if (
+        not entry
+        or entry != entry.strip()
+        or "\n" in entry
+        or "\r" in entry
+        or "\t" in entry
+        or len(entry) > 512
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH service requires one bounded host-key entry.",
+            code="RPC_TARGET_INVALID",
+        )
+    fields = entry.split(" ")
+    if len(fields) != 3 or any(not field for field in fields):
+        raise RPCExecutionError(
+            "Runner registration known-hosts entry is malformed.",
+            code="RPC_TARGET_INVALID",
+        )
+    host, algorithm, encoded_key = fields
+    if host != expected_host or algorithm != "ssh-ed25519" or len(encoded_key) > 256:
+        raise RPCExecutionError(
+            "Runner registration known-hosts entry does not match the target.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        decoded_key = base64.b64decode(encoded_key, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RPCExecutionError(
+            "Runner registration known-hosts key is malformed.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    algorithm_bytes = b"ssh-ed25519"
+    expected_prefix = (
+        len(algorithm_bytes).to_bytes(4, "big")
+        + algorithm_bytes
+        + (32).to_bytes(4, "big")
+    )
+    if len(decoded_key) != len(expected_prefix) + 32 or not decoded_key.startswith(
+        expected_prefix
+    ):
+        raise RPCExecutionError(
+            "Runner registration known-hosts key is not an Ed25519 wire record.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _require_locked_ssh_identity_material(
+    identity: object,
+    method: str,
+) -> None:
+    storage_backend = str(getattr(identity, "storage_backend", "local") or "local")
+    if storage_backend == "local" and method == "password":
+        present = bool(getattr(identity, "password_encrypted", ""))
+    elif storage_backend == "local":
+        present = bool(getattr(identity, "ssh_private_key_encrypted", ""))
+        if method == "key_with_passphrase":
+            present = present and bool(
+                getattr(identity, "ssh_private_key_passphrase_encrypted", "")
+            )
+    else:
+        present = False
+    if not present:
+        raise RPCExecutionError(
+            "Runner registration SSH identity requires local revision-bound material.",
+            code="RPC_TARGET_INVALID",
+        )
+
+
+def _resolve_locked_ssh_identity(
+    *,
+    assigned_object_type_id: object,
+    assigned_object_id: int,
+    expected_host: str,
+    policy_ref: str,
+) -> dict[str, Any]:
+    """Return a non-secret approval snapshot for one exact SSH service."""
+    from .. import gitea_upgrade_contract
+
+    try:
+        from netbox_network.models import DeviceService
+    except (ImportError, AttributeError) as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH policy is unavailable.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if type(assigned_object_type_id) is not int or assigned_object_type_id <= 0:
+        raise RPCExecutionError(
+            "Runner registration requires a concrete target content type.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        queryset = DeviceService.objects.filter(
+            assigned_object_type_id=assigned_object_type_id,
+            assigned_object_id=assigned_object_id,
+            service_type=DeviceService.SERVICE_SSH,
+            enabled=True,
+        ).select_related("management_host", "credential")
+        services = list(queryset[:2])
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH policy could not be resolved.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if len(services) != 1:
+        raise RPCExecutionError(
+            "Runner registration requires exactly one enabled target-owned SSH service.",
+            code="RPC_TARGET_INVALID",
+        )
+    service = services[0]
+    raw_host = getattr(getattr(service, "management_host", None), "address", None)
+    try:
+        host = ip_address(str(raw_host).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Runner registration SSH service has an invalid management host.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if host.version != 4 or str(host) != expected_host:
+        raise RPCExecutionError(
+            "Runner registration SSH service does not match the locked host.",
+            code="RPC_TARGET_INVALID",
+        )
+    port = getattr(service, "port", None)
+    known_hosts_entry = str(getattr(service, "ssh_known_hosts_entry", "") or "")
+    if (
+        type(port) is not int
+        or port != 22
+        or getattr(service, "ssh_strict_host_key_checking", None) is not True
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH service must use strict port 22 policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    _validate_locked_known_hosts_entry(
+        known_hosts_entry,
+        expected_host=expected_host,
+    )
+    identity = getattr(service, "credential", None)
+    identity_id = getattr(service, "credential_id", None)
+    principal = str(getattr(identity, "username", "") or "")
+    method = str(getattr(identity, "auth_method", "") or "")
+    if (
+        identity is None
+        or type(identity_id) is not int
+        or identity_id <= 0
+        or not principal
+        or principal != principal.strip()
+        or len(principal) > 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in principal)
+        or method not in gitea_upgrade_contract.SUPPORTED_SSH_METHODS
+    ):
+        raise RPCExecutionError(
+            "Runner registration SSH identity is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    _require_locked_ssh_identity_material(identity, method)
+    return {
+        "ssh_service_id": _positive_model_pk(service, "SSH service"),
+        "ssh_service_revision": _model_revision(service, "SSH service"),
+        "ssh_identity_id": identity_id,
+        "ssh_identity_revision": _model_revision(identity, "SSH identity"),
+        "ssh_storage_backend": "local",
+        "ssh_principal": principal,
+        "ssh_method": method,
+        "ssh_host": str(host),
+        "ssh_port": port,
+        "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
+        "ssh_policy_ref": policy_ref,
+    }
+
+
+def _gitea_runner_fence_is_quiescent(
+    fence: object,
+    *,
+    delay_seconds: int,
+) -> bool:
+    """Require a terminal owner and a full post-failure remote safety window."""
+    blocking_execution_id = getattr(fence, "blocking_execution_id", None)
+    blocking_execution = getattr(fence, "blocking_execution", None)
+    last_updated = getattr(fence, "last_updated", None)
+    fence_state = str(getattr(fence, "state", "") or "")
+    blocking_status = str(getattr(blocking_execution, "status", "") or "")
+    terminal_statuses = {
+        "cancelled",
+        "expired",
+        "failed",
+        "rejected",
+        "succeeded",
+    }
+    return bool(
+        isinstance(blocking_execution_id, int)
+        and not isinstance(blocking_execution_id, bool)
+        and getattr(blocking_execution, "pk", None) == blocking_execution_id
+        and (
+            blocking_status in terminal_statuses
+            or (fence_state == "pending" and blocking_status == "running")
+        )
+        and isinstance(last_updated, datetime)
+        and last_updated.tzinfo is not None
+        and last_updated
+        <= datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
+    )
+
+
+def _normalize_gitea_runner_registration_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize and bind both sides of the composite registration."""
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VirtualMachine
+
+    from .. import gitea_runner_contract as contract
+
+    params = execution.params if isinstance(execution.params, dict) else {}
+    unexpected = sorted(
+        str(key)[:64]
+        for key in params
+        if key not in _GITEA_RUNNER_INTERNAL_PARAM_KEYS
+        and key not in {"operation", "scope"}
+    )
+    operation = params.get("operation")
+    scope = params.get("scope")
+    if (
+        unexpected
+        or operation not in contract.OPERATIONS
+        or scope not in contract.SCOPE_TO_GITEA_SCOPE
+    ):
+        raise RPCExecutionError(
+            "Gitea runner lifecycle requires one exact operation and reviewed scope.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    from ..models import RPCGiteaRunnerScopeFence
+
+    canonical_scope = contract.SCOPE_TO_GITEA_SCOPE[scope]
+    try:
+        fence = RPCGiteaRunnerScopeFence.objects.get(canonical_scope=canonical_scope)
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Gitea runner scope fence is unavailable.",
+            code="RPC_SCOPE_FENCE_UNAVAILABLE",
+        ) from exc
+    fence_state = str(getattr(fence, "state", "") or "")
+    fence_execution_id = getattr(fence, "blocking_execution_id", None)
+    fence_reconciliation_execution_id = getattr(
+        fence,
+        "reconciliation_execution_id",
+        None,
+    )
+    fence_digest = str(getattr(fence, "expected_token_sha256", "") or "")
+    if not fence_digest:
+        fence_digest = contract.FENCE_UNKNOWN_SHA256
+    if operation == "register" and (
+        fence_state != RPCGiteaRunnerScopeFence.STATE_CLEAR
+        or fence_execution_id is not None
+        or fence_reconciliation_execution_id is not None
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope requires reconciliation before registration.",
+            code="RPC_SCOPE_FENCE_BLOCKED",
+        )
+    if operation == "reconcile" and (
+        fence_state
+        not in {
+            RPCGiteaRunnerScopeFence.STATE_PENDING,
+            RPCGiteaRunnerScopeFence.STATE_BLOCKED,
+        }
+        or not isinstance(fence_execution_id, int)
+        or isinstance(fence_execution_id, bool)
+        or fence_reconciliation_execution_id is not None
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope has no blocked operation to reconcile.",
+            code="RPC_SCOPE_FENCE_CLEAR",
+        )
+    if operation == "reconcile" and not _gitea_runner_fence_is_quiescent(
+        fence,
+        delay_seconds=contract.RECONCILIATION_QUIESCENCE_SECONDS,
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope is still inside its remote-operation safety window.",
+            code="RPC_SCOPE_FENCE_BUSY",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    type_label = (
+        f"{getattr(assigned_object_type, 'app_label', '')}."
+        f"{getattr(assigned_object_type, 'model', '')}"
+    )
+    target_metadata = validate_gitea_runner_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=type_label,
+        assigned_object_id=getattr(execution, "assigned_object_id", None),
+        target_display=getattr(execution, "target_display", None),
+    )
+    runner_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+        assigned_object_id=contract.RUNNER_TARGET_ID,
+        expected_host=str(target_metadata["runner_ipv4"]),
+        policy_ref=contract.RUNNER_SSH_POLICY_REF,
+    )
+
+    try:
+        gitea_target = VirtualMachine.objects.select_related("cluster", "device").get(
+            pk=contract.GITEA_TARGET_ID
+        )
+        gitea_content_type = ContentType.objects.get_for_model(
+            VirtualMachine,
+            for_concrete_model=False,
+        )
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Gitea runner registration could not resolve the locked Gitea VM.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    gitea_metadata = validate_gitea_upgrade_target(
+        gitea_target,
+        target_model_label=contract.GITEA_TARGET_OBJECT["content_type"],
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        target_display=contract.GITEA_TARGET_NAME,
+    )
+    gitea_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(gitea_content_type, "pk", None),
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        expected_host=contract.GITEA_IPV4_ADDRESS,
+        policy_ref=contract.GITEA_SSH_POLICY_REF,
+    )
+    if runner_ssh.get("ssh_principal") != "nms-runner-bootstrap":
+        raise RPCExecutionError(
+            "Runner registration SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    if gitea_ssh.get("ssh_principal") != "nms-gitea-runner-control":
+        raise RPCExecutionError(
+            "Gitea token-control SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        **target_metadata,
+        "operation": operation,
+        "scope": scope,
+        "gitea_scope": canonical_scope,
+        "gitea_target": gitea_metadata["target"],
+        "gitea_target_object": gitea_metadata["target_object"],
+        "gitea_ipv4": gitea_metadata["ipv4"],
+        "fence_state": fence_state,
+        "fence_expected_sha256": fence_digest,
+        "fence_execution_id": fence_execution_id,
+        "register_helper_sha256": contract.RUNNER_REGISTER_HELPER_SHA256,
+        "token_reset_helper_sha256": contract.GITEA_TOKEN_RESET_HELPER_SHA256,
+        **{f"runner_{key}": value for key, value in runner_ssh.items()},
+        **{f"gitea_{key}": value for key, value in gitea_ssh.items()},
+    }
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "assigned_object_id": contract.RUNNER_TARGET_ID,
+        "target_object_sha256": contract.RUNNER_TARGET_OBJECT_SHA256,
+        "runner_target_object_sha256": contract.RUNNER_TARGET_OBJECT_SHA256,
+        "gitea_target_object_sha256": contract.GITEA_TARGET_OBJECT_SHA256,
+        **normalized,
+    }
+    return normalized
+
 
 def _strict_target_int(value: object, *, field: str, expected: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value != expected:
@@ -5127,7 +5636,9 @@ def _resolve_gitea_upgrade_ssh_identity(execution: RPCExecution) -> dict[str, An
 def _require_gitea_ssh_identity_material(identity: object, method: str) -> None:
     storage_backend = str(getattr(identity, "storage_backend", "local") or "local")
     if storage_backend == "passbolt":
-        material_present = bool(str(getattr(identity, "passbolt_resource_id", "") or ""))
+        material_present = bool(
+            str(getattr(identity, "passbolt_resource_id", "") or "")
+        )
     elif storage_backend == "local":
         if method == "password":
             material_present = bool(getattr(identity, "password_encrypted", ""))

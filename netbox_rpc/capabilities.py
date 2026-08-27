@@ -118,6 +118,10 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_upgrade_contract import SEMANTIC_CAPABILITY_EXTENSION
 
         payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
+    if payload["handler_id"] == "service.gitea.runner.register":
+        from .gitea_runner_contract import SEMANTIC_CAPABILITY_EXTENSION
+
+        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

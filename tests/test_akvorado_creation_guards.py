@@ -6,6 +6,7 @@ import importlib
 import json
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from itertools import product
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -116,9 +117,11 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
+    constants.GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
         constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
+        constants.GITEA_RUNNER_REGISTER,
     }
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
@@ -130,6 +133,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization = types.ModuleType("netbox_rpc.domain.normalization")
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
+    normalization.validate_gitea_runner_target = lambda *args, **kwargs: {}
     normalization.validate_gitea_upgrade_target = lambda *args, **kwargs: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
     normalization.code_gate_unavailable_reason = lambda procedure_name: None
@@ -408,9 +412,7 @@ def test_staging_rotation_runtime_policy_rejects_every_mutable_drift(
             commands=Commands([SimpleNamespace(**row) for row in rows]),
         )
 
-    command_handlers._require_staging_rotation_procedure_policy(
-        procedure(canonical)
-    )
+    command_handlers._require_staging_rotation_procedure_policy(procedure(canonical))
 
     drifted_values = {
         "name": "service.netbox.staging.different",
@@ -527,10 +529,13 @@ def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(
             command_handlers._require_protected_procedure_policy(procedure(drifted))
 
     execution = SimpleNamespace(procedure=SimpleNamespace(effect="destructive"))
-    assert command_handlers._credential_policy_reference(
-        {"ssh_policy_ref": contract.SSH_POLICY_REF},
-        execution,
-    ) == contract.SSH_POLICY_REF
+    assert (
+        command_handlers._credential_policy_reference(
+            {"ssh_policy_ref": contract.SSH_POLICY_REF},
+            execution,
+        )
+        == contract.SSH_POLICY_REF
+    )
 
 
 def test_gitea_requires_explicit_compatible_backend_capability(
@@ -546,9 +551,9 @@ def test_gitea_requires_explicit_compatible_backend_capability(
     observed = {}
     capabilities = types.ModuleType("netbox_rpc.capabilities")
     capabilities.CapabilityStatus = statuses
-    capabilities.fetch_backend_capabilities = lambda target, use_cache=True: observed.update(
-        {"target": target, "use_cache": use_cache}
-    ) or object()
+    capabilities.fetch_backend_capabilities = lambda target, use_cache=True: (
+        observed.update({"target": target, "use_cache": use_cache}) or object()
+    )
     procedure = SimpleNamespace(
         name="service.gitea.production.upgrade_1_27_1",
     )
@@ -569,8 +574,8 @@ def test_gitea_requires_explicit_compatible_backend_capability(
         )
     assert observed == {"target": "locked-backend", "use_cache": False}
 
-    capabilities.verify_procedure_capability = (
-        lambda proc, manifest: statuses.COMPATIBLE
+    capabilities.verify_procedure_capability = lambda proc, manifest: (
+        statuses.COMPATIBLE
     )
     command_handlers._verify_backend_capability(
         procedure,
@@ -841,6 +846,7 @@ def test_protected_worker_terminalizes_resolver_exception_without_contact(
     monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
     monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
     monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
+
     def raise_resolver_error(backend):
         raise RuntimeError("opaque resolver diagnostic")
 
@@ -992,9 +998,7 @@ def test_openbao_secret_shape_is_rejected_in_every_declared_string_field_before_
         ("comment", r'# {"pass\u0077ord":"hunter2"}'),
         (
             "heredoc",
-            "description = <<EOF\n"
-            + r'{"note":"hvs.\u0041BCDEFGH1234"}'
-            + "\nEOF",
+            "description = <<EOF\n" + r'{"note":"hvs.\u0041BCDEFGH1234"}' + "\nEOF",
         ),
         (
             "unicode-separators",
@@ -1036,11 +1040,7 @@ def test_openbao_decodes_adversarial_identifier_before_persistence(
         ("nested-provider-value", {"outer": [{"label": "hvs.ABCDEFGH1234"}]}),
         (
             "nested-base64-value",
-            {
-                "outer": [
-                    "QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQtbW9yZS1tYXRlcmlhbA=="
-                ]
-            },
+            {"outer": ["QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQtbW9yZS1tYXRlcmlhbA=="]},
         ),
     ],
 )
@@ -1128,7 +1128,9 @@ def test_legitimate_openbao_names_and_paths_still_persist(
         serializer = _CreationSerializer(procedure, params)
         command_handlers.create_execution(serializer=serializer, user=user)
         assert serializer.saved is True
-        assert all(serializer.persisted_params[key] == value for key, value in params.items())
+        assert all(
+            serializer.persisted_params[key] == value for key, value in params.items()
+        )
 
 
 @pytest.mark.parametrize(
@@ -1315,6 +1317,618 @@ def test_openbao_scanner_does_not_change_non_openbao_creation(
 
     assert serializer.saved is True
     assert serializer.persisted_params["public_reference"] == params["public_reference"]
+
+
+class _GiteaFence:
+    def __init__(
+        self,
+        *,
+        state: str = "clear",
+        blocking_execution_id: int | None = None,
+        reconciliation_execution_id: int | None = None,
+        expected_token_sha256: str = "",
+        blocking_execution_status: str = "failed",
+        last_updated: datetime | None = None,
+    ) -> None:
+        self.state = state
+        self.blocking_execution_id = blocking_execution_id
+        self.blocking_execution = (
+            SimpleNamespace(pk=blocking_execution_id, status=blocking_execution_status)
+            if blocking_execution_id is not None
+            else None
+        )
+        self.reconciliation_execution_id = reconciliation_execution_id
+        self.expected_token_sha256 = expected_token_sha256
+        self.last_updated = last_updated or (
+            datetime.now(timezone.utc) - timedelta(seconds=361)
+        )
+        self.last_reset_state = ""
+        self.last_prior_token_id = None
+        self.last_replacement_token_id = None
+        self.last_prior_active_sha256 = ""
+        self.saved_fields: list[str] = []
+
+    def save(self, *, update_fields: list[str]) -> None:
+        self.saved_fields = list(update_fields)
+
+
+class _GiteaFenceManager:
+    def __init__(self, fence: _GiteaFence) -> None:
+        self.fence = fence
+        self.canonical_scopes: list[str] = []
+
+    def select_for_update(self) -> _GiteaFenceManager:
+        return self
+
+    def get(self, *, canonical_scope: str) -> _GiteaFence:
+        self.canonical_scopes.append(canonical_scope)
+        return self.fence
+
+
+class _GiteaExecutionManager:
+    def __init__(self, execution: object | None) -> None:
+        self.execution = execution
+
+    def select_for_update(self) -> _GiteaExecutionManager:
+        return self
+
+    def get(self, *, pk: int) -> object:
+        if self.execution is None or getattr(self.execution, "pk", None) != pk:
+            raise LookupError(pk)
+        return self.execution
+
+
+def _install_gitea_fence_model(
+    monkeypatch: pytest.MonkeyPatch,
+    fence: _GiteaFence,
+) -> None:
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCGiteaRunnerScopeFence = type(
+        "RPCGiteaRunnerScopeFence",
+        (),
+        {
+            "STATE_CLEAR": "clear",
+            "STATE_PENDING": "pending",
+            "STATE_BLOCKED": "blocked",
+            "DoesNotExist": type("DoesNotExist", (Exception,), {}),
+            "objects": _GiteaFenceManager(fence),
+        },
+    )
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {
+            "DoesNotExist": LookupError,
+            "objects": _GiteaExecutionManager(fence.blocking_execution),
+        },
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+
+
+def _gitea_fence_normalized(
+    *,
+    operation: str,
+    state: str,
+    execution_id: int | None,
+    digest: str = "0" * 64,
+) -> dict[str, object]:
+    return {
+        "operation": operation,
+        "scope": "nmulticloud-org",
+        "gitea_scope": "N-MultiCloud",
+        "fence_state": state,
+        "fence_execution_id": execution_id,
+        "fence_expected_sha256": digest,
+    }
+
+
+def _gitea_register_result(
+    *,
+    stage: str,
+    token_invalidated: bool,
+    token_reset_required: bool,
+    token_sha256: str | None,
+    reset_state: str,
+) -> dict[str, object]:
+    reset_proven = token_invalidated and not token_reset_required
+    result = {
+        "ok": False,
+        "procedure": "service.gitea.runner.register",
+        "target": "nmultifibra-ci-untrusted-01",
+        "operation": "register",
+        "scope": "nmulticloud-org",
+        "registered": False,
+        "reconciled": None,
+        "token_invalidated": token_invalidated,
+        "token_reset_required": token_reset_required,
+        "token_sha256": token_sha256,
+        "reset_state": reset_state,
+        "prior_token_id": 11 if reset_proven else None,
+        "prior_active_sha256": None,
+        "replacement_token_id": 12 if reset_proven else None,
+        "stage": stage,
+    }
+    return {"ok": False, "result": result}
+
+
+def test_gitea_runner_registration_reservation_is_canonical_and_exclusive(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    fence = _GiteaFence()
+    _install_gitea_fence_model(monkeypatch, fence)
+    normalized = _gitea_fence_normalized(
+        operation="register",
+        state="clear",
+        execution_id=None,
+    )
+
+    command_handlers._reserve_gitea_runner_scope(
+        SimpleNamespace(pk=2351),
+        normalized,
+    )
+
+    assert fence.state == "pending"
+    assert fence.blocking_execution_id == 2351
+    assert fence.reconciliation_execution_id is None
+    model = sys.modules["netbox_rpc.models"].RPCGiteaRunnerScopeFence
+    assert model.objects.canonical_scopes == ["N-MultiCloud"]
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._reserve_gitea_runner_scope(
+            SimpleNamespace(pk=2352),
+            normalized,
+        )
+    assert caught.value.code == "RPC_SCOPE_FENCE_CHANGED"
+
+
+def test_gitea_runner_only_one_reconciliation_can_own_a_blocked_scope(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    digest = "a" * 64
+    fence = _GiteaFence(
+        state="blocked",
+        blocking_execution_id=2351,
+        expected_token_sha256=digest,
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+    normalized = _gitea_fence_normalized(
+        operation="reconcile",
+        state="blocked",
+        execution_id=2351,
+        digest=digest,
+    )
+
+    command_handlers._reserve_gitea_runner_scope(
+        SimpleNamespace(pk=2352),
+        normalized,
+    )
+    assert fence.reconciliation_execution_id == 2352
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._reserve_gitea_runner_scope(
+            SimpleNamespace(pk=2353),
+            normalized,
+        )
+    assert caught.value.code == "RPC_SCOPE_FENCE_CLEAR"
+    assert fence.reconciliation_execution_id == 2352
+
+
+@pytest.mark.parametrize(
+    ("state", "blocking_status", "age_seconds", "expected_code"),
+    (
+        ("pending", "running", 30, "RPC_SCOPE_FENCE_BUSY"),
+        ("blocked", "running", 361, "RPC_SCOPE_FENCE_BUSY"),
+        ("blocked", "failed", 30, "RPC_SCOPE_FENCE_BUSY"),
+    ),
+)
+def test_gitea_runner_reconciliation_waits_for_terminal_remote_quiescence(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    blocking_status: str,
+    age_seconds: int,
+    expected_code: str,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    digest = "a" * 64
+    fence = _GiteaFence(
+        state=state,
+        blocking_execution_id=2351,
+        expected_token_sha256=digest,
+        blocking_execution_status=blocking_status,
+        last_updated=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._reserve_gitea_runner_scope(
+            SimpleNamespace(pk=2352),
+            _gitea_fence_normalized(
+                operation="reconcile",
+                state=state,
+                execution_id=2351,
+                digest=digest,
+            ),
+        )
+
+    assert caught.value.code == expected_code
+    assert fence.reconciliation_execution_id is None
+
+
+def test_gitea_runner_reconciliation_atomically_recovers_stale_pending_worker(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    digest = "a" * 64
+    fence = _GiteaFence(
+        state="pending",
+        blocking_execution_id=2351,
+        expected_token_sha256=digest,
+        blocking_execution_status="running",
+        last_updated=datetime.now(timezone.utc) - timedelta(seconds=361),
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+    failed: list[tuple[object, str, str]] = []
+
+    def mark_failed(execution: object, message: str, code: str) -> None:
+        failed.append((execution, message, code))
+        execution.status = "failed"
+
+    monkeypatch.setattr(command_handlers, "mark_execution_failed", mark_failed)
+
+    command_handlers._reserve_gitea_runner_scope(
+        SimpleNamespace(pk=2352),
+        _gitea_fence_normalized(
+            operation="reconcile",
+            state="pending",
+            execution_id=2351,
+            digest=digest,
+        ),
+    )
+
+    assert failed == [
+        (
+            fence.blocking_execution,
+            "Gitea runner worker was lost after scope reservation; reconciliation is required.",
+            "RPC_RUNNER_WORKER_LOST",
+        )
+    ]
+    assert fence.blocking_execution.status == "failed"
+    assert fence.state == "blocked"
+    assert fence.reconciliation_execution_id == 2352
+
+
+def test_gitea_runner_late_original_response_cannot_erase_reconciliation_owner(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    digest = "a" * 64
+    fence = _GiteaFence(
+        state="blocked",
+        blocking_execution_id=2351,
+        reconciliation_execution_id=2352,
+        expected_token_sha256=digest,
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._record_gitea_runner_response(
+            SimpleNamespace(pk=2351),
+            _gitea_fence_normalized(
+                operation="register",
+                state="clear",
+                execution_id=None,
+            ),
+            _gitea_register_result(
+                stage="register",
+                token_invalidated=True,
+                token_reset_required=False,
+                token_sha256=digest,
+                reset_state="rotated",
+            ),
+        )
+
+    assert caught.value.code == "RPC_SCOPE_FENCE_CHANGED"
+    assert fence.state == "blocked"
+    assert fence.blocking_execution_id == 2351
+    assert fence.reconciliation_execution_id == 2352
+
+
+def test_gitea_runner_late_original_response_cannot_reopen_reconciled_scope(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    digest = "a" * 64
+    fence = _GiteaFence()
+    _install_gitea_fence_model(monkeypatch, fence)
+
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._record_gitea_runner_response(
+            SimpleNamespace(pk=2351),
+            _gitea_fence_normalized(
+                operation="register",
+                state="clear",
+                execution_id=None,
+            ),
+            _gitea_register_result(
+                stage="register",
+                token_invalidated=True,
+                token_reset_required=False,
+                token_sha256=digest,
+                reset_state="rotated",
+            ),
+        )
+
+    assert caught.value.code == "RPC_SCOPE_FENCE_CHANGED"
+    assert fence.state == "clear"
+    assert fence.blocking_execution_id is None
+    assert fence.reconciliation_execution_id is None
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_state", "expected_digest"),
+    (
+        (
+            _gitea_register_result(
+                stage="generate_token",
+                token_invalidated=False,
+                token_reset_required=False,
+                token_sha256=None,
+                reset_state="not_started",
+            ),
+            "clear",
+            "",
+        ),
+        (
+            _gitea_register_result(
+                stage="register",
+                token_invalidated=True,
+                token_reset_required=False,
+                token_sha256="a" * 64,
+                reset_state="rotated",
+            ),
+            "clear",
+            "",
+        ),
+        (
+            _gitea_register_result(
+                stage="reset",
+                token_invalidated=False,
+                token_reset_required=True,
+                token_sha256="a" * 64,
+                reset_state="failed",
+            ),
+            "blocked",
+            "a" * 64,
+        ),
+    ),
+)
+def test_gitea_runner_response_atomically_clears_or_blocks_scope(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    response: dict[str, object],
+    expected_state: str,
+    expected_digest: str,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    fence = _GiteaFence(state="pending", blocking_execution_id=2351)
+    _install_gitea_fence_model(monkeypatch, fence)
+    recorded: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, execution: object) -> None:
+            self.execution = execution
+
+        def record_backend_response(self, backend_response: dict[str, object]) -> None:
+            recorded.append(backend_response)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    command_handlers._record_gitea_runner_response(
+        SimpleNamespace(pk=2351),
+        _gitea_fence_normalized(
+            operation="register",
+            state="clear",
+            execution_id=None,
+        ),
+        response,
+    )
+
+    assert recorded == [response]
+    assert fence.state == expected_state
+    assert fence.expected_token_sha256 == expected_digest
+    if expected_state == "clear":
+        assert fence.blocking_execution_id is None
+        assert fence.reconciliation_execution_id is None
+    else:
+        assert fence.blocking_execution_id == 2351
+
+
+def test_gitea_runner_reconciliation_must_match_the_persisted_digest(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    expected_digest = "a" * 64
+    fence = _GiteaFence(
+        state="blocked",
+        blocking_execution_id=2351,
+        reconciliation_execution_id=2352,
+        expected_token_sha256=expected_digest,
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+    recorded: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, execution: object) -> None:
+            self.execution = execution
+
+        def record_backend_response(self, backend_response: dict[str, object]) -> None:
+            recorded.append(backend_response)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    result = {
+        "ok": True,
+        "procedure": "service.gitea.runner.register",
+        "target": "nmultifibra-ci-untrusted-01",
+        "operation": "reconcile",
+        "scope": "nmulticloud-org",
+        "registered": None,
+        "reconciled": True,
+        "token_invalidated": True,
+        "token_reset_required": False,
+        "token_sha256": "b" * 64,
+        "reset_state": "reconciled_expected_inactive",
+        "prior_token_id": 11,
+        "prior_active_sha256": "b" * 64,
+        "replacement_token_id": 12,
+        "stage": "complete",
+    }
+    response = {"ok": True, "result": result}
+
+    with pytest.raises(RPCExecutionError) as caught:
+        command_handlers._record_gitea_runner_response(
+            SimpleNamespace(pk=2352),
+            _gitea_fence_normalized(
+                operation="reconcile",
+                state="blocked",
+                execution_id=2351,
+                digest=expected_digest,
+            ),
+            response,
+        )
+
+    assert caught.value.code == "RPC_SCOPE_FENCE_CHANGED"
+    assert recorded == []
+    assert fence.state == "blocked"
+    assert fence.blocking_execution_id == 2351
+    assert fence.reconciliation_execution_id == 2352
+    assert fence.expected_token_sha256 == expected_digest
+
+
+@pytest.mark.parametrize("expected_digest", ("0" * 64, "a" * 64))
+def test_gitea_runner_matching_reconciliation_proof_clears_the_scope(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    expected_digest: str,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    fence = _GiteaFence(
+        state="blocked",
+        blocking_execution_id=2351,
+        reconciliation_execution_id=2352,
+        expected_token_sha256=("" if expected_digest == "0" * 64 else expected_digest),
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+    recorded: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, execution: object) -> None:
+            self.execution = execution
+
+        def record_backend_response(self, backend_response: dict[str, object]) -> None:
+            recorded.append(backend_response)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    result = {
+        "ok": True,
+        "procedure": "service.gitea.runner.register",
+        "target": "nmultifibra-ci-untrusted-01",
+        "operation": "reconcile",
+        "scope": "nmulticloud-org",
+        "registered": None,
+        "reconciled": True,
+        "token_invalidated": True,
+        "token_reset_required": False,
+        "token_sha256": expected_digest,
+        "reset_state": "reconciled_expected_inactive",
+        "prior_token_id": 11,
+        "prior_active_sha256": "b" * 64,
+        "replacement_token_id": 12,
+        "stage": "complete",
+    }
+    response = {"ok": True, "result": result}
+
+    command_handlers._record_gitea_runner_response(
+        SimpleNamespace(pk=2352),
+        _gitea_fence_normalized(
+            operation="reconcile",
+            state="blocked",
+            execution_id=2351,
+            digest=expected_digest,
+        ),
+        response,
+    )
+
+    assert recorded == [response]
+    assert fence.state == "clear"
+    assert fence.blocking_execution_id is None
+    assert fence.reconciliation_execution_id is None
+    assert fence.expected_token_sha256 == ""
+
+
+def test_gitea_runner_failed_reconciliation_releases_only_its_retry_owner(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    expected_digest = "a" * 64
+    fence = _GiteaFence(
+        state="blocked",
+        blocking_execution_id=2351,
+        reconciliation_execution_id=2352,
+        expected_token_sha256=expected_digest,
+    )
+    _install_gitea_fence_model(monkeypatch, fence)
+    recorded: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, execution: object) -> None:
+            self.execution = execution
+
+        def record_backend_response(self, backend_response: dict[str, object]) -> None:
+            recorded.append(backend_response)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    result = {
+        "ok": False,
+        "procedure": "service.gitea.runner.register",
+        "target": "nmultifibra-ci-untrusted-01",
+        "operation": "reconcile",
+        "scope": "nmulticloud-org",
+        "registered": None,
+        "reconciled": False,
+        "token_invalidated": False,
+        "token_reset_required": True,
+        "token_sha256": expected_digest,
+        "reset_state": "failed",
+        "prior_token_id": None,
+        "prior_active_sha256": None,
+        "replacement_token_id": None,
+        "stage": "reconcile",
+    }
+    response = {"ok": False, "result": result}
+
+    command_handlers._record_gitea_runner_response(
+        SimpleNamespace(pk=2352),
+        _gitea_fence_normalized(
+            operation="reconcile",
+            state="blocked",
+            execution_id=2351,
+            digest=expected_digest,
+        ),
+        response,
+    )
+
+    assert recorded == [response]
+    assert fence.state == "blocked"
+    assert fence.blocking_execution_id == 2351
+    assert fence.reconciliation_execution_id is None
+    assert fence.expected_token_sha256 == expected_digest
 
 
 @pytest.mark.parametrize(
