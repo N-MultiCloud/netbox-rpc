@@ -1,3 +1,5 @@
+import re
+
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
 HUAWEI_NE8000_F1A_SHOW_BGP_PEER = (
@@ -136,6 +138,24 @@ GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_PROVISION,
     }
 )
+# A vaulted secret REFERENCE, never secret material: "nms-secret:<uuid>" is an
+# opaque pointer that the execution backend redeems against the netbox-nms secret
+# bridge. Resolving it still requires the backend's own credentials, so persisting
+# the reference discloses nothing, while persisting a raw value would.
+#
+# This distinction has to be enforced by VALUE, not by key name. Every reference
+# parameter in this catalog is named something like ``admin_secret_ref``,
+# ``operator_token_secret_ref``, or ``registration_token_secret_ref``, so all of
+# them trip the event ledger's key-name redaction rule and would otherwise be
+# stored as "[REDACTED]" -- destroying the approved reference the pull-based
+# backend needs, and desynchronising the persisted fingerprint from
+# ``resolved_command_hash`` and the dispatch lease, which are computed before
+# redaction.
+NMS_SECRET_REFERENCE_RE = re.compile(
+    r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\Z"
+)
+
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
     {
         NETBOX_STAGING_ROTATE_BACKEND_TOKEN,

@@ -782,3 +782,50 @@ def test_docs_attribute_this_procedure_to_migration_0084() -> None:
             assert f"Migration `0080` adds\n`{procedure}`" not in path.read_text(
                 encoding="utf-8"
             )
+
+
+def test_contract_binds_the_seeded_transport_pin(migration) -> None:
+    """A live row edit to transport_pinned=False must not pass policy checks.
+
+    Migration 0084 is the only protected-procedure seed that sets
+    transport_pinned=True. If the immutable contract does not also bind it, the
+    pin is advertised but unenforced: flipping the row to False would pass
+    admission, approval, capability, and worker checks, after which an
+    estate-wide default driver chain could select a transport other than the
+    reviewed AsyncSSH one.
+    """
+
+    from netbox_rpc import gitea_org_ci_runner_contract as contract
+
+    assert migration._PROCEDURE_DEFAULTS["transport_pinned"] is True
+    assert contract.TRANSPORT_PINNED is True
+    assert contract.PROCEDURE_POLICY["transport_pinned"] is True
+    # the bound value must agree with what the migration actually seeds
+    assert (
+        contract.PROCEDURE_POLICY["transport_pinned"]
+        == migration._PROCEDURE_DEFAULTS["transport_pinned"]
+    )
+    assert (
+        contract.PROCEDURE_POLICY["transport_driver"]
+        == (migration._PROCEDURE_DEFAULTS["transport_driver"])
+    )
+
+
+def test_transport_pin_binding_is_opt_in_for_other_contracts() -> None:
+    """Contracts that never seeded a transport pin keep their policy shape.
+
+    The extractor adds transport_pinned only for contracts that declare
+    TRANSPORT_PINNED, so this change cannot alter policy comparison for the
+    staging rotation, the Gitea 1.27.1 upgrade, or service.gitea.runner.register.
+    """
+
+    from netbox_rpc import gitea_runner_contract, gitea_upgrade_contract
+    from netbox_rpc import staging_rotation_contract
+
+    for other in (
+        gitea_runner_contract,
+        gitea_upgrade_contract,
+        staging_rotation_contract,
+    ):
+        assert getattr(other, "TRANSPORT_PINNED", None) is None
+        assert "transport_pinned" not in other.PROCEDURE_POLICY

@@ -21,6 +21,11 @@ EFFECT = "write"
 TIMEOUT_SECONDS = 1800
 APPROVAL_REQUIRED = True
 TRANSPORT_DRIVER = "asyncssh"
+# Migration 0084 seeds transport_pinned=True. Bind it into the immutable policy
+# too, otherwise flipping the live row to False passes admission, approval,
+# capability, and worker checks, and an estate-wide default driver chain could
+# then select a transport other than the reviewed AsyncSSH pin.
+TRANSPORT_PINNED = True
 TRANSPORT_DRIVER_CHAIN: list[str] = []
 OUTPUT_PARSER = "none"
 OUTPUT_SCHEMA: dict[str, Any] = {}
@@ -301,6 +306,7 @@ PROCEDURE_POLICY = {
     "timeout_seconds": TIMEOUT_SECONDS,
     "approval_required": APPROVAL_REQUIRED,
     "transport_driver": TRANSPORT_DRIVER,
+    "transport_pinned": TRANSPORT_PINNED,
     "transport_driver_chain": TRANSPORT_DRIVER_CHAIN,
     "output_parser": OUTPUT_PARSER,
     "output_schema": OUTPUT_SCHEMA,

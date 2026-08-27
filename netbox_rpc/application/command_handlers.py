@@ -869,6 +869,11 @@ def _protected_procedure_policy(
     )
     if semantic_contract_sha256 is not None:
         policy["semantic_contract_sha256"] = semantic_contract_sha256
+    # Opt-in, like semantic_contract_sha256 above: only contracts that actually
+    # declare a transport pin get it compared, so contracts that never seeded
+    # transport_pinned keep their existing policy shape unchanged.
+    if getattr(contract, "TRANSPORT_PINNED", None) is not None:
+        policy["transport_pinned"] = getattr(procedure, "transport_pinned", None)
     return policy
 
 
