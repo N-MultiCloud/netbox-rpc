@@ -10,12 +10,17 @@ from django.db import transaction
 from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 
+from .. import dns_staging_deploy_contract as dns_staging_contract
+from .. import gitea_runner_contract as gitea_runner_contract
+from .. import gitea_upgrade_contract as gitea_contract
+from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
     AKVORADO_1_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
 )
@@ -24,18 +29,15 @@ from ..domain.normalization import (
     RPCExecutionError,
     code_gate_unavailable_reason,
     normalize_execution_params,
+    validate_akvorado_content_params,
     validate_gitea_runner_target,
     validate_gitea_upgrade_target,
-    validate_akvorado_content_params,
 )
 from ..event_store import mark_execution_failed
 from ..openbao_validation import (
     OpenBaoSecretIngressError,
     validate_openbao_params_for_persistence,
 )
-from .. import staging_rotation_contract as staging_contract
-from .. import gitea_upgrade_contract as gitea_contract
-from .. import gitea_runner_contract as gitea_runner_contract
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
 # service.samba.1.user_create / user_set_password). The raw password must
@@ -77,6 +79,8 @@ _STAGING_ROTATION_CREATE_FIELDS = frozenset(
 )
 _STAGING_ROTATION_APPROVAL_REASON = "Approved audited staging backend token rotation."
 _STAGING_ROTATION_REJECTION_REASON = "Rejected audited staging backend token rotation."
+_DNS_STAGING_DEPLOY_APPROVAL_REASON = "Approved audited staging DNS-pair deployment."
+_DNS_STAGING_DEPLOY_REJECTION_REASON = "Rejected audited staging DNS-pair deployment."
 _GITEA_UPGRADE_APPROVAL_REASON = "Approved audited production Gitea 1.27.1 upgrade."
 _GITEA_UPGRADE_REJECTION_REASON = "Rejected audited production Gitea 1.27.1 upgrade."
 _GITEA_RUNNER_APPROVAL_REASON = "Approved audited Gitea runner registration."
@@ -84,11 +88,13 @@ _GITEA_RUNNER_REJECTION_REASON = "Rejected audited Gitea runner registration."
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: _DNS_STAGING_DEPLOY_APPROVAL_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_APPROVAL_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: _DNS_STAGING_DEPLOY_REJECTION_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_REJECTION_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
 }
@@ -97,6 +103,8 @@ _PROTECTED_REJECTION_REASON = {
 def _protected_contract(procedure_name: str):
     if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
         return staging_contract
+    if procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR:
+        return dns_staging_contract
     if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
         return gitea_contract
     if procedure_name == GITEA_RUNNER_REGISTER:
@@ -107,6 +115,8 @@ def _protected_contract(procedure_name: str):
 def _protected_label(procedure_name: str) -> str:
     if procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
         return "Staging token rotation"
+    if procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR:
+        return "Staging DNS-pair deployment"
     if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
         return "Production Gitea upgrade"
     if procedure_name == GITEA_RUNNER_REGISTER:
@@ -253,6 +263,7 @@ def _verify_backend_capability(
     requires_explicit_capability = getattr(procedure, "name", "") in {
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
     }
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
@@ -626,8 +637,11 @@ def _require_staging_rotation_assigned_object(
     procedure: object,
     user: object,
 ) -> None:
-    """Pin token rotation to the existing, viewable nms-front-door device."""
-    if getattr(procedure, "name", "") != NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+    """Pin protected staging operations to the viewable front-door device."""
+    if getattr(procedure, "name", "") not in {
+        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
+    }:
         return
     content_type = validated_data.get("assigned_object_type")
     object_id = validated_data.get("assigned_object_id")
@@ -831,6 +845,8 @@ def _protected_procedure_policy(
     )
     if semantic_contract_sha256 is not None:
         policy["semantic_contract_sha256"] = semantic_contract_sha256
+    if hasattr(contract, "TRANSPORT_PINNED"):
+        policy["transport_pinned"] = getattr(procedure, "transport_pinned", None)
     return policy
 
 
@@ -912,7 +928,7 @@ def _require_protected_creation_shape(
             {
                 "non_field_errors": (
                     f"{_protected_label(procedure_name)} accepts only procedure_id, assigned "
-                    "object, and empty params; request metadata is forbidden."
+                    "object, and schema-governed params; request metadata is forbidden."
                 )
             }
         )
@@ -1367,6 +1383,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         if execution.procedure.name in {
             GITEA_PRODUCTION_UPGRADE_1_27_1,
             GITEA_RUNNER_REGISTER,
+            NETBOX_STAGING_DEPLOY_DNS_PAIR,
         }:
             _verify_backend_capability(
                 execution.procedure,

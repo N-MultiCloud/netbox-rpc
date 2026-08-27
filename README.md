@@ -146,6 +146,23 @@ The procedure catalog is intentionally narrow:
   are part of the immutable approval snapshot. Migration reversal deletes the seed
   when it has no executions; if execution history protects it, reversal keeps
   the row and command history but forces `enabled=False`.
+- `service.netbox.staging.deploy_dns_pair` — destructive, two-person deployment
+  of one reviewed lowercase 40-hex commit to the staging NetBox DNS plugin and
+  dns-api sidecar pair. It is fixed to the existing, requester-viewable
+  `nms-front-door` device and accepts only `commit_sha`; provider names, PATs,
+  record payloads, SSH routing, paths, commands, refs, and abbreviated SHAs are
+  rejected. Approval and the lease freeze the exact local `nms-proxy` SSH
+  service/credential revisions, host, port, authentication method, and
+  known-host digest; point-of-use drift is rejected. Admission and worker claim
+  both require an exact compatible backend capability whose golden semantic
+  digest includes the reviewed wrapper, sudoers, and runtime generation held
+  under the shared publication lock through execution. The
+  result contains only `ok`, constant `procedure`, constant
+  `target`, the approved `commit_sha`, nullable `deployed`, and `stage`: proven
+  success is `true/true/complete`, proven pre-process failure is
+  `false/false/execute`, and every post-process timeout, transport loss, signal,
+  malformed response, or nonzero exit is `false/null/indeterminate`. Reconcile
+  staging state before retrying an indeterminate run.
 - `service.gitea.production.upgrade_1_27_1` — disabled-by-default,
   destructive, approval-required upgrade of the exact production `Gitea`
   `virtualization.virtualmachine` PK 170 from 1.26.2 to 1.27.1. It accepts an
@@ -1240,7 +1257,8 @@ guards before an execution record is created and the RQ job is enqueued:
 1. **Enabled** — disabled procedures are rejected (HTTP 400).
 2. **Approval** — legacy procedures with `approval_required=True` require the
    caller to hold `netbox_rpc.approve_rpcprocedure`. Protected staging-token
-   rotation, production Gitea upgrade, and isolated-runner registration
+   rotation, exact-SHA staging DNS deployment, production Gitea upgrade, and
+   isolated-runner registration
    procedures instead record
    `requested → pending_approval` without enqueueing; only a distinct actor
    with that permission may record

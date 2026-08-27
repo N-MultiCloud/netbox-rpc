@@ -116,6 +116,8 @@ NETBOX_STAGING_ROTATE_BACKEND_TOKEN = "service.netbox.staging.rotate_backend_tok
 NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
     "service.netbox.staging.rotate_backend_token"
 )
+NETBOX_STAGING_DEPLOY_DNS_PAIR = "service.netbox.staging.deploy_dns_pair"
+NETBOX_STAGING_DEPLOY_DNS_PAIR_HANDLER = NETBOX_STAGING_DEPLOY_DNS_PAIR
 
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
 # versions, official artifact digest, and target-owned credential policy are
@@ -127,6 +129,7 @@ GITEA_RUNNER_REGISTER_HANDLER = GITEA_RUNNER_REGISTER
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
     {
         NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
     }

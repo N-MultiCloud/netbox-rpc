@@ -6,13 +6,12 @@ import importlib
 import json
 import sys
 import types
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from itertools import product
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
-
 
 OPENBAO_DECLARED_STRING_FIELDS = (
     ("auth_enable", "auth_type"),
@@ -114,12 +113,16 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
         "service.netbox.staging.rotate_backend_token"
     )
+    constants.NETBOX_STAGING_DEPLOY_DNS_PAIR = (
+        "service.netbox.staging.deploy_dns_pair"
+    )
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
     constants.GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
         constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
     }

@@ -3,19 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-import requests
 import jsonschema
+import requests
 from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
 from urllib3.util import Timeout as Urllib3Timeout
 
 from .backends import BackendTarget
 from .domain.normalization import (
-    RPCLinuxServiceAllowlist,
     RPCExecutionError,
+    RPCLinuxServiceAllowlist,
     _apply_driver_pipeline_overrides,
     _dispatch_normalize_execution_params,
     normalize_execution_params,
@@ -39,6 +42,58 @@ RPC_JOB_TIMEOUT = 600
 
 class _ProtectedBackendResponseError(ValueError):
     """Raised when a protected backend response exceeds its closed contract."""
+
+
+class _ProtectedBackendWallClockError(TimeoutError):
+    """Raised when a protected request exceeds its request-absolute budget."""
+
+
+@contextmanager
+def _protected_backend_wall_clock(deadline: float):
+    """Bound DNS, connect, send, and response headers on the worker main thread."""
+    if threading.current_thread() is not threading.main_thread():
+        raise _ProtectedBackendWallClockError(
+            "protected backend request requires the worker main thread"
+        )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ProtectedBackendWallClockError(
+            "protected backend request exceeded its total deadline"
+        )
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_remaining, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    started = deadline - remaining
+    ended: float | None = None
+
+    def _deadline_exceeded(_signum, _frame) -> None:
+        raise _ProtectedBackendWallClockError(
+            "protected backend request exceeded its total deadline"
+        )
+
+    signal.signal(signal.SIGALRM, _deadline_exceeded)
+    signal.setitimer(
+        signal.ITIMER_REAL,
+        min(remaining, previous_remaining) if previous_remaining > 0 else remaining,
+    )
+    try:
+        yield
+        ended = time.monotonic()
+        if ended >= deadline:
+            raise _ProtectedBackendWallClockError(
+                "protected backend request exceeded its total deadline"
+            )
+    finally:
+        if ended is None:
+            ended = time.monotonic()
+        elapsed = ended - started
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_remaining > elapsed:
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                previous_remaining - elapsed,
+                previous_interval,
+            )
 
 
 def _set_protected_response_socket_deadline(
@@ -272,6 +327,11 @@ def _call_backend(
         str(getattr(execution.procedure, "name", "") or "")
         == "service.gitea.runner.register"
     )
+    is_dns_staging_deploy = (
+        str(getattr(execution.procedure, "name", "") or "")
+        == "service.netbox.staging.deploy_dns_pair"
+    )
+    dns_commit_sha = str(params.get("commit_sha") or "")
     gitea_runner_scope = str(params.get("scope") or "")
     gitea_runner_operation = str(params.get("operation") or "register")
     execution_normalized = getattr(execution, "normalized_params", None)
@@ -280,7 +340,7 @@ def _call_backend(
         if isinstance(execution_normalized, dict)
         else None
     )
-    is_secret_protected = is_gitea_upgrade or is_gitea_runner
+    is_secret_protected = is_gitea_upgrade or is_gitea_runner or is_dns_staging_deploy
     runner_response_deadline: float | None = None
     request_kwargs: dict[str, Any] = {
         "headers": target.headers,
@@ -293,24 +353,46 @@ def _call_backend(
         # destination and must never be replayed by requests across a redirect.
         # Legacy procedure calls keep their byte-for-byte request behavior.
         request_kwargs["allow_redirects"] = False
-    if is_gitea_runner:
-        from . import gitea_runner_contract as runner_contract
+    if is_gitea_runner or is_dns_staging_deploy:
+        if is_gitea_runner:
+            from . import gitea_runner_contract as response_contract
+        else:
+            from . import dns_staging_deploy_contract as response_contract
 
         runner_response_deadline = (
-            time.monotonic() + runner_contract.ROUTE_BUDGET_SECONDS
+            time.monotonic() + response_contract.ROUTE_BUDGET_SECONDS
         )
         request_kwargs["stream"] = True
-        connect_timeout = min(10, runner_contract.ROUTE_BUDGET_SECONDS)
+        connect_timeout = min(10, response_contract.ROUTE_BUDGET_SECONDS)
         request_kwargs["timeout"] = Urllib3Timeout(
-            total=runner_contract.ROUTE_BUDGET_SECONDS,
+            total=response_contract.ROUTE_BUDGET_SECONDS,
             connect=connect_timeout,
             read=max(
                 1,
-                runner_contract.ROUTE_BUDGET_SECONDS - connect_timeout,
+                response_contract.ROUTE_BUDGET_SECONDS - connect_timeout,
             ),
         )
+    resp: requests.Response | None = None
     try:
-        resp = requests.post(url, **request_kwargs)
+        if runner_response_deadline is None:
+            resp = requests.post(url, **request_kwargs)
+        else:
+            with _protected_backend_wall_clock(runner_response_deadline):
+                resp = requests.post(url, **request_kwargs)
+    except _ProtectedBackendWallClockError:
+        if resp is not None:
+            resp.close()
+        if is_gitea_runner:
+            return _gitea_runner_transport_failure_response(
+                stage="indeterminate",
+                operation=gitea_runner_operation,
+                fence_digest=gitea_runner_fence_digest,
+                scope=gitea_runner_scope,
+            )
+        return _dns_staging_transport_failure_response(
+            commit_sha=dns_commit_sha,
+            stage="indeterminate",
+        )
     except requests.exceptions.RequestException as exc:
         if is_secret_protected:
             connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
@@ -322,6 +404,11 @@ def _call_backend(
                         fence_digest=gitea_runner_fence_digest,
                         scope=gitea_runner_scope,
                     )
+                if is_dns_staging_deploy:
+                    return _dns_staging_transport_failure_response(
+                        commit_sha=dns_commit_sha,
+                        stage="execute",
+                    )
                 return _gitea_transport_failure_response(stage="execute")
             if is_gitea_runner:
                 return _gitea_runner_transport_failure_response(
@@ -330,11 +417,21 @@ def _call_backend(
                     fence_digest=gitea_runner_fence_digest,
                     scope=gitea_runner_scope,
                 )
+            if is_dns_staging_deploy:
+                return _dns_staging_transport_failure_response(
+                    commit_sha=dns_commit_sha,
+                    stage="indeterminate",
+                )
             return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend is unreachable: {exc}",
             code="RPC_BACKEND_UNREACHABLE",
         ) from exc
+    if resp is None:
+        raise RPCExecutionError(
+            "nms-backend returned no response.",
+            code="RPC_BACKEND_BAD_RESPONSE",
+        )
     if resp.status_code == 401 and not is_secret_protected:
         raise RPCExecutionError(
             "nms-backend returned 401 Unauthorized.",
@@ -352,10 +449,19 @@ def _call_backend(
                 fence_digest=gitea_runner_fence_digest,
                 scope=gitea_runner_scope,
             )
+        if is_dns_staging_deploy:
+            resp.close()
+            return _dns_staging_transport_failure_response(
+                commit_sha=dns_commit_sha,
+                stage="indeterminate",
+            )
         return _gitea_transport_failure_response(stage="indeterminate")
     try:
-        if is_gitea_runner:
-            from . import gitea_runner_contract as runner_contract
+        if is_gitea_runner or is_dns_staging_deploy:
+            if is_gitea_runner:
+                from . import gitea_runner_contract as response_contract
+            else:
+                from . import dns_staging_deploy_contract as response_contract
 
             if runner_response_deadline is None:
                 raise _ProtectedBackendResponseError(
@@ -364,7 +470,7 @@ def _call_backend(
             data = _read_bounded_json_response(
                 resp,
                 deadline=runner_response_deadline,
-                max_bytes=runner_contract.BACKEND_RESPONSE_MAX_BYTES,
+                max_bytes=response_contract.BACKEND_RESPONSE_MAX_BYTES,
             )
         else:
             data = resp.json()
@@ -377,13 +483,18 @@ def _call_backend(
                     fence_digest=gitea_runner_fence_digest,
                     scope=gitea_runner_scope,
                 )
+            if is_dns_staging_deploy:
+                return _dns_staging_transport_failure_response(
+                    commit_sha=dns_commit_sha,
+                    stage="indeterminate",
+                )
             return _gitea_transport_failure_response(stage="indeterminate")
         raise RPCExecutionError(
             f"nms-backend returned non-JSON response: HTTP {resp.status_code}",
             code="RPC_BACKEND_BAD_RESPONSE",
         ) from exc
     finally:
-        if is_gitea_runner:
+        if is_gitea_runner or is_dns_staging_deploy:
             resp.close()
     if is_gitea_upgrade:
         normalized = _normalize_gitea_closed_response(data)
@@ -407,6 +518,22 @@ def _call_backend(
                 operation=gitea_runner_operation,
                 fence_digest=gitea_runner_fence_digest,
                 scope=gitea_runner_scope,
+            )
+        return normalized
+    if is_dns_staging_deploy:
+        normalized = _normalize_dns_staging_closed_response(
+            data,
+            commit_sha=dns_commit_sha,
+        )
+        if normalized is None:
+            return _dns_staging_transport_failure_response(
+                commit_sha=dns_commit_sha,
+                stage="indeterminate",
+            )
+        if not 200 <= resp.status_code < 300 and normalized["ok"] is not False:
+            return _dns_staging_transport_failure_response(
+                commit_sha=dns_commit_sha,
+                stage="indeterminate",
             )
         return normalized
     if resp.status_code >= 400:
@@ -443,6 +570,69 @@ def _gitea_transport_failure_response(*, stage: str) -> dict[str, Any]:
             "stage": stage,
         },
     }
+
+
+def _dns_staging_transport_failure_response(
+    *,
+    commit_sha: str,
+    stage: str,
+) -> dict[str, Any]:
+    """Return the conservative exact-SHA result for a transport failure."""
+    from . import dns_staging_deploy_contract as contract
+
+    safe_commit = (
+        commit_sha
+        if len(commit_sha) == 40
+        and all(character in "0123456789abcdef" for character in commit_sha)
+        else "0" * 40
+    )
+    indeterminate = stage == "indeterminate"
+    return {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": contract.PROCEDURE_NAME,
+            "target": contract.TARGET,
+            "commit_sha": safe_commit,
+            "deployed": None if indeterminate else False,
+            "stage": stage,
+        },
+    }
+
+
+def _normalize_dns_staging_closed_response(
+    data: object,
+    *,
+    commit_sha: str,
+) -> dict[str, Any] | None:
+    """Validate the output-free DNS deploy envelope and exact commit binding."""
+    from . import dns_staging_deploy_contract as contract
+
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    result = data.get("result")
+    if (
+        type(data.get("ok")) is not bool
+        or not isinstance(result, dict)
+        or result.get("ok") is not data["ok"]
+        or result.get("commit_sha") != commit_sha
+        or data.get("events") != []
+        or not isinstance(data.get("error_code"), str)
+        or not isinstance(data.get("error_message"), str)
+        or (data["ok"] and (data["error_code"] or data["error_message"]))
+    ):
+        return None
+    try:
+        jsonschema.validate(result, contract.RESULT_SCHEMA)
+    except jsonschema.ValidationError:
+        return None
+    return {"ok": data["ok"], "result": result}
 
 
 def _gitea_runner_transport_failure_response(

@@ -122,6 +122,10 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_runner_contract import SEMANTIC_CAPABILITY_EXTENSION
 
         payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
+    if payload["handler_id"] == "service.netbox.staging.deploy_dns_pair":
+        from .dns_staging_deploy_contract import SEMANTIC_CAPABILITY_EXTENSION
+
+        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

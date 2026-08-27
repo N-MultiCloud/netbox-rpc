@@ -2,14 +2,33 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-
 PROCEDURE_ID = "service.netbox.staging.rotate_backend_token"
+DNS_PROCEDURE_ID = "service.netbox.staging.deploy_dns_pair"
+DNS_COMMIT = "a" * 40
+DNS_SSH_POLICY = "target-owned-ssh:dcim.device:32"
+
+
+def _dns_ssh_snapshot() -> dict[str, object]:
+    return {
+        "ssh_service_id": 41,
+        "ssh_service_revision": "2026-08-27T10:00:00.000001Z",
+        "ssh_identity_id": 42,
+        "ssh_identity_revision": "2026-08-27T10:00:00.000002Z",
+        "ssh_storage_backend": "local",
+        "ssh_principal": "nms-proxy",
+        "ssh_method": "key",
+        "ssh_host": "10.0.0.10",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": "b" * 64,
+        "ssh_policy_ref": DNS_SSH_POLICY,
+    }
 
 
 @pytest.fixture()
@@ -53,6 +72,168 @@ def test_staging_rotation_normalizer_emits_only_pinned_target_metadata(
         key in normalized or key in normalized["command_fingerprint"]
         for key in ("token", "token_value", "secret", "value", "command")
     )
+
+
+def test_dns_staging_normalizer_binds_exact_commit_target_and_fingerprint(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = _execution({"commit_sha": DNS_COMMIT})
+    execution.procedure = SimpleNamespace(
+        name=DNS_PROCEDURE_ID,
+        handler_id=DNS_PROCEDURE_ID,
+    )
+    monkeypatch.setitem(
+        jobs_module.normalize_execution_params.__globals__,
+        "_resolve_locked_ssh_identity",
+        lambda **_kwargs: _dns_ssh_snapshot(),
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+    ssh_snapshot = _dns_ssh_snapshot()
+
+    assert normalized == {
+        "target": "nms-front-door",
+        "commit_sha": DNS_COMMIT,
+        "target_object": {"content_type": "dcim.device", "object_id": 32},
+        "ssh_snapshot": ssh_snapshot,
+        "ssh_policy_ref": DNS_SSH_POLICY,
+        "command_fingerprint": {
+            "handler_id": DNS_PROCEDURE_ID,
+            "target": "nms-front-door",
+            "commit_sha": DNS_COMMIT,
+            "assigned_object_id": 32,
+            "target_object_sha256": (
+                "027fdf95d08b711262aa69b3a7b237c71b719744f37ad233c1c4644eceb92f10"
+            ),
+            "ssh_snapshot_sha256": jobs_module._hash_json(ssh_snapshot),
+            "ssh_policy_ref": DNS_SSH_POLICY,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"commit_sha": "A" * 40},
+        {"commit_sha": "a" * 39},
+        {"commit_sha": DNS_COMMIT, "rpc_ssh_host": "attacker.invalid"},
+        {"commit_sha": DNS_COMMIT, "provider": "godaddy"},
+    ],
+)
+def test_dns_staging_normalizer_rejects_nonexact_or_extra_params(
+    jobs_module,
+    params: dict[str, object],
+) -> None:
+    execution = _execution(params)
+    execution.procedure = SimpleNamespace(
+        name=DNS_PROCEDURE_ID,
+        handler_id=DNS_PROCEDURE_ID,
+    )
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_dns_staging_wire_normalizer_binds_commit_and_discards_diagnostics(
+    jobs_module,
+) -> None:
+    result = {
+        "ok": True,
+        "procedure": DNS_PROCEDURE_ID,
+        "target": "nms-front-door",
+        "commit_sha": DNS_COMMIT,
+        "deployed": True,
+        "stage": "complete",
+    }
+    wire = {
+        "ok": True,
+        "result": result,
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+    assert jobs_module._normalize_dns_staging_closed_response(
+        wire, commit_sha=DNS_COMMIT
+    ) == {"ok": True, "result": result}
+    assert (
+        jobs_module._normalize_dns_staging_closed_response(wire, commit_sha="b" * 40)
+        is None
+    )
+    assert (
+        jobs_module._normalize_dns_staging_closed_response(
+            {**wire, "events": [{"message": "leak"}]}, commit_sha=DNS_COMMIT
+        )
+        is None
+    )
+
+
+def test_dns_staging_transport_failure_is_commit_bound_and_conservative(
+    jobs_module,
+) -> None:
+    assert (
+        jobs_module._dns_staging_transport_failure_response(
+            commit_sha=DNS_COMMIT,
+            stage="execute",
+        )["result"]["deployed"]
+        is False
+    )
+    response = jobs_module._dns_staging_transport_failure_response(
+        commit_sha=DNS_COMMIT,
+        stage="indeterminate",
+    )
+    assert response["result"] == {
+        "ok": False,
+        "procedure": DNS_PROCEDURE_ID,
+        "target": "nms-front-door",
+        "commit_sha": DNS_COMMIT,
+        "deployed": None,
+        "stage": "indeterminate",
+    }
+
+
+def test_dns_staging_absolute_wall_clock_bounds_response_headers(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = importlib.import_module("netbox_rpc.dns_staging_deploy_contract")
+    monkeypatch.setattr(contract, "ROUTE_BUDGET_SECONDS", 0.05)
+    monkeypatch.setattr(
+        jobs_module.RPCExecution,
+        "TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY",
+        "_timeout_seconds_snapshot",
+        raising=False,
+    )
+
+    def _trickle_headers(*_args, **_kwargs):
+        time.sleep(0.2)
+        raise AssertionError("the absolute request deadline must interrupt headers")
+
+    monkeypatch.setattr(jobs_module.requests, "post", _trickle_headers)
+    execution = SimpleNamespace(
+        pk=270,
+        params={"commit_sha": DNS_COMMIT},
+        normalized_params={},
+        procedure=SimpleNamespace(
+            name=DNS_PROCEDURE_ID,
+            timeout_seconds=2700,
+        ),
+    )
+    target = SimpleNamespace(
+        url="https://nms-backend.invalid",
+        headers={"Authorization": "Bearer not-observable"},
+        verify_ssl=True,
+    )
+
+    started = time.monotonic()
+    response = jobs_module._call_backend(target, execution)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert response["result"]["commit_sha"] == DNS_COMMIT
+    assert response["result"]["deployed"] is None
+    assert response["result"]["stage"] == "indeterminate"
 
 
 def test_staging_rotation_normalizer_allows_target_owned_ssh_resolution(
@@ -150,8 +331,15 @@ def _execution(
         target_display=target,
         target_model_label=target_model_label,
         assigned_object_id=assigned_object_id,
+        assigned_object_type_id=7,
         assigned_object=(
-            SimpleNamespace(name=target, pk=32) if isinstance(target, str) else None
+            SimpleNamespace(
+                name=target,
+                pk=32,
+                primary_ip4=SimpleNamespace(address="10.0.0.10/24"),
+            )
+            if isinstance(target, str)
+            else None
         ),
     )
 

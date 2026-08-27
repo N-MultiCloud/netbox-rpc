@@ -68,6 +68,14 @@ command behavior changes.
 > never exposes the reusable registration token. Its durable fence,
 > expected-token rotation/reconciliation, and activation order are mandatory; see
 > `docs/gitea-runner-registration.md`.
+> `service.netbox.staging.deploy_dns_pair` is also destructive and must never be
+> created, approved, or dispatched autonomously. It accepts only one reviewed
+> lowercase full `commit_sha`, targets only the existing `nms-front-door`
+> device, requires a distinct approver plus an exact compatible backend
+> capability, freezes the target-owned local `nms-proxy` SSH identity and host
+> pin into approval/lease evidence, and reports every uncertain post-process outcome as
+> `deployed=null, stage=indeterminate`. Never place provider credentials, DNS
+> records, routing, command output, or operator notes in this execution.
 
 @AGENTS.md
 

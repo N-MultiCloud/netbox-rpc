@@ -94,6 +94,11 @@ EXEMPT_HANDLER_RATIONALE = {
         "installs the staging NetBox service token without accepting or returning "
         "the token value through the RPC contract."
     ),
+    "service.netbox.staging.deploy_dns_pair": (
+        "Invokes the fixed root-owned staging DNS-pair deployer for one approved "
+        "exact commit SHA without accepting routing, command, provider, credential, "
+        "or DNS-record data."
+    ),
     "service.gitea.production.upgrade_1_27_1": (
         "Runs a backend-owned production Gitea upgrade transaction: exact target "
         "validation, official artifact verification, backup, service lifecycle, "
