@@ -811,16 +811,30 @@ def test_contract_binds_the_seeded_transport_pin(migration) -> None:
     )
 
 
-def test_transport_pin_binding_is_opt_in_for_other_contracts() -> None:
-    """Contracts that never seeded a transport pin keep their policy shape.
+def test_transport_pin_binding_is_scoped_to_this_contract() -> None:
+    """Only this contract declares a pin, so only this one is compared.
 
-    The extractor adds transport_pinned only for contracts that declare
-    TRANSPORT_PINNED, so this change cannot alter policy comparison for the
-    staging rotation, the Gitea 1.27.1 upgrade, or service.gitea.runner.register.
+    `_protected_procedure_policy()` adds `transport_pinned` opt-in, mirroring the
+    existing `semantic_contract_sha256` precedent, so the staging rotation, the
+    Gitea 1.27.1 upgrade, and service.gitea.runner.register keep their exact
+    policy shape and their computed PROCEDURE_POLICY_SHA256 unchanged.
+
+    NOTE: migration 0075 pins service.netbox.staging.rotate_backend_token, and
+    its contract does NOT bind that pin -- the same defect this fixes here, but
+    pre-existing and independent of this procedure. Deliberately left alone
+    rather than changing a sensitive unrelated procedure's admission behaviour
+    on a feature branch; tracked separately.
     """
 
-    from netbox_rpc import gitea_runner_contract, gitea_upgrade_contract
-    from netbox_rpc import staging_rotation_contract
+    from netbox_rpc import (
+        gitea_org_ci_runner_contract,
+        gitea_runner_contract,
+        gitea_upgrade_contract,
+        staging_rotation_contract,
+    )
+
+    assert gitea_org_ci_runner_contract.TRANSPORT_PINNED is True
+    assert gitea_org_ci_runner_contract.PROCEDURE_POLICY["transport_pinned"] is True
 
     for other in (
         gitea_runner_contract,
