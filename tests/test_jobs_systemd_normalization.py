@@ -242,6 +242,13 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     netbox_rpc_models.RPCLinuxServiceAllowlist = type(
         "RPCLinuxServiceAllowlist", (), {}
     )
+    # #262: the netbox.plugin.install normalizer imports this alongside the
+    # service allowlist, so the shared stub must define it or every pure-domain
+    # test that imports netbox_rpc.jobs fails at import time, not just the
+    # plugin-install ones.
+    netbox_rpc_models.RPCNetBoxPluginAllowlist = type(
+        "RPCNetBoxPluginAllowlist", (), {}
+    )
     # #215: jobs._call_backend() reads this class attribute as the params key
     # for the frozen timeout_seconds snapshot; the stub must define it too.
     netbox_rpc_models.RPCExecution = type(

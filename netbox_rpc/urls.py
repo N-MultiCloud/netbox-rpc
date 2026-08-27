@@ -8,6 +8,7 @@ _MODEL_ROUTES = (
     ("rpcprocedure", "procedures"),
     ("rpcintent", "intents"),
     ("rpclinuxserviceallowlist", "linux-service-allowlist"),
+    ("rpcnetboxpluginallowlist", "netbox-plugin-allowlist"),
     ("rpcexecution", "executions"),
     ("rpcexecutionevent", "execution-events"),
     ("rpcpluginsettings", "settings"),

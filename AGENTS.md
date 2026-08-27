@@ -1013,6 +1013,62 @@ pending approval or distinct-actor check.
   `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
   advertisement, procedure forced `enabled=True`) alongside the existing
   `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
+- `netbox.plugin.install` (migrations `0082`/`0083`) installs an **allowlisted**
+  NetBox plugin at an **exact** version on a managed NetBox host, registers it in
+  `PLUGINS`, migrates, collects static, restarts the allowlisted services, health
+  checks, and **restores the previous settings file if NetBox does not come
+  back**. `effect="write"`, `approval_required=True`, 900s.
+
+  It exists because nothing else could do this: `deploy-plugin` upgrades plugins
+  already installed and already listed in `PLUGINS`, `restart_service` restarts
+  one, and neither installs a distribution or runs a new app's migrations — so a
+  first-time install was reachable only by SSH.
+
+  **`RPCNetBoxPluginAllowlist` is what makes it safe.** Params are only
+  `plugin_slug`, `version`, and optional `dry_run`; the row supplies the
+  `distribution`, `module`, `venv_python`, `manage_py`, `settings_file`, and
+  `service_slugs`. A caller-supplied distribution would be remote code execution
+  with an audit trail attached — the string reaches `pip install`, which accepts
+  URLs, paths, VCS references and options, and whatever it fetches is then
+  imported by a NetBox restart. `version` is the one caller-supplied value that
+  reaches pip and is constrained to an exact version, never a range, so the audit
+  record names the precise artifact.
+
+  Restart targets resolve through `RPCLinuxServiceAllowlist` (migration `0058`'s
+  `netbox`/`netbox-rq` rows), not through unit names on the plugin row, so a unit
+  this procedure can bounce is one an operator already approved for bouncing. A
+  row listing no services is refused: installing without restarting leaves the
+  plugin on disk and absent from the running process, which would report success
+  and show no plugin.
+
+  **It takes no `credential_pk`** — SSH resolves from the target device's own
+  `DeviceService`, as `restart_service` does — so unlike
+  `os.linux_env_file.upsert_var` it does **not** inherit #203. It does inherit
+  #163's approval TOCTOU: an approver could approve against one
+  `RPCNetBoxPluginAllowlist` row while the worker resolves a different one edited
+  in between. That is recorded in the gate text.
+
+  **Why the rollback is the point.** A plugin whose `min_version`/`max_version`
+  window excludes the running NetBox does not degrade — NetBox refuses to start.
+  Observed while testing `netbox-openbao` against 4.6: the container went from
+  healthy to exited and stayed down until the entry was removed from `PLUGINS`.
+  On production that is an outage whose fix requires editing the configuration of
+  a host whose NetBox is already down. `dry_run=true` runs the version-window
+  pre-flight and stops, turning that outage into a rejected request.
+
+  **No `config` parameter, deliberately.** The settings file is Python and JSON
+  is not a subset of it (`null`/`true`/`false` are not `None`/`True`/`False`), so
+  writing caller-supplied JSON there either corrupts the file or needs a
+  converter whose bugs are settings-file corruption on a production host. It is
+  also unnecessary: a plugin with `required_settings = []` loads with no entry.
+
+  Seeded `enabled=False` **and** hard-gated in code
+  (`_NETBOX_PLUGIN_INSTALL_AVAILABLE = False`), enforced through
+  `code_gate_unavailable_reason()` at admission, advertisement, and worker-claim
+  time. Flip neither until the nms-backend handler is deployed and verified.
+  Listed in `EXEMPT_HANDLER_RATIONALE` with one representative command row —
+  the rollback alone has no fixed-argv form, since whether it runs depends on
+  whether the health check passed.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`, migration `0066`,
   `tests/test_huawei_ne8000_bgp_procedure.py`, and

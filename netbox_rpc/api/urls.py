@@ -11,6 +11,7 @@ router.register("procedures", views.RPCProcedureViewSet)
 router.register("procedure-commands", views.RPCProcedureCommandViewSet)
 router.register("intents", views.RPCIntentViewSet)
 router.register("linux-service-allowlist", views.RPCLinuxServiceAllowlistViewSet)
+router.register("netbox-plugin-allowlist", views.RPCNetBoxPluginAllowlistViewSet)
 router.register("executions", views.RPCExecutionViewSet)
 router.register("execution-events", views.RPCExecutionEventViewSet)
 

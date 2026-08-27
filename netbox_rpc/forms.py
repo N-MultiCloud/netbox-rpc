@@ -16,6 +16,7 @@ from .models import (
     RPCIntent,
     RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
     RpcPluginSettings,
@@ -196,6 +197,64 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
         )
 
 
+class RPCNetBoxPluginAllowlistForm(NetBoxModelForm):
+    """Operator-managed authorization for a plugin `netbox.plugin.install` may install.
+
+    Editing a row here decides what a future execution actually installs and
+    imports, so it is the real authorization surface for that procedure -- the
+    caller only names the slug.
+    """
+
+    comments = CommentField()
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        try:
+            from netbox_nms.models import DeviceCredential
+        except ImportError:
+            self.fields["ssh_credential_override"] = forms.IntegerField(
+                required=False,
+                label="SSH Credential Override (DeviceCredential PK)",
+            )
+            return
+
+        user = _request_user(self.instance)
+        credential_queryset = (
+            DeviceCredential.objects.none()
+            if user is None
+            else DeviceCredential.objects.restrict(user, "view")
+        )
+        self.fields["ssh_credential_override"] = DynamicModelChoiceField(
+            queryset=credential_queryset,
+            required=False,
+            label="SSH Credential Override",
+        )
+
+    def clean_ssh_credential_override(self) -> int | None:
+        value = self.cleaned_data.get("ssh_credential_override")
+        if value in (None, ""):
+            return None
+        return int(getattr(value, "pk", value))
+
+    class Meta:
+        model = RPCNetBoxPluginAllowlist
+        fields = (
+            "slug",
+            "distribution",
+            "module",
+            "venv_python",
+            "manage_py",
+            "settings_file",
+            "service_slugs",
+            "enabled",
+            "target_models",
+            "ssh_credential_override",
+            "description",
+            "tags",
+            "comments",
+        )
+
+
 class RPCIntentForm(NetBoxModelForm):
     """Create/edit an intent: pick procedures + declare the execution mode.
 
@@ -315,6 +374,10 @@ class RPCProcedureCommandFilterForm(NetBoxModelFilterSetForm):
 class RPCLinuxServiceAllowlistFilterForm(NetBoxModelFilterSetForm):
     model = RPCLinuxServiceAllowlist
     enabled = forms.NullBooleanField(required=False)
+
+
+class RPCNetBoxPluginAllowlistFilterForm(NetBoxModelFilterSetForm):
+    model = RPCNetBoxPluginAllowlist
 
 
 class RPCIntentFilterForm(NetBoxModelFilterSetForm):

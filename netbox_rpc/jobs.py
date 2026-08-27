@@ -15,6 +15,7 @@ from urllib3.util import Timeout as Urllib3Timeout
 from .backends import BackendTarget
 from .domain.normalization import (
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCExecutionError,
     _apply_driver_pipeline_overrides,
     _dispatch_normalize_execution_params,
@@ -148,6 +149,7 @@ def _read_bounded_json_response(
 __all__ = (
     "BackendTarget",
     "RPCLinuxServiceAllowlist",
+    "RPCNetBoxPluginAllowlist",
     "RPCExecutionError",
     "RPCExecutionJob",
     "_apply_driver_pipeline_overrides",
