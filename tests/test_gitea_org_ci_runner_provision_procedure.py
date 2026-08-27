@@ -112,9 +112,7 @@ def test_migration_is_renumbered_onto_the_single_main_chain(migration) -> None:
 
 
 def test_migration_matches_the_immutable_active_contract(migration) -> None:
-    contract = runpy.run_path(
-        str(ROOT / "netbox_rpc/gitea_org_ci_runner_contract.py")
-    )
+    contract = runpy.run_path(str(ROOT / "netbox_rpc/gitea_org_ci_runner_contract.py"))
 
     assert migration._LANES == contract["LANES"] == LANES
     assert migration._PARAMS_SCHEMA == contract["PARAMS_SCHEMA"]

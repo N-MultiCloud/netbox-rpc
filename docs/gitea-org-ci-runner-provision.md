@@ -55,9 +55,12 @@ of scope for this procedure.
 
 ## Caller contract
 
-The assigned NetBox object identifies the prepared runner host. The backend must
-resolve host, port, credential, and pinned-known-host policy only from that
-object. Caller-provided `rpc_ssh_*` routing is rejected.
+The assigned NetBox object is pinned to `virtualization.virtualmachine` PK 416,
+named `Gitea-Runner`, active, with primary IPv4 `10.0.30.241`. Admission proves
+that exact object exists and is viewable by the requester; normalization repeats
+the immutable identity check when an approved execution is claimed by a worker.
+The backend must resolve host, port, credential, and pinned-known-host policy
+only from that object. Caller-provided `rpc_ssh_*` routing is rejected.
 
 Required params:
 
@@ -71,12 +74,15 @@ selected lane's frozen identities or security posture:
 
 | Param | Default |
 | --- | --- |
-| `gitea_instance_url` | `http://10.0.30.96:3000` |
-| `organization` | `N-MultiCloud` |
 | `install_docker` | `true` |
 | `build_runner_image` | `true` |
 | `load_prebuilt_runner_image` | `false` |
 | `force_recreate` | `false` |
+
+`gitea_instance_url` and `organization` are not caller parameters. They are
+frozen server-side to `http://10.0.30.96:3000` and `N-MultiCloud`, respectively,
+and are `const` values in the closed result schema. This prevents a requester
+from redirecting a resolved registration credential to another origin.
 
 `build_runner_image=true` and `load_prebuilt_runner_image=true` are mutually
 exclusive. `additionalProperties` is false. In particular, `runner_name`,
@@ -94,6 +100,13 @@ Normalization copies the selected lane's full frozen contract into normalized
 params and binds scalar values plus a digest of the exact ordered label array
 into `command_fingerprint`. This makes approval drift visible without allowing
 the caller to shape the installation.
+
+The procedure is a protected two-person command. Creation produces
+`pending_approval` plus an immutable snapshot and never enqueues. A distinct
+authorized approver must decide it; approval revalidates the exact catalog,
+target, backend, capability, normalized params, and fingerprint before queueing.
+Worker claim repeats those checks and requires a signed one-time dispatch lease.
+There is no ID-only dispatch fallback for this procedure.
 
 The closed result schema requires the selected `lane` and all corresponding
 constants. It rejects a result that mixes lanes, changes label order, reports a

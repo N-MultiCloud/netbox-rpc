@@ -564,6 +564,7 @@ def test_gitea_org_ci_runner_creation_requests_two_person_approval_without_enque
     contract = command_handlers.gitea_org_ci_runner_contract
     procedure = SimpleNamespace(
         name=contract.PROCEDURE_NAME,
+        handler_id=contract.HANDLER_ID,
         enabled=True,
         approval_required=True,
         params_schema=contract.PARAMS_SCHEMA,
@@ -609,9 +610,7 @@ def test_gitea_org_ci_runner_creation_requests_two_person_approval_without_enque
             transitions.append(("request", requested_by_id))
 
         def request_approval(self, *, snapshot_hash, requested_by_id):
-            transitions.append(
-                ("request_approval", snapshot_hash, requested_by_id)
-            )
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
 
         def queue(self):
             pytest.fail("protected creation must not queue before approval")

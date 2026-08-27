@@ -239,15 +239,20 @@ The procedure catalog is intentionally narrow:
   [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
 - `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
   approval-required provisioning contract for the two organization CI lanes on
-  the assigned runner host. The required closed `lane` enum selects either the
+  exact `Gitea-Runner` VM PK 416 (`10.0.30.241`). The required closed `lane`
+  enum selects either the
   no-socket, `cap_drop: ALL`, no-new-privileges, non-root `cirunner`
   `untrusted-python312` host-executor stack or the `general-ubuntu` Docker-
   executor stack, where only the runner mounts `/var/run/docker.sock` and jobs
   run as sibling containers without that socket. Runner name, ordered labels,
   image, executor, Compose directory, and trust posture are frozen server-side;
   callers cannot override them. Callers provide only the lane, bounded common
-  controls, and `registration_token_secret_ref`; SSH resolves exclusively from
-  the assigned NetBox object. Migration `0084` depends on `0083`, seeds the row
+  controls, and `registration_token_secret_ref`; the Gitea origin and
+  `N-MultiCloud` organization are frozen server-side, and SSH resolves
+  exclusively from the exact, requester-viewable assigned VM. The protected
+  workflow requires a distinct approver, immutable snapshot, compatible
+  capability, and signed one-time dispatch lease. Migration `0084` depends on
+  `0083`, seeds the row
   and representative command with `enabled=False`, and a three-layer code gate
   keeps it non-advertised and non-dispatchable until the matching
   `netbox-rpc-backend` handler and approved capability contract ship. See
@@ -1370,9 +1375,9 @@ rather than activated on a broader runner.
 
 Migration `0084` adds
 `service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
-procedure for provisioning that isolated organization runner on the assigned
-runner host. It is seeded disabled and hard-gated until its backend handler is
-available. See
+procedure for provisioning that isolated organization runner on exact
+`Gitea-Runner` VM PK 416 (`10.0.30.241`). It is seeded disabled and hard-gated
+until its backend handler is available. See
 [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md)
 for the exact SSH/Docker commands to translate into Ansible.
 

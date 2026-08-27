@@ -89,11 +89,11 @@ def derive_command_contract_hash(procedure: Any) -> str:
     """Derive the shared contract hash for a procedure.
 
     Canonical sha256 over the procedure's identity + its ordered command
-    contract. The production Gitea upgrade additionally includes its complete
-    semantic capability extension (target, guest constants, SSH pin policy,
-    normalized/fingerprint schemas, and result states); legacy handler hashes
-    remain byte-for-byte unchanged. The paired backend derives the same value,
-    so a hash mismatch means the two sides disagree on what will run.
+    contract. Protected Gitea procedures additionally include their complete
+    semantic capability extension (targets, policy constants, and closed
+    schemas); legacy handler hashes remain byte-for-byte unchanged. The paired
+    backend derives the same value, so a hash mismatch means the two sides
+    disagree on what will run.
     """
     commands = []
     command_qs = getattr(procedure, "commands", None)

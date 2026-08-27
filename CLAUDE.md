@@ -70,11 +70,14 @@ command behavior changes.
 > `docs/gitea-runner-registration.md`.
 > `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
 > runner-host provisioning procedure, seeded disabled and hard-gated until the
-> paired backend handler exists. Its closed `lane` enum selects either the
+> paired backend handler exists. It is pinned to `Gitea-Runner` VM PK 416
+> (`10.0.30.241`) and uses the protected two-person approval and signed-lease
+> workflow. Its closed `lane` enum selects either the
 > no-socket/non-root `untrusted-python312` host-executor stack or the
 > runner-socket-only `general-ubuntu` Docker-executor stack. Every lane-specific
 > name, label, image, directory, executor, and trust-posture value is frozen
-> server-side. It accepts the registration credential only as an
+> server-side, including the Gitea origin and organization. It accepts the
+> registration credential only as an
 > `nms-secret:<uuid>` reference and rejects caller SSH routing. See
 > `docs/gitea-org-ci-runner-provision.md`.
 

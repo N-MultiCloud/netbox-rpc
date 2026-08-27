@@ -213,7 +213,8 @@ foundation of the P0 two-person-approval epic #163). Issues #221 and #224
 activate the complete two-person route for
 `service.netbox.staging.rotate_backend_token` and
 `service.gitea.production.upgrade_1_27_1`, plus the disabled
-`service.gitea.runner.register`; other legacy
+`service.gitea.runner.register` and
+`service.gitea.actions_runner.provision_org_ci_runner`; other legacy
 `approval_required` procedures retain their existing requester permission gate
 until they are migrated deliberately.
 
@@ -719,16 +720,20 @@ pending approval or distinct-actor check.
 - **Gitea Actions org CI runner provisioning** is seeded disabled by migration
   `0084` (depending on `0083`) as
   `service.gitea.actions_runner.provision_org_ci_runner`. It is a distinct
-  approval-required install/register/start/verify workflow for the two runner
-  lanes on the assigned host, not a restart of an existing systemd unit. The
+  protected two-person install/register/start/verify workflow for the two runner
+  lanes on exact `Gitea-Runner` VM PK 416 (`10.0.30.241`), not a restart of an
+  existing systemd unit. The
   closed `lane` enum freezes the name, ordered labels, image, executor, Compose
   directory, and trust posture. `untrusted-python312` uses the host executor,
   no Docker socket, `cap_drop: ALL`, no-new-privileges, and non-root `cirunner`;
   `general-ubuntu` uses Docker-executor labels and mounts the Docker socket only
   into the runner so jobs are socket-free sibling containers. The procedure
   requires `registration_token_secret_ref` as an `nms-secret:<uuid>`, rejects
-  `rpc_ssh_*` routing overrides, and resolves SSH only from the assigned NetBox
-  object. The hard gate `_GITEA_ORG_CI_RUNNER_AVAILABLE` must stay false until
+  `rpc_ssh_*` routing overrides, freezes the Gitea origin and `N-MultiCloud`
+  organization server-side, and resolves SSH only from the exact,
+  requester-viewable assigned VM. A distinct approver, immutable approval
+  snapshot, compatible capability, and signed one-time dispatch lease are
+  mandatory. The hard gate `_GITEA_ORG_CI_RUNNER_AVAILABLE` must stay false until
   the paired `netbox-rpc-backend` handler and approved capability contract are
   deployed, then a forward migration may enable the row and open the gate. The
   complete frozen contract lives in
@@ -1326,7 +1331,8 @@ pending approval or distinct-actor check.
   evidence.
 - Gitea org CI runner provisioning is seeded disabled by migration `0084` as
   `service.gitea.actions_runner.provision_org_ci_runner` (write, 1800s,
-  approval required), targeting `dcim.device` and `virtualization.virtualmachine`.
+  approval required), targeting only exact `virtualization.virtualmachine` PK
+  416 (`Gitea-Runner`, `10.0.30.241`).
   Its required `lane` enum selects one of two fully frozen stacks:
   `untrusted-python312` has no Docker socket, drops all capabilities, enables
   no-new-privileges, and runs jobs as non-root `cirunner` with the host executor;

@@ -279,8 +279,8 @@ def _verify_backend_capability(
     Fetches the selected backend's capability manifest and verifies the
     procedure's handler/version/effect/contract-hash/envelope against it. A
     ``MISMATCH`` (advertised but incompatible) is rejected (400). Legacy
-    procedures retain graceful ``UNKNOWN`` handling; the production Gitea
-    upgrade requires an explicit compatible manifest at admission and claim.
+    procedures retain graceful ``UNKNOWN`` handling; protected Gitea procedures
+    require an explicit compatible manifest at admission and claim.
     """
     from .. import capabilities
     from ..models import RpcPluginSettings
@@ -950,7 +950,7 @@ def _require_protected_creation_shape(
             {
                 "non_field_errors": (
                     f"{_protected_label(procedure_name)} accepts only procedure_id, assigned "
-                    "object, and empty params; request metadata is forbidden."
+                    "object, and its closed params object; request metadata is forbidden."
                 )
             }
         )
