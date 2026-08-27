@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -127,17 +128,13 @@ def test_rows_match_the_real_runner_units_on_disk() -> None:
     """
 
     unit_dir = Path("/root/personal-context/gitea-act-runner/systemd")
-    try:
-        available = unit_dir.is_dir()
-    except OSError:  # pragma: no cover - environment-dependent
-        # `is_dir()` returns False for a missing path but *raises* when the path
-        # cannot be reached because an ancestor is not traversable -- which is the
-        # ordinary case inside the CI container, where the job user cannot read
-        # /root/personal-context. Without this the docstring's promised skip never
-        # happens and the suite is not portable after all; it fails with
-        # PermissionError instead.
-        available = False
-    if not available:  # pragma: no cover - environment-dependent
+    # os.path.isdir, not Path.is_dir: through Python 3.13 pathlib swallows only
+    # ENOENT/ENOTDIR/EBADF/ELOOP and lets EACCES propagate (3.14 widened it to all
+    # OSError). CI pins 3.12, where the guard itself raised on the untrusted
+    # runner, whose job user cannot traverse the container's /root — turning the
+    # intended skip into a hard failure. os.path.isdir is False on any OSError
+    # regardless of version.
+    if not os.path.isdir(unit_dir):  # pragma: no cover - environment-dependent
         import pytest
 
         pytest.skip("runner unit definitions are not available in this environment")

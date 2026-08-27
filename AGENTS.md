@@ -1013,7 +1013,7 @@ pending approval or distinct-actor check.
   `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
   advertisement, procedure forced `enabled=True`) alongside the existing
   `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
-- `netbox.plugin.install` (migrations `0068`/`0069`) installs an **allowlisted**
+- `netbox.plugin.install` (migrations `0082`/`0083`) installs an **allowlisted**
   NetBox plugin at an **exact** version on a managed NetBox host, registers it in
   `PLUGINS`, migrates, collects static, restarts the allowlisted services, health
   checks, and **restores the previous settings file if NetBox does not come
