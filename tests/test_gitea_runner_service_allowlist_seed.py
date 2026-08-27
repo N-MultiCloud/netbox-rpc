@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -127,7 +128,11 @@ def test_rows_match_the_real_runner_units_on_disk() -> None:
     """
 
     unit_dir = Path("/root/personal-context/gitea-act-runner/systemd")
-    if not unit_dir.is_dir():  # pragma: no cover - environment-dependent
+    # os.path.isdir, not Path.is_dir: pathlib swallows only ENOENT/ENOTDIR/EBADF/
+    # ELOOP and lets EACCES propagate, so the guard itself raised on the untrusted
+    # CI runner, where the job user cannot traverse the container's /root. That
+    # turned the intended skip into a hard failure.
+    if not os.path.isdir(unit_dir):  # pragma: no cover - environment-dependent
         import pytest
 
         pytest.skip("runner unit definitions are not available in this environment")
