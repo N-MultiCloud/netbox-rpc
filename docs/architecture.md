@@ -255,10 +255,11 @@ objectless `user.has_perm(...)` admission checks do not preserve a concrete
 procedure constraint; completing general object-scoped two-person enforcement
 remains work under epic #163.
 
-Issues #221, #224, and #235 deliberately activate the full existing approval
-foundation for `service.netbox.staging.rotate_backend_token` and
-`service.gitea.production.upgrade_1_27_1`, plus the disabled
-`service.gitea.runner.register`, only:
+The protected-procedure registry deliberately activates the full existing
+approval foundation for `service.netbox.staging.rotate_backend_token`,
+`service.netbox.staging.deploy_dns_pair`,
+`service.gitea.production.upgrade_1_27_1`, `service.gitea.runner.register`, and
+`service.gitea.actions_runner.provision_org_ci_runner` only:
 
 - creation needs execute permission scoped to this exact procedure but cannot
   be self-approved inline; it records an immutable snapshot and

@@ -289,8 +289,9 @@ def _verify_backend_capability(
     Fetches the selected backend's capability manifest and verifies the
     procedure's handler/version/effect/contract-hash/envelope against it. A
     ``MISMATCH`` (advertised but incompatible) is rejected (400). Legacy
-    procedures retain graceful ``UNKNOWN`` handling; protected Gitea procedures
-    require an explicit compatible manifest at admission and claim.
+    procedures retain graceful ``UNKNOWN`` handling; procedures in the explicit
+    protected-capability registry require a compatible manifest at admission
+    and claim.
     """
     from .. import capabilities
     from ..models import RpcPluginSettings
