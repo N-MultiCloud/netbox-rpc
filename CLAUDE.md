@@ -91,6 +91,22 @@ command behavior changes.
 
 @AGENTS.md
 
+The Debian 13 Akvorado bootstrap pair is a rollback-safe backend-first rollout.
+Migration `0086` seeds both rows disabled while the catalog code gate remains
+closed; a later release may activate them only after this seed package and the
+matching backend capability are fully deployed. Preflight may only observe the
+assigned device's SSH key, while the approval-gated installer requires that key
+to be pinned, snapshots the exact SSH service and credential identity, and
+accepts no routing override. All admission/advertisement/worker paths require
+an explicit matching backend capability, and ambiguous install transport
+completion is represented as `outcome_unknown` for preflight reconciliation;
+malformed 2xx envelopes are treated identically. Lifecycle capabilities bind
+authorization, schemas, and runtime assets, with only an exact reviewed
+one-release legacy/current rollout pair accepted. See `AGENTS.md` and README
+§`os.linux.debian.13.*_akvorado` for the device-only, AsyncSSH-pinned,
+closed-envelope contract, immutable image digests, ownership sidecar, and
+bounded end-to-end route deadlines.
+
 ## Package Publishing (Gitea Package Registry)
 
 `.gitea/workflows/publish-pypi.yml` builds sdist+wheel and publishes to the

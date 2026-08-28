@@ -271,6 +271,15 @@ EXEMPT_HANDLER_RATIONALE = {
         "managed configuration plus systemd drop-in, restarts, probes readiness, and holds the "
         "package — sequencing no fixed argv can express."
     ),
+    "os.linux_debian_13.preflight_akvorado": (
+        "Collects Debian release, resources, sudo, Docker/Compose, managed-file, "
+        "listener, stack-health, console, and host-key posture through one fixed probe."
+    ),
+    "os.linux_debian_13.install_akvorado": (
+        "Converges Debian Docker/Compose packages and backend-owned Akvorado 2.4.0 "
+        "assets, validates configuration, starts the stack, and verifies readiness "
+        "without deleting volumes or replacing an existing application config."
+    ),
     "service.akvorado.1.config_read": (
         "Reads the backend-owned Akvorado config path and returns bounded file content."
     ),

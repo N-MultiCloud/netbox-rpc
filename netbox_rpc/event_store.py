@@ -12,6 +12,7 @@ from django.db import IntegrityError
 from django.utils import timezone
 
 from .constants import (
+    AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
@@ -47,6 +48,13 @@ SENSITIVE_KEY_FRAGMENTS = (
 SAFE_REFERENCE_KEYS = {
     "credential_pk",
     "guest_credential_pk",
+    # Public SSH server identity returned by observation-only Akvorado
+    # preflight. These are bounded by the procedure result schema and are the
+    # operator input needed to enable strict host-key checking; neither is
+    # authentication material.
+    "host_key_fingerprint",
+    "host_key_pinned",
+    "known_hosts_entry",
     "key_id",
     "key_version",
     # Samba identity creation scrubs the raw password before persistence and
@@ -525,7 +533,9 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     # object. Requiring outer/nested agreement prevents an ok=true wrapper around
     # a failed operation from being recorded as success.
     requires_envelope_state_match = (
-        is_protected_procedure or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+        is_protected_procedure
+        or procedure_name in AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+        or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
     )
     ok = bool(response.get("ok"))
     raw_result = response.get("result")

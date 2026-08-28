@@ -16,6 +16,7 @@ from netbox.jobs import JobRunner
 from urllib3.util import Timeout as Urllib3Timeout
 
 from .backends import BackendTarget
+from .constants import AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
 from .domain.normalization import (
     RPCExecutionError,
     RPCLinuxServiceAllowlist,
@@ -380,47 +381,57 @@ def _call_backend(
             "through the generic response path.",
             code="RPC_PROCEDURE_NOT_AVAILABLE",
         )
-    runner_response_deadline: float | None = None
+    protected_response_deadline: float | None = None
+    is_akvorado_install = (
+        str(getattr(execution.procedure, "name", "") or "")
+        == AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
+    )
     request_kwargs: dict[str, Any] = {
         "headers": target.headers,
         "json": body,
         "verify": target.verify_ssl,
         "timeout": timeout,
     }
-    if is_secret_protected:
+    if is_secret_protected or is_akvorado_install:
         # The protected Gitea lease is approved for one concrete backend
         # destination and must never be replayed by requests across a redirect.
         # Legacy procedure calls keep their byte-for-byte request behavior.
         request_kwargs["allow_redirects"] = False
-    if is_gitea_runner or is_dns_staging_deploy:
+    if is_gitea_runner or is_dns_staging_deploy or is_akvorado_install:
         if is_gitea_runner:
             from . import gitea_runner_contract as response_contract
-        else:
+            route_budget_seconds = response_contract.ROUTE_BUDGET_SECONDS
+        elif is_dns_staging_deploy:
             from . import dns_staging_deploy_contract as response_contract
+            route_budget_seconds = response_contract.ROUTE_BUDGET_SECONDS
+        else:
+            from . import akvorado_bootstrap_contract as response_contract
 
-        runner_response_deadline = (
-            time.monotonic() + response_contract.ROUTE_BUDGET_SECONDS
-        )
+            route_budget_seconds = max(float(timeout_seconds) + 10, 30)
+
+        protected_response_deadline = time.monotonic() + route_budget_seconds
         request_kwargs["stream"] = True
-        connect_timeout = min(10, response_contract.ROUTE_BUDGET_SECONDS)
+        connect_timeout = min(10, route_budget_seconds)
         request_kwargs["timeout"] = Urllib3Timeout(
-            total=response_contract.ROUTE_BUDGET_SECONDS,
+            total=route_budget_seconds,
             connect=connect_timeout,
             read=max(
                 1,
-                response_contract.ROUTE_BUDGET_SECONDS - connect_timeout,
+                route_budget_seconds - connect_timeout,
             ),
         )
     resp: requests.Response | None = None
     try:
-        if runner_response_deadline is None:
+        if protected_response_deadline is None:
             resp = requests.post(url, **request_kwargs)
         else:
-            with _protected_backend_wall_clock(runner_response_deadline):
+            with _protected_backend_wall_clock(protected_response_deadline):
                 resp = requests.post(url, **request_kwargs)
     except _ProtectedBackendWallClockError:
         if resp is not None:
             resp.close()
+        if is_akvorado_install:
+            return _akvorado_transport_failure_response(execution.target_display)
         if is_gitea_runner:
             return _gitea_runner_transport_failure_response(
                 stage="indeterminate",
@@ -433,6 +444,8 @@ def _call_backend(
             stage="indeterminate",
         )
     except requests.exceptions.RequestException as exc:
+        if is_akvorado_install:
+            return _akvorado_transport_failure_response(execution.target_display)
         if is_secret_protected:
             connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
             if isinstance(exc, connect_timeout):
@@ -472,6 +485,8 @@ def _call_backend(
             code="RPC_BACKEND_BAD_RESPONSE",
         )
     if resp.status_code == 401 and not is_secret_protected:
+        if is_akvorado_install:
+            resp.close()
         raise RPCExecutionError(
             "nms-backend returned 401 Unauthorized.",
             code="RPC_BACKEND_UNAUTHORIZED",
@@ -495,25 +510,32 @@ def _call_backend(
                 stage="indeterminate",
             )
         return _gitea_transport_failure_response(stage="indeterminate")
+    if is_akvorado_install and 300 <= resp.status_code < 400:
+        resp.close()
+        return _akvorado_transport_failure_response(execution.target_display)
     try:
-        if is_gitea_runner or is_dns_staging_deploy:
+        if is_gitea_runner or is_dns_staging_deploy or is_akvorado_install:
             if is_gitea_runner:
                 from . import gitea_runner_contract as response_contract
-            else:
+            elif is_dns_staging_deploy:
                 from . import dns_staging_deploy_contract as response_contract
+            else:
+                from . import akvorado_bootstrap_contract as response_contract
 
-            if runner_response_deadline is None:
+            if protected_response_deadline is None:
                 raise _ProtectedBackendResponseError(
                     "protected backend response deadline is unavailable"
                 )
             data = _read_bounded_json_response(
                 resp,
-                deadline=runner_response_deadline,
+                deadline=protected_response_deadline,
                 max_bytes=response_contract.BACKEND_RESPONSE_MAX_BYTES,
             )
         else:
             data = resp.json()
     except (ValueError, requests.exceptions.RequestException) as exc:
+        if is_akvorado_install:
+            return _akvorado_transport_failure_response(execution.target_display)
         if is_secret_protected:
             if is_gitea_runner:
                 return _gitea_runner_transport_failure_response(
@@ -533,7 +555,7 @@ def _call_backend(
             code="RPC_BACKEND_BAD_RESPONSE",
         ) from exc
     finally:
-        if is_gitea_runner or is_dns_staging_deploy:
+        if is_gitea_runner or is_dns_staging_deploy or is_akvorado_install:
             resp.close()
     if is_gitea_upgrade:
         normalized = _normalize_gitea_closed_response(data)
@@ -575,6 +597,15 @@ def _call_backend(
                 stage="indeterminate",
             )
         return normalized
+    if is_akvorado_install and (
+        resp.status_code in {408, 504} or resp.status_code >= 500
+    ):
+        return _akvorado_transport_failure_response(execution.target_display)
+    if is_akvorado_install and 200 <= resp.status_code < 300:
+        normalized = _normalize_akvorado_install_closed_response(execution, data)
+        if normalized is None:
+            return _akvorado_transport_failure_response(execution.target_display)
+        return normalized
     if resp.status_code >= 400:
         if not isinstance(data, dict):
             raise RPCExecutionError(
@@ -590,6 +621,84 @@ def _call_backend(
         raise RPCExecutionError(
             str(message), code=str(data.get("code") or "RPC_BACKEND_ERROR")
         )
+    return data
+
+
+def _akvorado_transport_failure_response(target: object) -> dict[str, Any]:
+    """Return the closed reconciliation-required Akvorado install result."""
+    services = [
+        "clickhouse",
+        "console",
+        "inlet",
+        "kafka",
+        "orchestrator",
+        "outlet",
+        "redis",
+    ]
+    return {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+            "target": str(target)[:255],
+            "installed": None,
+            "changed": None,
+            "config_created": None,
+            "docker_package_version": "",
+            "compose_package_version": "",
+            "docker_version": "",
+            "compose_version": "",
+            "compose_path": "/opt/nmulticloud/deploy/compose/akvorado/docker-compose.yml",
+            "config_path": "/opt/nmulticloud/deploy/compose/akvorado/akvorado.yaml",
+            "stack_healthy": False,
+            "services_expected": services,
+            "services_running": [],
+            "services_healthy": [],
+            "console_ready": False,
+            "ingress_ports_ready": False,
+            "ready": False,
+            "stage": "outcome_unknown",
+            "warnings": ["Run Akvorado bootstrap preflight before retrying."],
+            "error": "Backend transport outcome is indeterminate.",
+        },
+    }
+
+
+def _normalize_akvorado_install_closed_response(
+    execution: Any,
+    data: object,
+) -> dict[str, Any] | None:
+    """Validate the complete install wire envelope before persisting certainty."""
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    if type(data.get("ok")) is not bool:
+        return None
+    result = data.get("result")
+    if not isinstance(result, dict) or result.get("ok") is not data["ok"]:
+        return None
+    if not isinstance(data.get("events"), list):
+        return None
+    if not isinstance(data.get("error_code"), str) or not isinstance(
+        data.get("error_message"), str
+    ):
+        return None
+    if data["ok"] and (data["error_code"] or data["error_message"]):
+        return None
+    if result.get("target") != str(getattr(execution, "target_display", ""))[:255]:
+        return None
+    result_schema = getattr(getattr(execution, "procedure", None), "result_schema", None)
+    if not isinstance(result_schema, dict) or not result_schema:
+        return None
+    try:
+        jsonschema.validate(result, result_schema)
+    except jsonschema.ValidationError:
+        return None
     return data
 
 

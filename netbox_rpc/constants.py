@@ -158,16 +158,6 @@ NMS_SECRET_REFERENCE_RE = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\Z"
 )
 
-PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
-    {
-        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
-        NETBOX_STAGING_DEPLOY_DNS_PAIR,
-        GITEA_PRODUCTION_UPGRADE_1_27_1,
-        GITEA_RUNNER_REGISTER,
-        GITEA_ORG_CI_RUNNER_PROVISION,
-    }
-)
-
 SAMBA_1_CONFIG_READ = "service.samba.1.config_read"
 SAMBA_1_CONFIG_READ_HANDLER = "service.samba_1.config_read"
 SAMBA_1_CONFIG_TEST = "service.samba.1.config_test"
@@ -328,6 +318,40 @@ INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = frozenset(
     {
         INFLUXDB3_DEBIAN13_PREFLIGHT,
         INFLUXDB3_DEBIAN13_INSTALL,
+    }
+)
+
+# Debian 13 Akvorado bootstrap catalog. Migration 0086 seeds these rows closed;
+# a later release enables them only after every worker runs code that recognizes
+# the protected approval and outcome-unknown contracts. These prepare a fresh
+# Docker host; service.akvorado.1.* below manages the resulting stack.
+AKVORADO_BOOTSTRAP_DEBIAN13_PREFLIGHT = "os.linux.debian.13.preflight_akvorado"
+AKVORADO_BOOTSTRAP_DEBIAN13_PREFLIGHT_HANDLER = "os.linux_debian_13.preflight_akvorado"
+AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL = "os.linux.debian.13.install_akvorado"
+AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL_HANDLER = "os.linux_debian_13.install_akvorado"
+AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES = frozenset(
+    {
+        AKVORADO_BOOTSTRAP_DEBIAN13_PREFLIGHT,
+        AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+    }
+)
+EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
+    AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+    | {
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
+        GITEA_PRODUCTION_UPGRADE_1_27_1,
+        GITEA_RUNNER_REGISTER,
+        GITEA_ORG_CI_RUNNER_PROVISION,
+    }
+)
+PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
+    {
+        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
+        GITEA_PRODUCTION_UPGRADE_1_27_1,
+        GITEA_RUNNER_REGISTER,
+        GITEA_ORG_CI_RUNNER_PROVISION,
+        AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
     }
 )
 

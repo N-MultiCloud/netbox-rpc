@@ -10,11 +10,12 @@ procedure against it.
 
 Prod-safe rollout / graceful degradation: when the backend advertises **nothing**
 (no ``/capabilities`` route, unreachable, or a malformed/oversized body), the
-fetch returns ``None`` and callers proceed as before — capability enforcement is
-inert until the paired backend advertises. When the backend **does** advertise,
-a missing/mismatched handler/version/effect/contract-hash/envelope is failed
-closed before enqueue. The ``contract_hash`` is derived here from the shared
-command contract so both sides compute the same value.
+fetch returns ``None`` and legacy callers proceed as before. Procedures listed
+in ``EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES`` fail closed on that unknown
+state at advertisement, admission, and worker claim. When the backend **does**
+advertise, a missing/mismatched handler/version/effect/contract-hash/envelope is
+failed closed before enqueue. The ``contract_hash`` is derived here from the
+shared command contract so both sides compute the same value.
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ class HandlerCapability(BaseModel):
     version: int = Field(ge=0)
     effect: str = Field(max_length=20)
     contract_hash: str = Field(max_length=128)
+    compatible_contract_hashes: list[str] = Field(default_factory=list, max_length=8)
 
 
 class BackendCapabilityManifest(BaseModel):
@@ -86,16 +88,7 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def derive_command_contract_hash(procedure: Any) -> str:
-    """Derive the shared contract hash for a procedure.
-
-    Canonical sha256 over the procedure's identity + its ordered command
-    contract. Protected Gitea procedures additionally include their complete
-    semantic capability extension (targets, policy constants, and closed
-    schemas); legacy handler hashes remain byte-for-byte unchanged. The paired
-    backend derives the same value, so a hash mismatch means the two sides
-    disagree on what will run.
-    """
+def _base_command_contract_payload(procedure: Any) -> dict[str, Any]:
     commands = []
     command_qs = getattr(procedure, "commands", None)
     iterable = command_qs.all() if hasattr(command_qs, "all") else (command_qs or [])
@@ -116,13 +109,23 @@ def derive_command_contract_hash(procedure: Any) -> str:
                 "continue_on_error": bool(getattr(cmd, "continue_on_error", False)),
             }
         )
-    payload = {
+    return {
         "handler_id": str(getattr(procedure, "handler_id", "")),
         "version": int(getattr(procedure, "version", 1) or 1),
         "effect": str(getattr(procedure, "effect", "")),
         "commands": commands,
     }
-    if payload["handler_id"] in _SEMANTIC_CAPABILITY_HANDLER_IDS:
+def derive_legacy_command_contract_hash(procedure: Any) -> str:
+    """Derive the pre-semantic command-only hash for bounded rollout support."""
+    payload = _base_command_contract_payload(procedure)
+    return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+def derive_command_contract_hash(procedure: Any) -> str:
+    """Derive the shared policy, schema, command, and runtime contract hash."""
+    payload = _base_command_contract_payload(procedure)
+    handler_id = payload["handler_id"]
+    if handler_id in _SEMANTIC_CAPABILITY_HANDLER_IDS:
         from .gitea_org_ci_runner_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as org_ci_runner_contract,
         )
@@ -143,7 +146,21 @@ def derive_command_contract_hash(procedure: Any) -> str:
                 org_ci_runner_contract
             ),
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
-        }[payload["handler_id"]]
+        }[handler_id]
+    else:
+        from .akvorado_bootstrap_contract import (
+            AKVORADO_BOOTSTRAP_HANDLER_IDS,
+            AKVORADO_LIFECYCLE_HANDLER_IDS,
+            lifecycle_semantic_capability_extension,
+            semantic_capability_extension,
+        )
+
+        if handler_id in AKVORADO_BOOTSTRAP_HANDLER_IDS:
+            payload["semantic_contract"] = semantic_capability_extension(procedure)
+        elif handler_id in AKVORADO_LIFECYCLE_HANDLER_IDS:
+            payload["semantic_contract"] = lifecycle_semantic_capability_extension(
+                procedure
+            )
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
@@ -152,10 +169,11 @@ def fetch_backend_capabilities(
 ) -> "BackendCapabilityManifest | None":
     """Fetch + validate the backend capability manifest, or ``None`` (graceful).
 
-    Returns ``None`` — meaning "the backend advertises no capabilities, proceed"
-    — for an absent route, unreachable backend, non-200, oversized body, or a
-    body that fails Pydantic validation. Never raises; never trusts the response
-    as command input.
+    Returns ``None`` — meaning "the backend advertises no capabilities" — for
+    an absent route, unreachable backend, non-200, oversized body, or a body
+    that fails Pydantic validation. Callers decide whether the procedure is
+    legacy-graceful or explicitly capability-gated. Never raises and never
+    trusts the response as command input.
     """
     base = (
         str(getattr(target, "url", "") or "").rstrip("/") if target is not None else ""
@@ -195,7 +213,13 @@ def _fetch_uncached(
     try:
         if response.status_code != 200:
             return None
-        content = response.raw.read(_MAX_MANIFEST_BYTES + 1, decode_content=True)
+        try:
+            content = response.raw.read(
+                _MAX_MANIFEST_BYTES + 1,
+                decode_content=True,
+            )
+        except Exception:  # noqa: BLE001 - capability absence degrades to UNKNOWN
+            return None
         if content is None or len(content) > _MAX_MANIFEST_BYTES:
             return None
         try:
@@ -231,9 +255,28 @@ def verify_procedure_capability(
         return CapabilityStatus.MISMATCH
     if cap.effect != str(getattr(procedure, "effect", "")):
         return CapabilityStatus.MISMATCH
-    if cap.contract_hash != derive_command_contract_hash(procedure):
-        return CapabilityStatus.MISMATCH
-    return CapabilityStatus.COMPATIBLE
+    expected_hash = derive_command_contract_hash(procedure)
+    advertised_hashes = {cap.contract_hash, *cap.compatible_contract_hashes}
+    if expected_hash in advertised_hashes:
+        return CapabilityStatus.COMPATIBLE
+
+    from .akvorado_bootstrap_contract import (
+        AKVORADO_LIFECYCLE_CURRENT_CAPABILITY_HASHES,
+        AKVORADO_LIFECYCLE_HANDLER_IDS,
+    )
+
+    handler_id = str(getattr(procedure, "handler_id", ""))
+    if (
+        handler_id in AKVORADO_LIFECYCLE_HANDLER_IDS
+        and expected_hash
+        == AKVORADO_LIFECYCLE_CURRENT_CAPABILITY_HASHES.get(handler_id)
+        and cap.contract_hash == derive_legacy_command_contract_hash(procedure)
+    ):
+        # Bounded mixed-version window: a reviewed current catalog may talk to
+        # the immediately preceding command-only backend. Any policy/schema
+        # drift changes expected_hash and fails closed instead of using this path.
+        return CapabilityStatus.COMPATIBLE
+    return CapabilityStatus.MISMATCH
 
 
 def clear_capability_cache() -> None:

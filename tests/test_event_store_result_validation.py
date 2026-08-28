@@ -1275,3 +1275,156 @@ def test_influxdb3_install_matching_failure_envelope_is_preserved(
     assert events[0].event_name == "ExecutionFailed"
     assert events[0].code != event_store.RESULT_SCHEMA_MISMATCH_CODE
     assert events[0].result["stage"] == "package"
+
+
+# --------------------------------------------------------------------------- #
+# Debian 13 Akvorado bootstrap envelope agreement
+# --------------------------------------------------------------------------- #
+
+_AKVORADO_BOOTSTRAP_INSTALL = "os.linux.debian.13.install_akvorado"
+_AKVORADO_BOOTSTRAP_PREFLIGHT = "os.linux.debian.13.preflight_akvorado"
+
+
+def _akvorado_bootstrap_schema():
+    name = "netbox_rpc.migrations.0086_seed_akvorado_debian13_bootstrap_procedures"
+    sys.modules.pop(name, None)
+    migration = importlib.import_module(name)
+    return migration._INSTALL_RESULT
+
+
+def _akvorado_bootstrap_result():
+    services = [
+        "clickhouse",
+        "console",
+        "inlet",
+        "kafka",
+        "orchestrator",
+        "outlet",
+        "redis",
+    ]
+    return {
+        "ok": True,
+        "procedure": _AKVORADO_BOOTSTRAP_INSTALL,
+        "target": "akvorado01",
+        "installed": True,
+        "changed": True,
+        "config_created": True,
+        "docker_package_version": "26.1.5+dfsg1-9",
+        "compose_package_version": "2.26.1-4",
+        "docker_version": "26.1.5",
+        "compose_version": "2.26.1",
+        "compose_path": "/opt/nmulticloud/deploy/compose/akvorado/docker-compose.yml",
+        "config_path": "/opt/nmulticloud/deploy/compose/akvorado/akvorado.yaml",
+        "stack_healthy": True,
+        "services_expected": services,
+        "services_running": services,
+        "services_healthy": services,
+        "console_ready": True,
+        "ingress_ports_ready": True,
+        "ready": True,
+        "stage": "complete",
+        "warnings": [],
+        "error": "",
+    }
+
+
+def _akvorado_bootstrap_execution():
+    return SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=_AKVORADO_BOOTSTRAP_INSTALL,
+            result_schema=_akvorado_bootstrap_schema(),
+        )
+    )
+
+
+def test_akvorado_bootstrap_outer_and_nested_ok_must_agree(event_store_module) -> None:
+    event_store, events = event_store_module
+    result = {
+        **_akvorado_bootstrap_result(),
+        "ok": False,
+        "installed": False,
+        "ready": False,
+        "stage": "package",
+        "error": "apt failed",
+    }
+
+    event_store.record_backend_response(
+        _akvorado_bootstrap_execution(),
+        {"ok": True, "result": result},
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_akvorado_preflight_public_host_identity_survives_projection(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    migration = importlib.import_module(
+        "netbox_rpc.migrations.0086_seed_akvorado_debian13_bootstrap_procedures"
+    )
+    known_host = "10.0.30.235 ssh-ed25519 AAAAC3NzaPublicServerIdentity"
+    fingerprint = "SHA256:public-host-fingerprint"
+    result = {
+        "ok": True,
+        "procedure": _AKVORADO_BOOTSTRAP_PREFLIGHT,
+        "target": "akvorado01",
+        "supported": False,
+        "install_ready": False,
+        "os_id": "",
+        "os_version_id": "",
+        "architecture": "",
+        "vcpus": 0,
+        "memory_bytes": 0,
+        "root_free_bytes": 0,
+        "resource_ready": False,
+        "sudo_ready": False,
+        "host_key_pinned": False,
+        "known_hosts_entry": known_host,
+        "host_key_fingerprint": fingerprint,
+        "docker_installed": False,
+        "docker_package_version": "",
+        "docker_version": "",
+        "docker_supported": False,
+        "compose_installed": False,
+        "compose_package_version": "",
+        "compose_version": "",
+        "docker_active": False,
+        "docker_enabled": False,
+        "docker_group_member": False,
+        "compose_dir_present": False,
+        "config_present": False,
+        "env_managed": False,
+        "compose_managed": False,
+        "stack_present": False,
+        "stack_healthy": False,
+        "services_expected": [
+            "clickhouse",
+            "console",
+            "inlet",
+            "kafka",
+            "orchestrator",
+            "outlet",
+            "redis",
+        ],
+        "services_running": [],
+        "services_healthy": [],
+        "console_ready": False,
+        "port_conflicts": [],
+        "blockers": ["SSH host key is not pinned."],
+    }
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=_AKVORADO_BOOTSTRAP_PREFLIGHT,
+            result_schema=migration._PREFLIGHT_RESULT,
+        )
+    )
+
+    event_store.record_backend_response(execution, {"ok": True, "result": result})
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionSucceeded"
+    assert events[0].result["known_hosts_entry"] == known_host
+    assert events[0].result["host_key_fingerprint"] == fingerprint

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -188,6 +190,279 @@ def test_call_backend_wraps_request_errors_as_backend_unreachable(
         verify=True,
         timeout=(10, 30),
     )
+
+
+def _streaming_response(status_code: int, payload: object) -> MagicMock:
+    encoded = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    response = MagicMock(status_code=status_code)
+    response.headers = {"Content-Length": str(len(encoded))}
+    response.iter_content.return_value = iter(
+        encoded[index : index + 1] for index in range(len(encoded))
+    )
+    return response
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "request-error",
+        "redirect",
+        "server-error",
+        "http-408-json",
+        "http-408-non-json",
+        "non-json",
+        "wrong-json-shape",
+        "dict-missing-result",
+        "dict-invalid-result",
+        "dict-envelope-extra",
+        "dict-ok-mismatch",
+    ],
+)
+def test_akvorado_install_transport_ambiguity_requires_reconciliation(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    target = jobs_module.BackendTarget(
+        url="http://nms-backend.example",
+        headers={"Authorization": "Token test"},
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(
+        pk=264,
+        procedure=SimpleNamespace(
+            name="os.linux.debian.13.install_akvorado",
+            timeout_seconds=1200,
+            result_schema={
+                "type": "object",
+                "required": ["ok", "target", "stage"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "target": {"type": "string"},
+                    "stage": {"type": "string"},
+                },
+            },
+        ),
+        params={},
+        target_display="akvorado01",
+    )
+    if failure_kind == "request-error":
+        post_mock = MagicMock(
+            side_effect=jobs_module.requests.exceptions.ConnectionError("timed out")
+        )
+    else:
+        status_code = {
+            "redirect": 307,
+            "server-error": 502,
+            "http-408-json": 408,
+            "http-408-non-json": 408,
+            "non-json": 200,
+            "wrong-json-shape": 200,
+            "dict-missing-result": 200,
+            "dict-invalid-result": 200,
+            "dict-envelope-extra": 200,
+            "dict-ok-mismatch": 200,
+        }[failure_kind]
+        if failure_kind in {"non-json", "http-408-non-json"}:
+            payload = b"not JSON"
+        elif failure_kind == "wrong-json-shape":
+            payload = []
+        elif failure_kind == "dict-missing-result":
+            payload = {
+                "ok": True,
+                "events": [],
+                "error_code": "",
+                "error_message": "",
+            }
+        elif failure_kind == "dict-invalid-result":
+            payload = {
+                "ok": True,
+                "result": {"ok": True, "target": "akvorado01"},
+                "events": [],
+                "error_code": "",
+                "error_message": "",
+            }
+        elif failure_kind == "dict-envelope-extra":
+            payload = {
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "target": "akvorado01",
+                    "stage": "complete",
+                },
+                "events": [],
+                "error_code": "",
+                "error_message": "",
+                "unexpected": True,
+            }
+        elif failure_kind == "dict-ok-mismatch":
+            payload = {
+                "ok": True,
+                "result": {
+                    "ok": False,
+                    "target": "akvorado01",
+                    "stage": "verify",
+                },
+                "events": [],
+                "error_code": "",
+                "error_message": "",
+            }
+        else:
+            payload = {"detail": "ambiguous"}
+        response = _streaming_response(status_code, payload)
+        post_mock = MagicMock(return_value=response)
+    monkeypatch.setattr(jobs_module.requests, "post", post_mock)
+
+    outcome = jobs_module._call_backend(target, execution)
+
+    assert outcome["ok"] is False
+    result = outcome["result"]
+    assert result["procedure"] == "os.linux.debian.13.install_akvorado"
+    assert result["target"] == "akvorado01"
+    assert result["stage"] == "outcome_unknown"
+    assert result["installed"] is None
+    assert result["changed"] is None
+    assert result["config_created"] is None
+    assert "preflight" in result["warnings"][0]
+    assert post_mock.call_args.kwargs["allow_redirects"] is False
+    assert post_mock.call_args.kwargs["stream"] is True
+    if failure_kind != "request-error":
+        response.close.assert_called_once_with()
+
+
+def test_akvorado_install_validated_2xx_envelope_preserves_known_result(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = jobs_module.BackendTarget(
+        url="http://nms-backend.example",
+        headers={},
+        verify_ssl=True,
+    )
+    result = jobs_module._akvorado_transport_failure_response("akvorado01")["result"]
+    result = {**result, "stage": "verify", "installed": True, "changed": True}
+    result_schema = {
+        "type": "object",
+        "required": ["ok", "target", "stage", "installed", "changed"],
+        "properties": {
+            "ok": {"const": False},
+            "target": {"const": "akvorado01"},
+            "stage": {"const": "verify"},
+            "installed": {"const": True},
+            "changed": {"const": True},
+        },
+    }
+    execution = SimpleNamespace(
+        pk=265,
+        procedure=SimpleNamespace(
+            name="os.linux.debian.13.install_akvorado",
+            timeout_seconds=1200,
+            result_schema=result_schema,
+        ),
+        params={},
+        target_display="akvorado01",
+    )
+    wire = {
+        "ok": False,
+        "result": result,
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+    response = _streaming_response(200, wire)
+    monkeypatch.setattr(jobs_module.requests, "post", MagicMock(return_value=response))
+
+    assert jobs_module._call_backend(target, execution) == wire
+    response.close.assert_called_once_with()
+
+
+def test_akvorado_install_http_401_closes_stream_before_error(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = jobs_module.BackendTarget(
+        url="http://nms-backend.example",
+        headers={},
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(
+        pk=267,
+        procedure=SimpleNamespace(
+            name="os.linux.debian.13.install_akvorado",
+            timeout_seconds=1200,
+            result_schema={"type": "object"},
+        ),
+        params={},
+        target_display="akvorado01",
+    )
+    response = _streaming_response(401, {"detail": "unauthorized"})
+    monkeypatch.setattr(
+        jobs_module.requests,
+        "post",
+        MagicMock(return_value=response),
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module._call_backend(target, execution)
+
+    assert excinfo.value.code == "RPC_BACKEND_UNAUTHORIZED"
+    response.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ("oversized", "compressed", "truncated", "deadline"),
+)
+def test_akvorado_install_stream_is_bounded_and_deadline_closed(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    target = jobs_module.BackendTarget(
+        url="http://nms-backend.example",
+        headers={},
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(
+        pk=266,
+        procedure=SimpleNamespace(
+            name="os.linux.debian.13.install_akvorado",
+            timeout_seconds=1200,
+            result_schema={"type": "object"},
+        ),
+        params={},
+        target_display="akvorado01",
+    )
+    response = _streaming_response(200, {"ok": True})
+    if failure_kind == "oversized":
+        response.headers["Content-Length"] = str(64 * 1024 + 1)
+    elif failure_kind == "compressed":
+        response.headers["Content-Encoding"] = "gzip"
+    elif failure_kind == "truncated":
+        response.headers["Content-Length"] = str(
+            int(response.headers["Content-Length"]) + 1
+        )
+    else:
+        monotonic_values = iter((0.0, 1211.0))
+        monkeypatch.setattr(
+            jobs_module.time,
+            "monotonic",
+            lambda: next(monotonic_values),
+        )
+        monkeypatch.setattr(
+            jobs_module,
+            "_protected_backend_wall_clock",
+            lambda _deadline: nullcontext(),
+        )
+    post_mock = MagicMock(return_value=response)
+    monkeypatch.setattr(jobs_module.requests, "post", post_mock)
+
+    result = jobs_module._call_backend(target, execution)
+
+    assert result["ok"] is False
+    assert result["result"]["stage"] == "outcome_unknown"
+    assert post_mock.call_args.kwargs["stream"] is True
+    response.close.assert_called_once_with()
 
 
 def _execution(procedure_name: str, handler_id: str, params: dict[str, object]):
