@@ -12,27 +12,27 @@ VERSION = 1
 TARGET = "nms-front-door"
 TARGET_MODEL = "dcim.device"
 TARGET_MODELS = [TARGET_MODEL]
-RPC_CONTRACT_GENERATION = "nmc-dns-staging-rpc-v1"
+RPC_CONTRACT_GENERATION = "nmc-dns-staging-rpc-v2"
 RPC_PRINCIPAL = "nms-proxy"
 RPC_WRAPPER = "/opt/nmulticloud/deploy/bin/deploy-netbox-dns-staging-rpc"
-RPC_WRAPPER_SHA256 = "54b0274d80a42f50e6ccfab6eac932d055c894fee4e6a998297e7d2fa995f144"
+RPC_WRAPPER_SHA256 = "c45d4c8edc6b5fed16da5c66c0df7fe4af7fef651ab78961a8773be863fa3539"
 RPC_SUDOERS_PATH = "/etc/sudoers.d/nms-proxy-dns-staging"
-RPC_SUDOERS_SHA256 = "b6901f84190e3098ddd85e44c934aeecd62014cc13421a91390f308c5d77e807"
+RPC_SUDOERS_SHA256 = "a99fb7caf9a6d9e64fa2179448325c9ce05546a79aa523410396cb5bf4a6c803"
 RUNTIME_ARTIFACT_SHA256 = {
     "/opt/nmulticloud/deploy/bin/deploy-netbox-plugin-staging": (
-        "6f68953c6e928ba0d301557c9ee082660c56a4519a0bc093b7677015d5a6239a"
+        "de74bb2a36771725221eca37975fcac406b5795aa82dd66625f48586c44b7fb7"
     ),
     "/opt/nmulticloud/deploy/bin/deploy-netbox-dns-api-staging": (
-        "2ead48ff20e72b62ab8facc5df1ea67820e889d8f2ed929cf34fa1f19c124e8e"
+        "c1d87d640112be4b9d28d3106354263eaee390f887f5d4d46c59b2a99a329c97"
     ),
     "/opt/nmulticloud/deploy/bin/validate-netbox-dns-api-source": (
         "b28532c228c7c25045c6b2f4ff9a7c03f1dc4a96bf4981fb3b7f3fd9695dfa5c"
     ),
     "/opt/nmulticloud/deploy/bin/netbox-dns-api-staging-state": (
-        "f5c5d76654edb38b1b4f605f267699752dd8d339328ddd37fd4434d697729c55"
+        "6433640305c1286a757240818dd2a7cbf8d08d7e75c45199eed358e98002f241"
     ),
     "/opt/nmulticloud/deploy/bin/python-package-deploy": (
-        "d2150dd55a4695434882b9bdd8ce63924516d22ebe980b0c5ca84894fcb28bd2"
+        "b606db37353ad043300b623b73f85594a91a9c4979208b4566504b2529721e74"
     ),
     "/opt/nmulticloud/deploy/bin/run-bounded-tree-command": (
         "1568d35aa77375e7e7be5980a6e83163ff00f2c35bc7870854eeba19e9b0fd50"
@@ -40,9 +40,23 @@ RUNTIME_ARTIFACT_SHA256 = {
     "/opt/nmulticloud/deploy/bin/nmc-deploy-lib": (
         "72e241ddf072b64218eb3abc3d1285e154177f38eacb0a428aa22ace8a5592de"
     ),
+    "/opt/nmulticloud/deploy/bin/verify-nginx-nms-reload": (
+        "02a40bf52d455ccd2dc4b4b0a8e99e81185032867aefce11819b3823085e963c"
+    ),
+    "/opt/nmulticloud/deploy/runtime/cpython-3.13.14-linux-x86_64-gnu.json": (
+        "118de7b36d9711ba32d4adf8c45a68ab2f0c838fdc29c217fc846413d9b9df8a"
+    ),
     "/opt/nmulticloud/deploy/systemd/netbox-dns-api-staging.service": (
         "d9c25b54bc41ab036f8d00d34ce96e807095d5fd84968e851a6e0087a50008a9"
     ),
+    (
+        "/root/personal-context/nmulticloud-context.worktrees/nginx-nms-service/"
+        "systemd/nginx-nms.conf"
+    ): ("64d5496c53d4296c744b4c79e1a8933b68d2fcad14f41712a39ebe01b0352a5a"),
+    (
+        "/root/personal-context/nmulticloud-context.worktrees/nginx-nms-service/"
+        "systemd/nginx-nms.service"
+    ): ("b19eea623a246cc399e2ed38a8f73ef2304abffe4c60b52a12e4bf3f11732ff1"),
 }
 EFFECT = "destructive"
 TIMEOUT_SECONDS = 2700

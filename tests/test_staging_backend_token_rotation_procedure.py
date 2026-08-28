@@ -70,8 +70,55 @@ def test_dns_staging_deploy_policy_migration_matches_runtime_contract(
     )
     assert (
         runtime["SEMANTIC_CAPABILITY_SHA256"]
-        == "ec137f258aab79cf992ea95b98dbcf93054e9431a57755cad5fd67529a6e013c"
+        == "70626968531d5f3023d49b92dab58816f47332d7434002782fd2b0866040123c"
     )
+    assert runtime["RPC_CONTRACT_GENERATION"] == "nmc-dns-staging-rpc-v2"
+    assert runtime["RPC_WRAPPER_SHA256"] == (
+        "c45d4c8edc6b5fed16da5c66c0df7fe4af7fef651ab78961a8773be863fa3539"
+    )
+    assert runtime["RPC_SUDOERS_SHA256"] == (
+        "a99fb7caf9a6d9e64fa2179448325c9ce05546a79aa523410396cb5bf4a6c803"
+    )
+    assert runtime["RUNTIME_ARTIFACT_SHA256"] == {
+        "/opt/nmulticloud/deploy/bin/deploy-netbox-plugin-staging": (
+            "de74bb2a36771725221eca37975fcac406b5795aa82dd66625f48586c44b7fb7"
+        ),
+        "/opt/nmulticloud/deploy/bin/deploy-netbox-dns-api-staging": (
+            "c1d87d640112be4b9d28d3106354263eaee390f887f5d4d46c59b2a99a329c97"
+        ),
+        "/opt/nmulticloud/deploy/bin/validate-netbox-dns-api-source": (
+            "b28532c228c7c25045c6b2f4ff9a7c03f1dc4a96bf4981fb3b7f3fd9695dfa5c"
+        ),
+        "/opt/nmulticloud/deploy/bin/netbox-dns-api-staging-state": (
+            "6433640305c1286a757240818dd2a7cbf8d08d7e75c45199eed358e98002f241"
+        ),
+        "/opt/nmulticloud/deploy/bin/python-package-deploy": (
+            "b606db37353ad043300b623b73f85594a91a9c4979208b4566504b2529721e74"
+        ),
+        "/opt/nmulticloud/deploy/bin/run-bounded-tree-command": (
+            "1568d35aa77375e7e7be5980a6e83163ff00f2c35bc7870854eeba19e9b0fd50"
+        ),
+        "/opt/nmulticloud/deploy/bin/nmc-deploy-lib": (
+            "72e241ddf072b64218eb3abc3d1285e154177f38eacb0a428aa22ace8a5592de"
+        ),
+        "/opt/nmulticloud/deploy/bin/verify-nginx-nms-reload": (
+            "02a40bf52d455ccd2dc4b4b0a8e99e81185032867aefce11819b3823085e963c"
+        ),
+        "/opt/nmulticloud/deploy/runtime/cpython-3.13.14-linux-x86_64-gnu.json": (
+            "118de7b36d9711ba32d4adf8c45a68ab2f0c838fdc29c217fc846413d9b9df8a"
+        ),
+        "/opt/nmulticloud/deploy/systemd/netbox-dns-api-staging.service": (
+            "d9c25b54bc41ab036f8d00d34ce96e807095d5fd84968e851a6e0087a50008a9"
+        ),
+        (
+            "/root/personal-context/nmulticloud-context.worktrees/nginx-nms-service/"
+            "systemd/nginx-nms.conf"
+        ): ("64d5496c53d4296c744b4c79e1a8933b68d2fcad14f41712a39ebe01b0352a5a"),
+        (
+            "/root/personal-context/nmulticloud-context.worktrees/"
+            "nginx-nms-service/systemd/nginx-nms.service"
+        ): ("b19eea623a246cc399e2ed38a8f73ef2304abffe4c60b52a12e4bf3f11732ff1"),
+    }
     assert (
         runtime["COMMAND_CONTRACT_SHA256"]
         == "d3a41e414f0e839cc8ae52e5a5064fd2c1816fb4da1f26916ef134e21f042836"

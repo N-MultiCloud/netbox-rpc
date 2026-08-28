@@ -548,7 +548,10 @@ path, ref, command, stdin, or output fields.
 The immutable capability extension binds the exact target/model, normalized
 fingerprint schema, closed result schema, fixed deploy argv prefix, no-fallback
 strict-auth/no-capture transport, dedicated `nms-proxy` principal, reviewed
-self-verifying wrapper/sudoers/runtime generation, 2,640-second absolute route
+self-verifying `nmc-dns-staging-rpc-v2` wrapper/sudoers/twelve-artifact
+runtime generation (including the Nginx config, linked unit source, and reload
+verifier),
+2,640-second absolute route
 budget, 60/90-second handler/process completion margins, and 4,096-byte backend response cap
 under the 2,700-second catalog timeout. Both admission and uncached worker
 claim require `COMPATIBLE`; an absent capability is a hard failure. A distinct
@@ -566,8 +569,9 @@ outer/nested mismatch is `deployed=null, stage=indeterminate`. Responses carry
 no events or diagnostics and must echo the approved commit exactly. Inspect the
 staging transaction/service state before retrying uncertainty. Activate in
 order: reviewed root helper/sudoers, backend handler plus exact capability,
-catalog migration, then an operator-approved execution; never dispatch it
-autonomously.
+then the catalog plugin. Migration `0085` seeds the procedure on first install;
+this runtime-generation rotation does not add or replay a migration. Only then
+may an operator approve an execution; never dispatch it autonomously.
 
 ### Production Gitea 1.27.1 Upgrade
 

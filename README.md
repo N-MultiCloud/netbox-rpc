@@ -178,7 +178,10 @@ The procedure catalog is intentionally narrow:
   service/credential revisions, host, port, authentication method, and
   known-host digest; point-of-use drift is rejected. Admission and worker claim
   both require an exact compatible backend capability whose golden semantic
-  digest includes the reviewed wrapper, sudoers, and runtime generation held
+  digest includes the reviewed `nmc-dns-staging-rpc-v2` wrapper, sudoers,
+  twelve-artifact runtime generation, exact live Nginx config, and linked
+  service-unit source held; the pinned reload verifier requires both stable new
+  workers and the exact loopback fence-generation response
   under the shared publication lock through execution. Approval and worker
   claim recompare the selected backend's URL/TLS fingerprint with the immutable
   request snapshot before sending its authentication header to a capability
