@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0080_seed_gitea_runner_register"
 PROCEDURE_ID = "service.gitea.runner.register"
 EXPECTED_SEMANTIC_SHA256 = (
-    "ba3a8bcbe551d92996107799d1b2ce30e8413a33be919499da3f71636ea8b240"
+    "18f41b13f1cf6530ffb3d8f9c8cb12dc8064a3ce7aa605fac5e504e9d7c21d9f"
 )
 
 
@@ -104,7 +104,9 @@ def test_seed_is_disabled_closed_inline_and_irreversible(migration) -> None:
     assert migration.Migration.dependencies == [
         ("netbox_rpc", "0079_rpcexecution_source_intent")
     ]
-    assert defaults == {
+    assert {
+        key: value for key, value in defaults.items() if key != "result_schema"
+    } == {
         **{
             key: runtime["PROCEDURE_POLICY"][key]
             for key in (
@@ -122,9 +124,11 @@ def test_seed_is_disabled_closed_inline_and_irreversible(migration) -> None:
         },
         "enabled": False,
         "params_schema": runtime["PARAMS_SCHEMA"],
-        "result_schema": runtime["RESULT_SCHEMA"],
         "description": defaults["description"],
     }
+    assert "fence_execution_id" not in defaults["result_schema"]["properties"]
+    assert "fence_generation" not in defaults["result_schema"]["properties"]
+    assert defaults["result_schema"] != runtime["RESULT_SCHEMA"]
     assert runtime["COMMAND_CONTRACT"] == [
         {"sequence": 1, **migration._REPRESENTATIVE_COMMAND}
     ]
@@ -206,6 +210,9 @@ def test_contract_closes_caller_result_normalized_and_fingerprint_shapes() -> No
 
 def test_semantic_capability_digest_is_the_cross_repository_anchor() -> None:
     runtime = runpy.run_path(str(ROOT / "netbox_rpc/gitea_runner_contract.py"))
+    org_runtime = runpy.run_path(
+        str(ROOT / "netbox_rpc/gitea_org_ci_runner_contract.py")
+    )
 
     assert runtime["SEMANTIC_CAPABILITY_SHA256"] == EXPECTED_SEMANTIC_SHA256
     assert runtime["PROCEDURE_POLICY"]["semantic_contract_sha256"] == (
@@ -220,7 +227,19 @@ def test_semantic_capability_digest_is_the_cross_repository_anchor() -> None:
         "reset_timeout_seconds": 30,
         "capture_max_bytes": 512,
         "backend_response_max_bytes": 4096,
-        "reconciliation_quiescence_seconds": 360,
+        "reconciliation_quiescence_seconds": 1800,
+    }
+    assert runtime["SHARED_FENCE_PROTOCOL"] == org_runtime["SHARED_FENCE_PROTOCOL"]
+    assert runtime["SHARED_FENCE_PROTOCOL"] == {
+        "canonical_scope": "N-MultiCloud",
+        "participants": [
+            "service.gitea.actions_runner.provision_org_ci_runner",
+            "service.gitea.runner.register",
+        ],
+        "takeover_generation_minimum": 1,
+        "takeover_generation_maximum": 9_007_199_254_740_991,
+        "reconciliation_quiescence_seconds": 1800,
+        "late_response_policy": "reject-generation-mismatch",
     }
 
 

@@ -516,6 +516,7 @@ _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = (
 )
 _GITEA_ORG_CI_RUNNER_PARAM_KEYS = frozenset(
     {
+        "operation",
         "lane",
         "registration_token_secret_ref",
         *_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS,
@@ -719,6 +720,7 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 # default would make every asyncssh procedure stop pinning its driver.
 
 _UNSET = object()
+
 
 def _transport_policy() -> Any | None:
     """The plugin settings singleton, or ``None`` when it cannot be read.
@@ -2277,8 +2279,8 @@ def validate_gitea_org_ci_runner_target(
 def _normalize_gitea_org_ci_runner_provision_execution(
     execution: RPCExecution,
 ) -> dict[str, Any]:
-    """Normalize the Gitea Actions org CI runner provision procedure."""
-
+    """Normalize and bind the fixed org-runner lane and both SSH targets."""
+    contract = gitea_org_ci_runner_contract
     procedure_name = execution.procedure.name
     params = execution.params or {}
     if not isinstance(params, dict):
@@ -2290,6 +2292,72 @@ def _normalize_gitea_org_ci_runner_provision_execution(
     gate_reason = code_gate_unavailable_reason(procedure_name)
     if gate_reason is not None:
         raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    supplied_overrides = sorted(
+        set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
+    )
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params)
+        - _GITEA_ORG_CI_RUNNER_PARAM_KEYS
+        - _GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS
+    )
+    operation = params.get("operation")
+    lane = params.get("lane")
+    secret_ref = params.get("registration_token_secret_ref")
+    if (
+        unexpected
+        or operation not in contract.OPERATIONS
+        or not isinstance(lane, str)
+        or lane not in _GITEA_ORG_CI_RUNNER_LANES
+    ):
+        raise RPCExecutionError(
+            "Gitea org CI runner lifecycle requires one exact operation and lane.",
+            code="RPC_PARAM_INVALID",
+        )
+    if operation == "provision" and (
+        not isinstance(secret_ref, str)
+        or secret_ref != secret_ref.strip()
+        or not _INFLUXDB_SECRET_REF_RE.fullmatch(secret_ref)
+    ):
+        raise RPCExecutionError(
+            "registration_token_secret_ref must be one exact nms-secret:<uuid> reference.",
+            code="RPC_PARAM_INVALID",
+        )
+    if operation == "reconcile" and "registration_token_secret_ref" in params:
+        raise RPCExecutionError(
+            "reconcile derives its token proof from the durable scope fence and "
+            "must not carry a registration token reference.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    lane_contract = _GITEA_ORG_CI_RUNNER_LANES[lane]
+    activation_reason = contract.activation_unavailable_reason(params)
+    if activation_reason is not None:
+        raise RPCExecutionError(
+            activation_reason,
+            code="RPC_HOST_GENERATION_UNAVAILABLE",
+        )
+
+    booleans = {
+        key: _bool_param(params, key, default)
+        for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
+    }
+    if booleans["build_runner_image"] and booleans["load_prebuilt_runner_image"]:
+        raise RPCExecutionError(
+            "build_runner_image and load_prebuilt_runner_image are mutually exclusive.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VirtualMachine
+
+    from ..models import RPCGiteaRunnerScopeFence
 
     target_model = str(getattr(execution, "target_model_label", "") or "")
     assigned_object_type = getattr(execution, "assigned_object_type", None)
@@ -2309,103 +2377,173 @@ def _normalize_gitea_org_ci_runner_provision_execution(
         target_display=getattr(execution, "target_display", None),
     )
 
-    supplied_overrides = sorted(
-        set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
-    )
-    if supplied_overrides:
+    scope = contract.SCOPE_BY_LANE[lane]
+    canonical_scope = contract.GITEA_SCOPE_BY_SCOPE[scope]
+    try:
+        fence = RPCGiteaRunnerScopeFence.objects.get(canonical_scope=canonical_scope)
+    except Exception as exc:
         raise RPCExecutionError(
-            "Caller-supplied SSH overrides are not accepted for "
-            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
-            "backend resolves host, port, credential, and known-host policy from "
-            "the execution's assigned NetBox object.",
-            code="RPC_PARAM_INVALID",
-        )
-    unexpected = sorted(
-        set(params)
-        - _GITEA_ORG_CI_RUNNER_PARAM_KEYS
-        - _GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS
+            "Gitea runner scope fence is unavailable.",
+            code="RPC_SCOPE_FENCE_UNAVAILABLE",
+        ) from exc
+    fence_state = str(getattr(fence, "state", "") or "")
+    fence_execution_id = getattr(fence, "blocking_execution_id", None)
+    fence_reconciliation_execution_id = getattr(
+        fence,
+        "reconciliation_execution_id",
+        None,
     )
-    if unexpected:
-        raise RPCExecutionError(
-            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
-            code="RPC_PARAM_INVALID",
-        )
-
-    secret_ref = params.get("registration_token_secret_ref")
-    if not isinstance(secret_ref, str) or not _INFLUXDB_SECRET_REF_RE.fullmatch(
-        secret_ref.strip()
+    current_fence_generation = getattr(fence, "takeover_generation", None)
+    if (
+        not isinstance(current_fence_generation, int)
+        or isinstance(current_fence_generation, bool)
+        or current_fence_generation < 0
+        or current_fence_generation >= contract.JS_SAFE_INTEGER_MAX
     ):
         raise RPCExecutionError(
-            "registration_token_secret_ref must be an nms-secret:<uuid> reference.",
-            code="RPC_PARAM_INVALID",
+            "Gitea runner scope fence generation is invalid or exhausted.",
+            code="RPC_SCOPE_FENCE_CHANGED",
         )
-    secret_ref = secret_ref.strip()
-
-    lane = params.get("lane")
-    if not isinstance(lane, str) or lane not in _GITEA_ORG_CI_RUNNER_LANES:
+    fence_generation = current_fence_generation + 1
+    fence_digest = str(getattr(fence, "expected_token_sha256", "") or "")
+    if not fence_digest:
+        fence_digest = contract.FENCE_UNKNOWN_SHA256
+    if operation == "provision" and (
+        fence_state != RPCGiteaRunnerScopeFence.STATE_CLEAR
+        or fence_execution_id is not None
+        or fence_reconciliation_execution_id is not None
+    ):
         raise RPCExecutionError(
-            "lane must be 'untrusted-python312' or 'general-ubuntu'.",
-            code="RPC_PARAM_INVALID",
+            "Gitea runner token scope requires reconciliation before provisioning.",
+            code="RPC_SCOPE_FENCE_BLOCKED",
         )
-    lane_contract = _GITEA_ORG_CI_RUNNER_LANES[lane]
-
-    # Frozen server-side. The backend resolves the vaulted registration token
-    # and then registers against this origin, so letting a caller choose either
-    # value would let the requester decide where that credential is delivered.
-    gitea_instance_url = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
-    organization = _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION
-    booleans = {
-        key: _bool_param(params, key, default)
-        for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
-    }
-    if booleans["build_runner_image"] and booleans["load_prebuilt_runner_image"]:
+    if operation == "reconcile" and (
+        fence_state
+        not in {
+            RPCGiteaRunnerScopeFence.STATE_PENDING,
+            RPCGiteaRunnerScopeFence.STATE_BLOCKED,
+        }
+        or not isinstance(fence_execution_id, int)
+        or isinstance(fence_execution_id, bool)
+        or fence_execution_id > contract.JS_SAFE_INTEGER_MAX
+        or fence_reconciliation_execution_id is not None
+    ):
         raise RPCExecutionError(
-            "build_runner_image and load_prebuilt_runner_image are mutually exclusive.",
-            code="RPC_PARAM_INVALID",
+            "Gitea runner token scope has no blocked operation to reconcile.",
+            code="RPC_SCOPE_FENCE_CLEAR",
+        )
+    if operation == "reconcile" and not _gitea_runner_fence_is_quiescent(
+        fence,
+        delay_seconds=contract.RECONCILIATION_QUIESCENCE_SECONDS,
+    ):
+        raise RPCExecutionError(
+            "Gitea runner token scope is still inside its remote-operation safety window.",
+            code="RPC_SCOPE_FENCE_BUSY",
+        )
+
+    runner_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+        assigned_object_id=contract.TARGET_OBJECT_ID,
+        expected_host=contract.TARGET_IPV4_ADDRESS,
+        policy_ref=contract.TARGET_SSH_POLICY_REF,
+    )
+    try:
+        gitea_target = VirtualMachine.objects.select_related("cluster", "device").get(
+            pk=contract.GITEA_TARGET_ID
+        )
+        gitea_content_type = ContentType.objects.get_for_model(
+            VirtualMachine,
+            for_concrete_model=False,
+        )
+    except Exception as exc:
+        raise RPCExecutionError(
+            "Gitea org CI runner could not resolve the locked Gitea VM.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    gitea_metadata = validate_gitea_upgrade_target(
+        gitea_target,
+        target_model_label=contract.GITEA_TARGET_OBJECT["content_type"],
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        target_display=contract.GITEA_TARGET_NAME,
+    )
+    gitea_ssh = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(gitea_content_type, "pk", None),
+        assigned_object_id=contract.GITEA_TARGET_ID,
+        expected_host=contract.GITEA_IPV4_ADDRESS,
+        policy_ref=contract.GITEA_SSH_POLICY_REF,
+    )
+    if runner_ssh.get("ssh_principal") != contract.TARGET_SSH_PRINCIPAL:
+        raise RPCExecutionError(
+            "Runner provisioning SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    if gitea_ssh.get("ssh_principal") != contract.GITEA_SSH_PRINCIPAL:
+        raise RPCExecutionError(
+            "Gitea token-control SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
         )
 
     normalized: dict[str, Any] = {
         **target_metadata,
-        "gitea_instance_url": gitea_instance_url,
-        "organization": organization,
-        "registration_token_secret_ref": secret_ref,
+        "gitea_target": gitea_metadata["target"],
+        "gitea_target_object": gitea_metadata["target_object"],
+        "gitea_ipv4": gitea_metadata["ipv4"],
+        "ssh_policy_ref": contract.TARGET_SSH_POLICY_REF,
+        "runner_ssh_snapshot": runner_ssh,
+        "gitea_ssh_snapshot": gitea_ssh,
+        "operation": operation,
+        "scope": scope,
+        "gitea_scope": canonical_scope,
+        "fence_state": fence_state,
+        "fence_expected_sha256": fence_digest,
+        "fence_execution_id": fence_execution_id,
+        "fence_generation": fence_generation,
+        **(
+            {"registration_token_secret_ref": secret_ref}
+            if operation == "provision"
+            else {}
+        ),
         "lane": lane,
-        "runner_name": lane_contract["runner_name"],
-        "runner_labels": list(lane_contract["runner_labels"]),
-        "runner_image": lane_contract["runner_image"],
-        "compose_project_dir": lane_contract["compose_project_dir"],
-        "executor": lane_contract["executor"],
-        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
-        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
-        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
-        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
-        "job_user": lane_contract["job_user"],
+        "gitea_instance_url": _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL,
+        "organization": _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION,
+        "register_helper_sha256": contract.RUNNER_REGISTER_HELPER_SHA256,
+        "token_reset_helper_sha256": contract.GITEA_TOKEN_RESET_HELPER_SHA256,
+        **lane_contract,
         **booleans,
     }
-    fingerprint = {
+    normalized["command_fingerprint"] = {
         "handler_id": execution.procedure.handler_id,
         "procedure": procedure_name,
-        "target_content_type": content_type,
-        "target_object_id": object_id,
-        "target_object_sha256": gitea_org_ci_runner_contract.TARGET_OBJECT_SHA256,
-        "runner_ipv4": target_metadata["runner_ipv4"],
-        "gitea_instance_url": gitea_instance_url,
-        "organization": organization,
-        "registration_token_secret_ref": secret_ref,
+        "assigned_object_id": contract.TARGET_OBJECT_ID,
+        "target_object_sha256": contract.TARGET_OBJECT_SHA256,
+        "gitea_target_object_sha256": contract.GITEA_TARGET_OBJECT_SHA256,
+        "operation": operation,
+        "scope": scope,
+        "gitea_scope": canonical_scope,
+        "fence_state": fence_state,
+        "fence_expected_sha256": fence_digest,
+        "fence_execution_id": fence_execution_id,
+        "fence_generation": fence_generation,
+        **(
+            {"registration_token_secret_ref": secret_ref}
+            if operation == "provision"
+            else {}
+        ),
         "lane": lane,
-        "runner_name": lane_contract["runner_name"],
-        "runner_labels_sha256": _hash_json(list(lane_contract["runner_labels"])),
-        "runner_image": lane_contract["runner_image"],
-        "compose_project_dir": lane_contract["compose_project_dir"],
-        "executor": lane_contract["executor"],
-        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
-        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
-        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
-        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
-        "job_user": lane_contract["job_user"] or "",
+        "lane_contract_sha256": contract.LANE_CONTRACT_SHA256[lane],
+        "gitea_instance_url": _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL,
+        "organization": _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION,
+        "runner_ssh_snapshot_sha256": _hash_json(runner_ssh),
+        "gitea_ssh_snapshot_sha256": _hash_json(gitea_ssh),
         **booleans,
     }
-    normalized["command_fingerprint"] = fingerprint
+    try:
+        jsonschema.validate(normalized, contract.NORMALIZED_PARAMS_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        raise RPCExecutionError(
+            "Gitea org CI runner normalized contract validation failed.",
+            code="RPC_NORMALIZED_CONTRACT_INVALID",
+        ) from exc
     return normalized
 
 
@@ -5870,6 +6008,18 @@ def _normalize_gitea_runner_registration_execution(
         "reconciliation_execution_id",
         None,
     )
+    current_fence_generation = getattr(fence, "takeover_generation", None)
+    if (
+        not isinstance(current_fence_generation, int)
+        or isinstance(current_fence_generation, bool)
+        or current_fence_generation < 0
+        or current_fence_generation >= contract.JS_SAFE_INTEGER_MAX
+    ):
+        raise RPCExecutionError(
+            "Gitea runner scope fence generation is invalid or exhausted.",
+            code="RPC_SCOPE_FENCE_CHANGED",
+        )
+    fence_generation = current_fence_generation + 1
     fence_digest = str(getattr(fence, "expected_token_sha256", "") or "")
     if not fence_digest:
         fence_digest = contract.FENCE_UNKNOWN_SHA256
@@ -5890,6 +6040,7 @@ def _normalize_gitea_runner_registration_execution(
         }
         or not isinstance(fence_execution_id, int)
         or isinstance(fence_execution_id, bool)
+        or fence_execution_id > contract.JS_SAFE_INTEGER_MAX
         or fence_reconciliation_execution_id is not None
     ):
         raise RPCExecutionError(
@@ -5970,6 +6121,7 @@ def _normalize_gitea_runner_registration_execution(
         "fence_state": fence_state,
         "fence_expected_sha256": fence_digest,
         "fence_execution_id": fence_execution_id,
+        "fence_generation": fence_generation,
         "register_helper_sha256": contract.RUNNER_REGISTER_HELPER_SHA256,
         "token_reset_helper_sha256": contract.GITEA_TOKEN_RESET_HELPER_SHA256,
         **{f"runner_{key}": value for key, value in runner_ssh.items()},

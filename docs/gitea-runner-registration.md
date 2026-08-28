@@ -3,7 +3,8 @@
 `service.gitea.runner.register` is the only audited RPC path for registering
 the isolated runner identities declared by `nmulticloud-context/ci/runners`.
 It is destructive, requires a distinct approver, is seeded disabled by
-migration `0080`, and is additionally blocked by a code availability gate. It
+migration `0080`, upgraded onto the shared generation protocol by migration
+`0087`, and is additionally blocked by a code availability gate. It
 must not be enabled or dispatched until the coordinated catalog, backend,
 runner-host, and credential-identity generations described here are deployed.
 
@@ -89,22 +90,28 @@ execution and persisted expected-token digest. If interruption happened before
 the digest was recorded, the all-zero sentinel tells the helper to classify
 and rotate the currently active scope token conservatively. Only one
 reconciliation may own a scope. Ordinary takeover requires a terminal blocked
-execution and 360 seconds since the last fence update. A hard worker death can
+execution and the full shared 1800-second interval since the last fence update.
+A hard worker death can
 leave the fence `pending` and the execution `running`; after the same full
-360-second remote-operation window, reconciliation reservation locks both rows,
+1800-second remote-operation window, reconciliation reservation locks both rows,
 terminalizes that stale execution with the fixed worker-loss code, changes the
 fence to `blocked`, and records its owner atomically. A newer `pending` fence or
 a nonterminal `blocked` owner remains ineligible. The window is deliberately
 conservative: a client-side transport failure cannot authorize reset while the
-backend may still be running. Once reconciliation owns the fence, every late
-original transition is rejected; only the owner's exact successful proof clears
-it. Do not copy an old or replacement token into a comment, execution, shell, or
-evidence artifact.
+backend may still be running. The interval and monotonic positive JS-safe
+generation are shared with
+`service.gitea.actions_runner.provision_org_ci_runner`, which also mutates the
+canonical `N-MultiCloud` fence. Every reservation advances the generation and
+every result must echo it. Once reconciliation owns the fence, every late
+original transition is rejected, including after reconciliation fails; only
+the owner's exact successful proof clears it. Do not copy an old or replacement
+token into a comment, execution, shell, or evidence artifact.
 
 ## Closed results
 
 The result contains the constant procedure and target, `operation`, allowlisted
-`scope`, nullable `registered`/`reconciled` state, whether invalidation was
+`scope`, exact fence owner and generation, nullable `registered`/`reconciled`
+state, whether invalidation was
 proved, whether reconciliation remains required, the expected-token digest,
 the bounded reset classification/IDs, and `stage`:
 
@@ -133,7 +140,7 @@ Activation order is fail-closed:
    `nms-gitea-runner-control` sudo policy on Gitea VM `170`.
 4. Deploy the backend handler with
    `gitea_runner_registration_enabled=false`; verify its capability digest.
-5. Apply catalog migrations `0080` and `0081` with the procedure disabled and
+5. Apply catalog migrations `0080`, `0081`, and `0087` with the procedure disabled and
    its code gate false. Verify catalog/backend semantic digests are byte-identical
    and all three canonical scope fences are `clear`.
 6. Record VM `399`'s explicit primary IPv4 and configure exactly one enabled,

@@ -652,7 +652,10 @@ issue `#23` credential-identity response. Only a definitive pre-token failure or
 an exact reset proof clears the fence; indeterminate outcomes require a fresh,
 distinctly approved `reconcile` plus runner-list/local-state inspection before
 retry. Reconciliation is not admitted from a fresh `pending` fence or before
-the blocking execution's 360-second remote-quiescence interval has elapsed.
+the shared 1800-second remote-quiescence interval has elapsed. That interval
+and the positive JS-safe takeover generation are common to this legacy
+procedure and the org provisioner because both mutate canonical
+`N-MultiCloud`; neither protocol may accept a response from an older epoch.
 For stale `pending` recovery after that interval, reservation locks
 the fence and original execution together, terminalizes a still-`running` lost
 worker, moves the fence to `blocked`, and records the reconciliation owner in
@@ -753,26 +756,48 @@ pending approval or distinct-actor check.
     non-daemon unit fails the test and forces a deliberate decision rather than
     silently widening it. Adding a maintenance unit under this prefix therefore
     requires updating that set, not the seed migration.
-- **Gitea Actions org CI runner provisioning** is seeded disabled by migration
-  `0084` (depending on `0083`) as
+- **Gitea Actions org CI runner provisioning** was seeded disabled by migration
+  `0084`; forward migration `0087` extends the same disabled row as
   `service.gitea.actions_runner.provision_org_ci_runner`. It is a distinct
-  protected two-person install/register/start/verify workflow for the two runner
-  lanes on exact `Gitea-Runner` VM PK 416 (`10.0.30.241`), not a restart of an
-  existing systemd unit. The
-  closed `lane` enum freezes the name, ordered labels, image, executor, Compose
-  directory, and trust posture. `untrusted-python312` uses the host executor,
-  no Docker socket, `cap_drop: ALL`, no-new-privileges, and non-root `cirunner`;
-  `general-ubuntu` uses Docker-executor labels and mounts the Docker socket only
-  into the runner so jobs are socket-free sibling containers. The procedure
-  requires `registration_token_secret_ref` as an `nms-secret:<uuid>`, rejects
-  `rpc_ssh_*` routing overrides, freezes the Gitea origin and `N-MultiCloud`
-  organization server-side, and resolves SSH only from the exact,
-  requester-viewable assigned VM. A distinct approver, immutable approval
-  snapshot, compatible capability, and signed one-time dispatch lease are
-  mandatory. The hard gate `_GITEA_ORG_CI_RUNNER_AVAILABLE` must stay false until
-  the paired `netbox-rpc-backend` handler and approved capability contract are
-  deployed, then a forward migration may enable the row and open the gate. The
-  complete frozen contract lives in
+  protected two-person `provision|reconcile` workflow for exactly the
+  `root-python312` runner lane on `Gitea-Runner` VM PK 416 (`10.0.30.241`), not
+  a restart of an existing systemd unit. The closed lane freezes identity,
+  labels, image, executor, Compose directory, and trust posture; earlier
+  non-root sketches remain future design data outside every v1 admissible
+  schema and capability. `root-python312` maps container root to an unprivileged host account and uses
+  a fresh capacity-one rootless container. Its minimal job capabilities are
+  confined to that user namespace; host-effective and host-ambient sets remain
+  empty, and job host PID/IPC/UTS namespace, device, socket, host network,
+  worktree, and cross-scope state are denied. Build jobs have no network. The
+  publisher alone may reach TLS-verified `https://git.nmulti.cloud:443` through
+  a static `10.0.30.96` binding; DNS, redirects, and every other management or
+  production destination are denied. Cgroup v2 fixes two CPUs, 4 GiB memory
+  without swap, 512 PIDs, read-only root, 8 GiB ephemeral workspace, bounded
+  `/tmp` and `/run` tmpfs, exact ulimits, 1800-second wall clock, and 10-second
+  kill grace. These controls remain unproven until the tracked source
+  prerequisite supplies and proves them. It is
+  `activation_eligible=false` until the tracked source prerequisite publishes
+  the content-addressed VM416 provision/prove helpers and final job image;
+  never substitute the registration/reset helper hashes.
+
+  `provision` requires an exact whitespace-free `nms-secret:<uuid>` reference;
+  `reconcile` forbids credentials and binds the durable fence owner/digest.
+  Callers cannot supply `rpc_ssh_*` routing. Normalization binds exact VM416 and
+  VM170 target-owned SSH service/credential revisions, fixed origin/org, and
+  lane digest into approval/lease evidence. Redirect-free streaming transport
+  has an 8192-byte body cap and 1740-second absolute deadline; events and
+  backend diagnostics are discarded. A distinct approver, exact compatible
+  capability, signed lease, exclusive canonical-scope fence, and full
+  1800-second reconciliation quiescence window are mandatory. A monotonic
+  JS-safe generation binds normalization, approval, lease, reservation, and
+  every response for both procedures sharing canonical `N-MultiCloud`; a
+  failed reconcile never revalidates a late original result.
+  Schema-valid activation-ineligible work fails before backend, inventory, SSH,
+  fence, capability, or authenticated I/O. Keep the catalog, code, and
+  backend gates dark; a later forward migration must bind the prerequisite's
+  real bytes before activation. Migration `0087` is intentionally irreversible
+  and raises before its durable takeover-generation column can be removed; any
+  repair requires another reviewed forward migration. The complete frozen contract lives in
   [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
@@ -1409,20 +1434,36 @@ pending approval or distinct-actor check.
   unapplied migration with deleted, surviving, or orphaned rows. Removal or
   repair requires a reviewed forward migration with explicit ownership
   evidence.
-- Gitea org CI runner provisioning is seeded disabled by migration `0084` as
+- Gitea org CI runner provisioning is seeded disabled by migration `0084` and
+  extended, still disabled, by forward migration `0087` as
   `service.gitea.actions_runner.provision_org_ci_runner` (write, 1800s,
   approval required), targeting only exact `virtualization.virtualmachine` PK
   416 (`Gitea-Runner`, `10.0.30.241`).
-  Its required `lane` enum selects one of two fully frozen stacks:
-  `untrusted-python312` has no Docker socket, drops all capabilities, enables
-  no-new-privileges, and runs jobs as non-root `cirunner` with the host executor;
-  `general-ubuntu` uses three Docker-executor Ubuntu labels and exposes the
-  Docker socket only to the runner, never its sibling job containers. Callers
-  cannot provide names, labels, images, directories, executors, or posture.
-  The one-time registration credential is accepted only through
-  `registration_token_secret_ref`; caller-supplied SSH routing is rejected. Its
-  reverse is non-destructive: disable only, never delete. Keep it gated until
-  the paired backend handler is deployed. Contract:
+  Its required `lane` enum admits exactly `root-python312`, a fresh,
+  rootless-user-namespace container whose UID 0 is
+  never host root. Its minimal job capabilities are namespace-confined while
+  host-effective and host-ambient sets stay empty, and jobs have no host
+  PID/IPC/UTS namespace, device, socket, host network, worktree, or cross-scope
+  state. Builds are offline; the publisher has only TLS-verified HTTPS to
+  `git.nmulti.cloud:443` through a static `10.0.30.96` binding, with DNS,
+  redirects, and all other management/production egress denied. Its frozen
+  cgroup v2 boundary is two CPUs, 4 GiB/no swap, 512 PIDs, read-only root,
+  bounded workspace/tmpfs/ulimits, 1800-second wall clock, and 10-second kill
+  grace. Earlier non-root lane sketches are inert
+  design data and are not advertised by v1. The root lane is
+  activation-ineligible until the tracked source prerequisite supplies its
+  reviewed content-addressed host boundary and final image.
+
+  `provision` alone accepts exact `registration_token_secret_ref`; credential-
+  free `reconcile` uses a durable canonical Gitea fence. Separate VM416/VM170
+  SSH snapshots, two-person approval, signed lease, redirect-free bounded
+  absolute-deadline transport, closed reset proof, exclusive fence ownership,
+  full-budget post-failure quiescence, and a monotonic generation echoed by
+  every response from either procedure sharing canonical `N-MultiCloud` are
+  mandatory. Migration `0087` is intentionally irreversible
+  and refuses reversal before Django can remove its durable generation column
+  or mutate catalog state. Keep every gate dark until that source boundary
+  is bound by another reviewed forward migration. Contract:
   [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle

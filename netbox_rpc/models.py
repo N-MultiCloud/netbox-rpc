@@ -58,7 +58,9 @@ ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # local path, a VCS reference, an `--option`. None of those may ever reach it,
 # so the pattern permits only what a plain PyPI-style name can contain, and
 # `RPCNetBoxPluginAllowlist` is what supplies the value in the first place.
-PYTHON_DISTRIBUTION_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")
+PYTHON_DISTRIBUTION_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"
+)
 
 # Importable Python module path, e.g. `netbox_openbao`. Dotted form is allowed
 # because NetBox's PLUGINS accepts one, but each segment must be a valid
@@ -950,6 +952,7 @@ class RPCGiteaRunnerScopeFence(NetBoxModel):
         null=True,
         blank=True,
     )
+    takeover_generation = models.PositiveBigIntegerField(default=0)
     expected_token_sha256 = models.CharField(max_length=64, blank=True)
     last_reset_state = models.CharField(max_length=64, blank=True)
     last_prior_token_id = models.PositiveBigIntegerField(null=True, blank=True)
@@ -1508,6 +1511,7 @@ class RpcPluginSettings(NetBoxModel):
             self.ansible_platform_map, platform_slug
         )
 
+
 class RPCNetBoxPluginAllowlist(NetBoxModel):
     """A NetBox plugin an operator has authorized for installation by RPC.
 
@@ -1641,7 +1645,9 @@ class RPCNetBoxPluginAllowlist(NetBoxModel):
         if not isinstance(self.service_slugs, list) or not all(
             isinstance(item, str) and item for item in self.service_slugs
         ):
-            errors["service_slugs"] = "Must be a list of RPCLinuxServiceAllowlist slugs."
+            errors["service_slugs"] = (
+                "Must be a list of RPCLinuxServiceAllowlist slugs."
+            )
 
         if errors:
             raise ValidationError(errors)

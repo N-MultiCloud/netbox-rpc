@@ -1,147 +1,165 @@
 # Gitea Organization CI Runner Provision Contract
 
-`service.gitea.actions_runner.provision_org_ci_runner` is the catalog contract
-for making both Gitea Actions organization-runner lanes on the dedicated runner
-host reproducible. Migration `0084_seed_gitea_org_ci_runner_provision` seeds the
-row with `enabled=False`, and `_GITEA_ORG_CI_RUNNER_AVAILABLE` independently
-keeps admission, advertisement, and worker claim closed.
+`service.gitea.actions_runner.provision_org_ci_runner` is the default-dark
+catalog contract for the Gitea Actions isolated root organization-runner lane on exact
+`Gitea-Runner` VM PK 416 (`10.0.30.241`). Migration `0084` created the disabled
+two-lane skeleton. Forward migration `0087` extends that same disabled row with
+the isolated `root-python312` candidate, operation-discriminated schemas,
+dual-target SSH approval evidence, durable token-scope reconciliation, and the
+secret-protected backend response path.
 
-There is no `netbox-rpc-backend` handler yet. Do not enable, advertise, approve,
-or dispatch this procedure until the paired handler and exact capability
-contract are deployed in a coordinated forward rollout.
+The catalog row remains `enabled=False`,
+`_GITEA_ORG_CI_RUNNER_AVAILABLE` remains false, and the matching backend gate
+must also remain false. In addition, `root-python312` carries
+`activation_eligible=false`: `N-MultiCloud/nmulticloud-context#411` must first
+publish the reviewed content-addressed VM416 provision-and-prove helper, final
+job-image digest, and a trusted server-owned publisher dispatcher whose phase
+authorization cannot be selected by an untrusted workflow and that keeps publisher
+credentials outside the untrusted job container. The helper must also
+prove exact inode quota, cgroup-v2 block-I/O BPS/IOPS, and stdout/stderr/log byte
+and rate ceilings. The current reviewed registration and token-reset helpers
+cannot mutate or prove the host generation and must never be presented as
+though they can.
 
-## Frozen lanes
+## Frozen lane
 
-The caller must select one `lane` enum. That choice selects every installation
-identity and trust-posture value as one server-owned unit; callers cannot supply
-or override the runner name, labels, image, executor, Compose directory, or
-socket/security posture.
+Version 1 admits exactly one closed `lane`; every runtime identity and trust
+value is server owned.
 
-| Contract field | `untrusted-python312` | `general-ubuntu` |
-| --- | --- | --- |
-| Compose directory | `/opt/nmc-ci-untrusted-org-241` | `/opt/nmc-ci-ubuntu-241` |
-| Runner name | `ci-untrusted-nmulticloud-org-241` | `ci-ubuntu-nmulticloud-org-241` |
-| Image | `nmc/ci-untrusted-runner:python312-241` | `nmulti/gitea-act-ubuntu:22.04-actions` |
-| Executor | `host` | `docker` |
-| Runner mounts `/var/run/docker.sock` | no | yes |
-| Jobs mount `/var/run/docker.sock` | no | no |
-| Runner `cap_drop: ALL` | yes | no |
-| Runner `no-new-privileges` | yes | no |
-| Pinned job user | non-root `cirunner` | none; job image policy applies |
+| Lane | Execution boundary | Scope | Activation |
+| --- | --- | --- | --- |
+| `root-python312` | root inside a fresh rootless user-namespace container | `nmulticloud-org-root` | ineligible until `nmulticloud-context#411` |
 
-The exact label arrays are:
+The earlier `general-ubuntu` and `untrusted-python312` sketches remain inert
+future design data only. They are absent from the request, normalized,
+fingerprint, result, migration, and capability lane enums because the paired v1
+backend implements only `root-python312`. A future lane needs a separately
+named and reviewed procedure rather than widening this handler implicitly.
 
-```text
-untrusted-python312:
-  ci-untrusted-python312:host
+The root lane is fixed to:
 
-general-ubuntu:
-  ubuntu-latest:docker://nmulti/gitea-act-ubuntu:22.04-actions
-  ubuntu-24.04:docker://nmulti/gitea-act-ubuntu:22.04-actions
-  ubuntu-22.04:docker://nmulti/gitea-act-ubuntu:22.04-actions
-```
+- sole label `ci-untrusted-root-python312`;
+- non-login host service identity `gitea-runner-nmulticloud-org-root`;
+- state `/var/lib/gitea-runner-nmulticloud-org-root` and config
+  `/etc/gitea-runner/nmulticloud-org-root.yaml`;
+- capacity one and a fresh container for every job;
+- container UID 0 mapped to an unprivileged host UID, never host root;
+- `privileged=false`, no host PID, IPC, or UTS namespace, host networking, host
+  worktree bind, host volume, host device, daemon socket in the job, or
+  cross-scope state;
+- capability drop-all on the runner and job, followed only inside the rootless
+  job user namespace by `CHOWN`, `SETUID`, `SETGID`, `FOWNER`, and
+  `DAC_OVERRIDE`, with no-new-privileges; the host-effective and host-ambient
+  capability sets remain empty;
+- a default-deny job network namespace: the build phase has `network_mode=none`
+  and no DNS or egress; the publisher phase alone may use TLS-verified HTTPS to
+  `https://git.nmulti.cloud:443`, resolved without DNS by the exact static
+  `git.nmulti.cloud -> 10.0.30.96` binding, with redirects disabled and all
+  other destinations and ports denied;
+- cgroup v2 CPU fixed at a 100000 µs period, 200000 µs quota, and weight 100;
+- 4,294,967,296-byte memory maximum, zero swap, and 512-PID maximum;
+- read-only root filesystem with only `/workspace`, `/tmp`, and `/run`
+  writable: an 8,589,934,592-byte non-host-bound ephemeral workspace,
+  1,073,741,824-byte `/tmp` tmpfs, and 67,108,864-byte `/run` tmpfs, both
+  `nodev,nosuid,noexec`;
+- exact core `0/0`, file-size `8589934592/8589934592`, open-file `1024/1024`,
+  and process `512/512` soft/hard ulimits;
+- a hard 1800-second job wall clock followed by a 10-second kill grace; and
+- pinned public base input
+  `ghcr.io/astral-sh/uv:0.12.5-python3.12-trixie-slim@sha256:0d05436f6b7b8c88236dcaeab65c2b819df944e9af0be7f4b3a2117c38fe868f`,
+  Python 3.12.14 source digest, and uv 0.12.5 archive digest.
 
-These lanes intentionally do not share a flattened security profile:
+The public Astral image is only a pinned build input. It is not the final NMC
+job image and does not contain the required checkout/isolation helpers or
+wheelhouse. Until issue #411 supplies that final content-addressed artifact and
+host boundary, `runner_image`, provision-helper path/digest, and prove-helper
+path/digest are deliberately null.
 
-- `untrusted-python312` executes jobs inside the runner container as non-root
-  `cirunner`. The runner has no Docker socket, drops all capabilities, and uses
-  `no-new-privileges`; its label therefore uses the host executor.
-- `general-ubuntu` uses Docker-executor labels. The runner alone mounts the
-  Docker socket so it can create sibling job containers. Those job containers
-  never receive the socket.
+## Caller and approval contract
 
-The `prod-deploy` release lane remains on `10.0.30.96` and is deliberately out
-of scope for this procedure.
+Every request requires `operation` (`provision` or `reconcile`) and exact lane
+`root-python312`. `provision` additionally requires one exact
+`registration_token_secret_ref` matching `nms-secret:<uuid>`; leading/trailing
+whitespace is rejected rather than trimmed. `reconcile` forbids that field and
+uses only the durable fence owner and expected token digest. Optional booleans
+retain their existing defaults; build and prebuilt-image modes remain mutually
+exclusive. Caller-supplied runner identity, labels, image, paths, origin,
+organization, or any `rpc_ssh_*` routing is rejected.
 
-## Caller contract
+Normalization binds two independent target-owned SSH snapshots:
 
-The assigned NetBox object is pinned to `virtualization.virtualmachine` PK 416,
-named `Gitea-Runner`, active, with primary IPv4 `10.0.30.241`. Admission proves
-that exact object exists and is viewable by the requester; normalization repeats
-the immutable identity check when an approved execution is claimed by a worker.
-The backend must resolve host, port, credential, and pinned-known-host policy
-only from that object. Caller-provided `rpc_ssh_*` routing is rejected.
+- VM416, policy
+  `target-owned-ssh:virtualization.virtualmachine:416`, principal
+  `nms-runner-bootstrap`; and
+- Gitea VM170 (`10.0.30.96`), policy
+  `target-owned-ssh:virtualization.virtualmachine:170`, principal
+  `nms-gitea-runner-control`.
 
-Required params:
+Each snapshot carries the exact service and credential IDs/revisions, local
+storage backend, principal, method, host, port 22, known-host digest, and policy
+reference. The command fingerprint const-binds both target-object digests, the
+lane-specific scope and lane-contract digest, the two snapshot digests, and the
+fixed Gitea origin/organization. A distinct approver, current compatible
+backend capability, and signed one-time dispatch lease are mandatory; there is
+no ID-only fallback.
 
-| Param | Contract |
-| --- | --- |
-| `lane` | `untrusted-python312` or `general-ubuntu` |
-| `registration_token_secret_ref` | exact `nms-secret:<uuid>` reference |
+Because the only advertised lane is currently activation-ineligible, admission
+and worker claim validate the closed request schema and then fail as
+`RPC_HOST_GENERATION_UNAVAILABLE` before backend settings, capability,
+inventory, SSH, fence, or authenticated network access.
 
-Optional params retain bounded operational controls without changing the
-selected lane's frozen identities or security posture:
+## Secret transport and durable fence
 
-| Param | Default |
-| --- | --- |
-| `install_docker` | `true` |
-| `build_runner_image` | `true` |
-| `load_prebuilt_runner_image` | `false` |
-| `force_recreate` | `false` |
+The backend HTTP call is redirect-free and streamed. The route has a 1740-second
+absolute deadline inside the procedure's 1800-second budget, and the response
+body is capped at 8192 bytes with compressed, truncated, oversized, or trickled
+responses rejected. Only the exact five-key wire envelope is accepted; backend
+events and diagnostic strings are discarded. The durable projection receives
+only `ok` plus a result validated against the closed schema. An opaque token in
+an event, diagnostic, added field, log, or result cannot pass that projection.
 
-`gitea_instance_url` and `organization` are not caller parameters. They are
-frozen server-side to `http://10.0.30.96:3000` and `N-MultiCloud`, respectively,
-and are `const` values in the closed result schema. This prevents a requester
-from redirecting a resolved registration credential to another origin.
+`nmulticloud-org-root` maps to canonical Gitea scope `N-MultiCloud`, so token
+mutation is serialized with legacy `service.gitea.runner.register` and every
+existing operation on that organization. Both procedures use the same positive
+JS-safe takeover-generation protocol and the same 1800-second safety interval. A provision
+reservation moves the fence from clear to pending before backend I/O. Any
+ambiguous failure blocks the scope. A separately approved `reconcile` may own
+the blocked scope only after the original execution is terminal and the
+full 1800-second maximum participant budget has elapsed; pending/running work is never
+declared quiescent sooner. The fence's monotonic `takeover_generation` starts at
+zero. Each register, provision, or reconcile approval binds the next positive JS-safe
+`fence_generation`; reservation atomically advances the durable generation,
+and every result, including transport or reconciliation failure, must echo it.
+Reconciliation failure releases only its retry owner and never rolls the
+generation back, so late original responses remain permanently invalid.
 
-`build_runner_image=true` and `load_prebuilt_runner_image=true` are mutually
-exclusive. `additionalProperties` is false. In particular, `runner_name`,
-`runner_labels`, `runner_image`, `compose_project_dir`, executor, and trust
-posture are never caller params.
+The pinned helper proof uses reset states `rotated` or `already_inactive` and a
+positive replacement-token ID. Reconcile success uses one of the
+`reconciled_*` states and also carries the positive replacement-token ID. The
+closed schema deliberately rejects the older `deleted`/`already_absent` model,
+missing replacement identity, mismatched operation/lane/scope/fence owner, and
+unbounded diagnostics. A reset proof clears the fence; uncertain reset state
+keeps it blocked.
 
-The registration credential remains a reference throughout the catalog,
-normalization, approval snapshot, command fingerprint, event ledger, tests, and
-documentation. Secret material must never enter RPC params, schema defaults,
-command rows, results, logs, or durable diagnostics.
+## Activation and rollback
 
-## Normalized and result contract
+Activation remains a later reviewed source/deploy action. It requires, in
+order:
 
-Normalization copies the selected lane's full frozen contract into normalized
-params and binds scalar values plus a digest of the exact ordered label array
-into `command_fingerprint`. This makes approval drift visible without allowing
-the caller to shape the installation.
+1. merge and verify the content-addressed host-generation boundary from
+   `N-MultiCloud/nmulticloud-context#411`, including the trusted publisher
+   dispatcher and credential-phase binding plus inode, block-I/O, and log
+   ceilings described above;
+2. replace the null helper/image fields through another reviewed forward
+   catalog migration and capability digest;
+3. deploy a backend whose canonical capability bytes match the catalog fixture;
+4. deploy the catalog while its row and code gate remain dark;
+5. verify both VM SSH snapshots, signed leases, fence recovery, and closed
+   transport; then
+6. explicitly open backend/code/catalog gates in coordinated order.
 
-The procedure is a protected two-person command. Creation produces
-`pending_approval` plus an immutable snapshot and never enqueues. A distinct
-authorized approver must decide it; approval revalidates the exact catalog,
-target, backend, capability, normalized params, and fingerprint before queueing.
-Worker claim repeats those checks and requires a signed one-time dispatch lease.
-There is no ID-only dispatch fallback for this procedure.
-
-The closed result schema requires the selected `lane` and all corresponding
-constants. It rejects a result that mixes lanes, changes label order, reports a
-different image or directory, or flattens the socket/security posture. A
-successful result additionally requires:
-
-```text
-ok=true
-registered=true
-online=true
-stage=complete
-docker_installed=true
-image_ready=true
-compose_ready=true
-```
-
-False results may report only the bounded fields admitted by the same closed
-schema. They must never contain a registration credential, remote command
-output, arbitrary filesystem content, or an exception chain.
-
-## Future activation sequence
-
-Activation is intentionally out of scope for issue `#277`. When a paired
-backend implementation exists, a reviewed rollout must:
-
-1. Implement both exact lane contracts without accepting caller-defined
-   labels, images, directories, executors, or socket posture.
-2. Resolve only `registration_token_secret_ref`; never accept or emit a raw
-   registration credential.
-3. Advertise the exact handler/version/effect/contract hash from the backend.
-4. Add an audited forward migration that enables the catalog row while the code
-   gate is opened in the same coordinated release.
-5. Exercise each lane through the approval workflow and verify that the closed
-   result matches its frozen contract.
-
-Rollback closes the code/backend gates and disables the catalog row before any
-handler removal. Migration `0084` itself reverses by disabling the row; it does
-not delete audited procedure history.
+Rollback closes backend/code/catalog gates before handler removal. Migration
+`0087` is intentionally irreversible: its reverse raises before Django can
+remove the durable takeover-generation column or mutate catalog state. A
+reviewed forward migration must perform any later repair while retaining
+audited procedure, execution, approval, and fence history.

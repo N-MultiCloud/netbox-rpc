@@ -14,6 +14,7 @@ from typing import Any
 PROCEDURE_NAME = "service.gitea.runner.register"
 HANDLER_ID = PROCEDURE_NAME
 VERSION = 1
+JS_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 ROUTE_BUDGET_SECONDS = 300
 HANDLER_BUDGET_SECONDS = 270
 PREFLIGHT_TIMEOUT_SECONDS = 30
@@ -22,7 +23,22 @@ REGISTER_TIMEOUT_SECONDS = 150
 RESET_TIMEOUT_SECONDS = 30
 CAPTURE_MAX_BYTES = 512
 BACKEND_RESPONSE_MAX_BYTES = 4096
-RECONCILIATION_QUIESCENCE_SECONDS = 360
+# This is intentionally the maximum shared runner-lifecycle budget, not this
+# legacy handler's shorter route budget.  The durable N-MultiCloud token fence
+# is also used by the org provisioner, whose accepted remote work can run for
+# 1740 seconds; no caller may declare either direction quiescent earlier.
+RECONCILIATION_QUIESCENCE_SECONDS = 1800
+SHARED_FENCE_PROTOCOL = {
+    "canonical_scope": "N-MultiCloud",
+    "participants": [
+        "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.gitea.runner.register",
+    ],
+    "takeover_generation_minimum": 1,
+    "takeover_generation_maximum": JS_SAFE_INTEGER_MAX,
+    "reconciliation_quiescence_seconds": RECONCILIATION_QUIESCENCE_SECONDS,
+    "late_response_policy": "reject-generation-mismatch",
+}
 TARGET_MODELS = ["virtualization.virtualmachine"]
 EFFECT = "destructive"
 TIMEOUT_SECONDS = 360
@@ -170,6 +186,8 @@ RESULT_SCHEMA = {
         "target",
         "operation",
         "scope",
+        "fence_execution_id",
+        "fence_generation",
         "registered",
         "reconciled",
         "token_invalidated",
@@ -187,6 +205,16 @@ RESULT_SCHEMA = {
         "target": {"const": RUNNER_TARGET_NAME},
         "operation": {"type": "string", "enum": list(OPERATIONS)},
         "scope": {"type": "string", "enum": list(SCOPES)},
+        "fence_execution_id": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": JS_SAFE_INTEGER_MAX,
+        },
+        "fence_generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": JS_SAFE_INTEGER_MAX,
+        },
         "registered": {"type": ["boolean", "null"]},
         "reconciled": {"type": ["boolean", "null"]},
         "token_invalidated": {"type": "boolean"},
@@ -208,7 +236,11 @@ RESULT_SCHEMA = {
                 "indeterminate",
             ],
         },
-        "prior_token_id": {"type": ["integer", "null"], "minimum": 1},
+        "prior_token_id": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": JS_SAFE_INTEGER_MAX,
+        },
         "prior_active_sha256": {
             "type": ["string", "null"],
             "pattern": r"^[0-9a-f]{64}$",
@@ -216,6 +248,7 @@ RESULT_SCHEMA = {
         "replacement_token_id": {
             "type": ["integer", "null"],
             "minimum": 1,
+            "maximum": JS_SAFE_INTEGER_MAX,
         },
         "stage": {
             "type": "string",
@@ -417,7 +450,16 @@ _NORMALIZED_PROPERTIES: dict[str, Any] = {
     "gitea_ipv4": {"const": GITEA_IPV4_ADDRESS},
     "fence_state": {"type": "string", "enum": ["blocked", "clear", "pending"]},
     "fence_expected_sha256": {"type": "string", "pattern": _SHA256_PATTERN},
-    "fence_execution_id": {"type": ["integer", "null"], "minimum": 1},
+    "fence_execution_id": {
+        "type": ["integer", "null"],
+        "minimum": 1,
+        "maximum": JS_SAFE_INTEGER_MAX,
+    },
+    "fence_generation": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": JS_SAFE_INTEGER_MAX,
+    },
     "register_helper_sha256": {"const": RUNNER_REGISTER_HELPER_SHA256},
     "token_reset_helper_sha256": {"const": GITEA_TOKEN_RESET_HELPER_SHA256},
     **_ssh_snapshot_properties(
@@ -521,6 +563,7 @@ SEMANTIC_CAPABILITY_EXTENSION = {
         "scope_to_runner_user": SCOPE_TO_RUNNER_USER,
         "token_transport": "stdin-only",
         "fence_unknown_sha256": FENCE_UNKNOWN_SHA256,
+        "shared_fence_protocol": SHARED_FENCE_PROTOCOL,
     },
     "params_schema": PARAMS_SCHEMA,
     "normalized_params_schema": NORMALIZED_PARAMS_SCHEMA,

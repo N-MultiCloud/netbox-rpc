@@ -66,6 +66,7 @@ command behavior changes.
 > It is seeded and code-gated disabled, accepts only an exact lifecycle
 > operation plus reviewed scope, binds runner VM 399 and Gitea VM 170, and
 > never exposes the reusable registration token. Its durable fence,
+> positive JS-safe generation, shared 1800-second quiescence interval,
 > expected-token rotation/reconciliation, and activation order are mandatory; see
 > `docs/gitea-runner-registration.md`.
 > `service.netbox.staging.deploy_dns_pair` is also destructive and must never be
@@ -77,17 +78,33 @@ command behavior changes.
 > `deployed=null, stage=indeterminate`. Never place provider credentials, DNS
 > records, routing, command output, or operator notes in this execution.
 > `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
-> runner-host provisioning procedure, seeded disabled and hard-gated until the
-> paired backend handler exists. It is pinned to `Gitea-Runner` VM PK 416
-> (`10.0.30.241`) and uses the protected two-person approval and signed-lease
-> workflow. Its closed `lane` enum selects either the
-> no-socket/non-root `untrusted-python312` host-executor stack or the
-> runner-socket-only `general-ubuntu` Docker-executor stack. Every lane-specific
-> name, label, image, directory, executor, and trust-posture value is frozen
-> server-side, including the Gitea origin and organization. It accepts the
-> registration credential only as an
-> `nms-secret:<uuid>` reference and rejects caller SSH routing. See
-> `docs/gitea-org-ci-runner-provision.md`.
+> runner-host `provision|reconcile` procedure, seeded disabled and hard-gated.
+> It is pinned to `Gitea-Runner` VM PK 416 (`10.0.30.241`) and uses protected
+> two-person approval, signed leases, two immutable SSH snapshots, a canonical
+> Gitea token-scope fence, redirect-free/8192-byte/absolute-deadline transport,
+> and closed secret-silent results. Its v1 closed `lane` enum admits only
+> `root-python312`, whose container root maps to an unprivileged host account;
+> earlier non-root sketches remain future design data outside the capability.
+> Its minimal job capabilities are namespace-confined; host-effective and
+> host-ambient sets stay empty, with no host PID/IPC/UTS namespace, device,
+> socket, host network, worktree, or cross-scope state. Build jobs are offline;
+> the publisher alone may use TLS-verified HTTPS to `git.nmulti.cloud:443` via
+> the static `10.0.30.96` binding, with DNS, redirects, and all other egress
+> denied. Exact cgroup v2 CPU, memory/no-swap, PIDs, storage/tmpfs, ulimit,
+> wall-clock, and kill-grace limits are frozen but remain unproven until #411.
+> That prerequisite must also bind a trusted server-owned publisher dispatcher,
+> keep publisher credentials outside the untrusted job container, and prove
+> inode quota, block-I/O BPS/IOPS, and stdout/stderr/log byte and rate ceilings.
+> A monotonic generation binds approval, lease, fence reservation, and every
+> result for both procedures sharing canonical `N-MultiCloud`; takeover never
+> revalidates a late original response. The root lane is
+> `activation_eligible=false` until `N-MultiCloud/nmulticloud-context#411`
+> publishes its content-addressed VM416 provision-and-prove boundary and final
+> job image. `provision` alone accepts an exact `nms-secret:<uuid>` reference;
+> credential-free `reconcile` uses only the durable fence proof. See
+> `docs/gitea-org-ci-runner-provision.md`. Migration `0087` is intentionally
+> irreversible and raises before its durable generation history can be removed;
+> future repair must use a reviewed forward migration.
 
 @AGENTS.md
 

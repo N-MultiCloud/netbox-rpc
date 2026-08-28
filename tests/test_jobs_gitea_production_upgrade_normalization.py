@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -620,7 +620,11 @@ def _runner_execution() -> SimpleNamespace:
             timeout_seconds=360,
         ),
         params={"operation": "register", "scope": "nmulticloud-org"},
-        normalized_params={"fence_expected_sha256": "0" * 64},
+        normalized_params={
+            "fence_expected_sha256": "0" * 64,
+            "fence_execution_id": None,
+            "fence_generation": 1,
+        },
     )
 
 
@@ -669,6 +673,8 @@ def _runner_closed_response(
             "target": "nmultifibra-ci-untrusted-01",
             "operation": "register",
             "scope": "nmulticloud-org",
+            "fence_execution_id": None,
+            "fence_generation": 1,
             "registered": registered,
             "reconciled": None,
             "token_invalidated": token_invalidated,
@@ -1085,6 +1091,7 @@ def _install_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
                     state="clear",
                     blocking_execution_id=None,
                     reconciliation_execution_id=None,
+                    takeover_generation=0,
                     expected_token_sha256="",
                 )
             ),
@@ -1156,11 +1163,45 @@ def test_runner_normalizer_requires_the_operation_appropriate_fence_state(
         state="blocked",
         blocking_execution_id=2351,
         reconciliation_execution_id=2352,
+        takeover_generation=1,
         expected_token_sha256="a" * 64,
     )
     with pytest.raises(jobs_module.RPCExecutionError) as caught:
         jobs_module.normalize_execution_params(execution)
     assert caught.value.code == "RPC_SCOPE_FENCE_CLEAR"
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [True, -1, 9_007_199_254_740_991, 9_007_199_254_740_992],
+)
+def test_runner_normalizer_rejects_invalid_or_exhausted_shared_fence_generation(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+    generation: object,
+) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    monkeypatch.setattr(normalization, "_GITEA_RUNNER_REGISTER_AVAILABLE", True)
+    fence_model = sys.modules["netbox_rpc.models"].RPCGiteaRunnerScopeFence
+    fence_model.objects.get = lambda **kwargs: SimpleNamespace(
+        canonical_scope=kwargs["canonical_scope"],
+        state="clear",
+        blocking_execution_id=None,
+        reconciliation_execution_id=None,
+        takeover_generation=generation,
+        expected_token_sha256="",
+    )
+    contenttypes = types.ModuleType("django.contrib.contenttypes.models")
+    contenttypes.ContentType = SimpleNamespace()
+    virtualization = types.ModuleType("virtualization.models")
+    virtualization.VirtualMachine = SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "django.contrib.contenttypes.models", contenttypes)
+    monkeypatch.setitem(sys.modules, "virtualization.models", virtualization)
+
+    with pytest.raises(jobs_module.RPCExecutionError) as caught:
+        jobs_module.normalize_execution_params(_runner_registration_execution())
+
+    assert caught.value.code == "RPC_SCOPE_FENCE_CHANGED"
 
 
 def test_runner_reconciliation_quiescence_requires_terminal_owner_and_age(
@@ -1175,28 +1216,28 @@ def test_runner_reconciliation_quiescence_requires_terminal_owner_and_age(
         last_updated=datetime(2026, 8, 27, tzinfo=timezone.utc),
     )
     now = datetime.now(timezone.utc)
-    fence.last_updated = now.replace(year=2025)
+    fence.last_updated = now - timedelta(seconds=1801)
 
     assert normalization._gitea_runner_fence_is_quiescent(
         fence,
-        delay_seconds=360,
+        delay_seconds=1800,
     )
 
     blocking.status = "running"
     assert not normalization._gitea_runner_fence_is_quiescent(
         fence,
-        delay_seconds=360,
+        delay_seconds=1800,
     )
     fence.state = "pending"
     assert normalization._gitea_runner_fence_is_quiescent(
         fence,
-        delay_seconds=360,
+        delay_seconds=1800,
     )
     blocking.status = "failed"
     fence.last_updated = now
     assert not normalization._gitea_runner_fence_is_quiescent(
         fence,
-        delay_seconds=360,
+        delay_seconds=1800,
     )
 
 
@@ -1234,3 +1275,272 @@ class _FakeDeviceServiceManager:
         service = self.service
         matches = all(getattr(service, key) == value for key, value in kwargs.items())
         return _FakeDeviceServiceQuery([service] if matches else [])
+
+
+def _org_ci_runner_execution(*, operation: str = "provision") -> SimpleNamespace:
+    params: dict[str, object] = {
+        "operation": operation,
+        "lane": "root-python312",
+    }
+    if operation == "provision":
+        params["registration_token_secret_ref"] = (
+            "nms-secret:11111111-1111-4111-8111-111111111111"
+        )
+    return SimpleNamespace(
+        pk=2890,
+        procedure=SimpleNamespace(
+            name="service.gitea.actions_runner.provision_org_ci_runner",
+            handler_id="service.gitea.actions_runner.provision_org_ci_runner",
+            timeout_seconds=1800,
+        ),
+        params=params,
+        normalized_params={
+            "scope": "nmulticloud-org-root",
+            "fence_expected_sha256": "c" * 64,
+            "fence_execution_id": None if operation == "provision" else 2889,
+            "fence_generation": 1 if operation == "provision" else 2,
+        },
+    )
+
+
+def _org_ci_runner_result(*, operation: str = "provision") -> dict[str, object]:
+    from netbox_rpc import gitea_org_ci_runner_contract as contract
+
+    common: dict[str, object] = {
+        "ok": True,
+        "procedure": contract.PROCEDURE_NAME,
+        "target": contract.TARGET_NAME,
+        "operation": operation,
+        "scope": "nmulticloud-org-root",
+        "lane": "root-python312",
+        "fence_execution_id": None if operation == "provision" else 2889,
+        "fence_generation": 1 if operation == "provision" else 2,
+        "organization": contract.DEFAULT_ORGANIZATION,
+        "gitea_instance_url": contract.DEFAULT_GITEA_INSTANCE_URL,
+        "token_invalidated": True,
+        "token_reset_required": False,
+        "token_sha256": "c" * 64,
+        "prior_token_id": 91,
+        "prior_active_sha256": None,
+        "replacement_token_id": 92,
+        "stage": "complete",
+        **contract.LANES["root-python312"],
+    }
+    if operation == "reconcile":
+        common.update(
+            {
+                "provisioned": None,
+                "registered": None,
+                "reconciled": True,
+                "reset_state": "reconciled_expected_active",
+            }
+        )
+    else:
+        common.update(
+            {
+                "provisioned": True,
+                "registered": True,
+                "reconciled": None,
+                "reset_state": "rotated",
+            }
+        )
+    return {"ok": True, "result": common}
+
+
+def _org_ci_runner_wire(projected: dict[str, object]) -> dict[str, object]:
+    return {
+        **projected,
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+
+
+def test_org_ci_runner_transport_is_redirect_free_bounded_and_secret_silent(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution = _org_ci_runner_execution()
+    post = MagicMock(
+        side_effect=jobs_module.requests.exceptions.ConnectTimeout("not sent")
+    )
+    monkeypatch.setattr(jobs_module.requests, "post", post)
+
+    projected = jobs_module._call_backend(_backend_target(jobs_module), execution)
+
+    assert projected == jobs_module._gitea_org_ci_runner_transport_failure_response(
+        stage="preconditions",
+        operation="provision",
+        lane="root-python312",
+        scope="nmulticloud-org-root",
+        fence_digest="c" * 64,
+        fence_execution_id=None,
+        fence_generation=1,
+    )
+    assert post.call_args.kwargs["allow_redirects"] is False
+    assert post.call_args.kwargs["stream"] is True
+    timeout = post.call_args.kwargs["timeout"]
+    assert timeout.total == 1740
+    assert timeout.connect_timeout == 10
+    assert timeout.read_timeout == 1730
+    assert "nms-secret" not in repr(projected)
+
+    post.side_effect = jobs_module.requests.exceptions.ReadTimeout("unknown")
+    projected = jobs_module._call_backend(_backend_target(jobs_module), execution)
+    assert projected["result"]["stage"] == "indeterminate"
+    assert projected["result"]["token_reset_required"] is True
+    assert "nms-secret" not in repr(projected)
+
+
+def test_org_ci_runner_redirect_is_ambiguous_and_never_followed(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirect = SimpleNamespace(
+        status_code=307,
+        json=MagicMock(side_effect=AssertionError("redirect body must not be parsed")),
+        close=MagicMock(),
+    )
+    monkeypatch.setattr(
+        jobs_module.requests,
+        "post",
+        MagicMock(return_value=redirect),
+    )
+
+    projected = jobs_module._call_backend(
+        _backend_target(jobs_module),
+        _org_ci_runner_execution(),
+    )
+
+    assert projected["result"]["stage"] == "indeterminate"
+    assert projected["result"]["token_reset_required"] is True
+    redirect.json.assert_not_called()
+    redirect.close.assert_called_once_with()
+
+
+def test_org_ci_runner_accepts_only_exact_closed_identity(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projected = _org_ci_runner_result()
+    response = _StreamResponse(
+        status_code=200,
+        body=json.dumps(_org_ci_runner_wire(projected)).encode(),
+    )
+    monkeypatch.setattr(
+        jobs_module.requests,
+        "post",
+        MagicMock(return_value=response),
+    )
+    assert (
+        jobs_module._call_backend(
+            _backend_target(jobs_module),
+            _org_ci_runner_execution(),
+        )
+        == projected
+    )
+
+    opaque = "opaque-registration-value-not-a-jwt"
+    hostile_wires = (
+        {
+            **_org_ci_runner_wire(projected),
+            "events": [{"message": opaque}],
+        },
+        {
+            **_org_ci_runner_wire(projected),
+            "result": {**projected["result"], "lane": "general-ubuntu"},
+        },
+        {
+            **_org_ci_runner_wire(projected),
+            "result": {**projected["result"], "scope": "nmulticloud-org"},
+        },
+        {
+            **_org_ci_runner_wire(projected),
+            "result": {**projected["result"], "fence_execution_id": 1},
+        },
+        {
+            **_org_ci_runner_wire(projected),
+            "result": {**projected["result"], "fence_generation": 2},
+        },
+        {
+            **_org_ci_runner_wire(projected),
+            "result": {**projected["result"], "error": opaque},
+        },
+    )
+    for wire in hostile_wires:
+        response = _StreamResponse(status_code=200, body=json.dumps(wire).encode())
+        jobs_module.requests.post.return_value = response
+        rejected = jobs_module._call_backend(
+            _backend_target(jobs_module),
+            _org_ci_runner_execution(),
+        )
+        assert rejected["result"]["stage"] == "indeterminate"
+        assert opaque not in repr(rejected)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _StreamResponse(
+            status_code=200,
+            body=b"{}",
+            headers={"Content-Length": "8193"},
+        ),
+        _StreamResponse(
+            status_code=200,
+            body=b"{}",
+            headers={"Content-Length": "3"},
+        ),
+        _StreamResponse(
+            status_code=200,
+            body=b"{}",
+            headers={"Content-Encoding": "gzip"},
+        ),
+        _StreamResponse(status_code=200, body=b"x" * 8193, headers={}),
+    ],
+)
+def test_org_ci_runner_rejects_oversized_truncated_or_encoded_bodies(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+    response: _StreamResponse,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module.requests,
+        "post",
+        MagicMock(return_value=response),
+    )
+
+    projected = jobs_module._call_backend(
+        _backend_target(jobs_module),
+        _org_ci_runner_execution(),
+    )
+
+    assert projected["result"]["stage"] == "indeterminate"
+    response.close.assert_called_once_with()
+
+
+def test_org_ci_runner_absolute_deadline_closes_a_trickle_response(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _StreamResponse(
+        status_code=200,
+        body=b"{}",
+        headers={},
+        chunks=[b"{", b"}"],
+    )
+    monkeypatch.setattr(
+        jobs_module.requests,
+        "post",
+        MagicMock(return_value=response),
+    )
+    monotonic = iter((100.0, 100.1, 1841.0))
+    monkeypatch.setattr(jobs_module.time, "monotonic", lambda: next(monotonic))
+
+    projected = jobs_module._call_backend(
+        _backend_target(jobs_module),
+        _org_ci_runner_execution(),
+    )
+
+    assert projected["result"]["stage"] == "indeterminate"
+    response.close.assert_called_once_with()

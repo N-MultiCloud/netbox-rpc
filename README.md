@@ -239,10 +239,14 @@ The procedure catalog is intentionally narrow:
   path, or backend. Aliases share a canonical, migration-seeded durable scope
   fence, so no second registration or reconciliation can race an unresolved
   token lifecycle. Reconciliation requires a terminal blocked execution or a
-  stale `pending` worker reservation plus a 360-second remote-quiescence window.
+  stale `pending` worker reservation plus the shared 1800-second
+  remote-quiescence window required by the longest `N-MultiCloud` fence
+  participant.
   Under the fence lock, stale-`pending` takeover first terminalizes the lost
   execution, moves the fence to `blocked`, and records the reconciliation owner;
-  that ownership rejects every late original transition. The server freezes separate target-owned SSH
+  that ownership advances a positive JS-safe generation and rejects every late
+  original transition, even after reconciliation fails. The org provisioner
+  uses the same generation protocol on the same canonical fence. The server freezes separate target-owned SSH
   service/credential identity snapshots for runner VM 399 and Gitea VM 170,
   and the backend revalidates both at point of use. It verifies the reviewed
   native runner and Gitea reset-helper digests, obtains the reusable scope token
@@ -252,30 +256,49 @@ The procedure catalog is intentionally narrow:
   bind the non-secret reset proof to the fence; uncertainty blocks later
   registration until a separately approved, quiescence-gated `reconcile`
   succeeds. Migrations
-  `0080`/`0081`, a false code gate, and a false backend gate keep it inert until
+  `0080`/`0081`/`0087`, a false code gate, and a false backend gate keep it inert until
   the exact host generation,
   `netbox-network` credential-identity API, signed lease, and scheduling-domain
   isolation are deployed together. See
   [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
 - `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
-  approval-required provisioning contract for the two organization CI lanes on
-  exact `Gitea-Runner` VM PK 416 (`10.0.30.241`). The required closed `lane`
-  enum selects either the
-  no-socket, `cap_drop: ALL`, no-new-privileges, non-root `cirunner`
-  `untrusted-python312` host-executor stack or the `general-ubuntu` Docker-
-  executor stack, where only the runner mounts `/var/run/docker.sock` and jobs
-  run as sibling containers without that socket. Runner name, ordered labels,
-  image, executor, Compose directory, and trust posture are frozen server-side;
-  callers cannot override them. Callers provide only the lane, bounded common
-  controls, and `registration_token_secret_ref`; the Gitea origin and
-  `N-MultiCloud` organization are frozen server-side, and SSH resolves
-  exclusively from the exact, requester-viewable assigned VM. The protected
-  workflow requires a distinct approver, immutable snapshot, compatible
-  capability, and signed one-time dispatch lease. Migration `0084` depends on
-  `0083`, seeds the row
-  and representative command with `enabled=False`, and a three-layer code gate
-  keeps it non-advertised and non-dispatchable until the matching
-  `netbox-rpc-backend` handler and approved capability contract ship. See
+  approval-required `provision|reconcile` contract for exactly the
+  `root-python312` organization CI lane on `Gitea-Runner` VM PK 416
+  (`10.0.30.241`). Forward migration `0087` binds that trust domain: container root maps to an
+  unprivileged host account, each job gets a fresh capacity-one rootless
+  container. Its five minimal job capabilities exist only inside that user
+  namespace; host-effective and host-ambient capabilities remain empty. The job
+  receives no host PID/IPC/UTS namespace, device, socket, host network, worktree,
+  or cross-scope state. Build jobs have no network. The separately bounded
+  publisher phase has only TLS-verified HTTPS to `git.nmulti.cloud:443`, using a
+  static `10.0.30.96` host binding with DNS and redirects disabled; every other
+  management and production destination is denied. Cgroup v2 fixes the job at
+  two CPUs, 4 GiB memory with no swap, 512 PIDs, a read-only root filesystem,
+  an 8 GiB ephemeral workspace, bounded `/tmp` and `/run` tmpfs mounts, exact
+  ulimits, a 1800-second wall clock, and a 10-second kill grace. The two
+  earlier non-root lane sketches remain future design data outside every
+  caller-admissible schema/capability because the v1 backend is root-only. It is
+  explicitly `activation_eligible=false`: the tracked source prerequisite must
+  publish the content-addressed VM416 provision-and-prove helper and final job
+  image before another forward migration can bind them. The existing
+  registration/reset helpers are not a host-generation boundary.
+
+  `provision` alone accepts an exact `nms-secret:<uuid>` reference;
+  `reconcile` forbids credentials and derives its proof from the durable
+  canonical `N-MultiCloud` fence. Normalization binds separate VM416 and VM170
+  target-owned SSH service/credential revisions into approval and lease
+  evidence. Backend responses are redirect-free, streamed, capped at 8192
+  bytes, and governed by a 1740-second absolute deadline. Only the closed
+  five-key envelope is projected; backend events and diagnostics are discarded.
+  A distinct approver, exact capability, signed lease, exclusive scope fence,
+  and full 1800-second reconciliation quiescence window are mandatory. Each
+  reservation advances a monotonic, approval/lease/result-bound
+  `fence_generation`; the legacy registration procedure uses that same
+  generation and safety interval, and failed reconciliation never makes an
+  older response current again. Schema-valid activation-ineligible work fails before backend,
+  inventory, SSH, fence, capability, or authenticated network access. Migrations
+  `0084` and `0087` both leave the row disabled, and the catalog/backend gates
+  remain closed. See
   [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
@@ -1464,13 +1487,14 @@ permit ordinary CI to match only the isolated runner label. Until that external
 policy is provisioned and proven, this CI contract must remain blocked/queued
 rather than activated on a broader runner.
 
-Migration `0084` adds
-`service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
-procedure for provisioning that isolated organization runner on exact
-`Gitea-Runner` VM PK 416 (`10.0.30.241`). It is seeded disabled and hard-gated
-until its backend handler is available. See
+Migration `0084` added the disabled
+`service.gitea.actions_runner.provision_org_ci_runner` skeleton on exact
+`Gitea-Runner` VM PK 416 (`10.0.30.241`). Forward migration `0087` adds the
+fixed `root-python312` candidate but keeps it activation-ineligible until the
+tracked source prerequisite supplies the reviewed host-generation boundary and
+final content-addressed job image. See
 [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md)
-for the exact SSH/Docker commands to translate into Ansible.
+for the exact default-dark contract and activation order.
 
 Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, the
 rebuild oracle, the append-only ledger, the command handlers, and the

@@ -303,8 +303,7 @@ def _verify_backend_capability(
     manifest = capabilities.fetch_backend_capabilities(target, use_cache=use_cache)
     status = capabilities.verify_procedure_capability(procedure, manifest)
     requires_explicit_capability = (
-        getattr(procedure, "name", "")
-        in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
+        getattr(procedure, "name", "") in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
     )
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
@@ -358,15 +357,29 @@ def create_execution(
     if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
         raise PermissionDenied("execute_rpcprocedure permission is required.")
     serializer.is_valid(raise_exception=True)
-
-    # #166: opt-in + selected backend are authoritative at creation time.
-    authoritative_backend_id = _require_enabled_and_authoritative_backend(user)
-
     procedure = serializer.validated_data["procedure"]
     if not procedure.enabled:
         raise drf_serializers.ValidationError(
             {"procedure_id": "This procedure is disabled."}
         )
+    params = serializer.validated_data.get("params") or {}
+    # Keep one linked object so all later platform-owned stamps are persisted.
+    serializer.validated_data["params"] = params
+    if getattr(procedure, "params_schema", None):
+        try:
+            jsonschema.validate(params, procedure.params_schema)
+        except jsonschema.ValidationError as exc:
+            raise drf_serializers.ValidationError({"params": exc.message}) from exc
+    if procedure.name == GITEA_ORG_CI_RUNNER_PROVISION:
+        activation_reason = gitea_org_ci_runner_contract.activation_unavailable_reason(
+            params
+        )
+        if activation_reason is not None:
+            raise drf_serializers.ValidationError(
+                {"params": activation_reason},
+                code="RPC_HOST_GENERATION_UNAVAILABLE",
+            )
+
     # Hard-coded fail-closed gates (see code_gate_unavailable_reason) sit
     # below RPCProcedure.enabled: an operator could flip that mutable flag
     # without knowing a gate is still closed, so this admission-time check
@@ -376,6 +389,11 @@ def create_execution(
     gate_reason = code_gate_unavailable_reason(procedure.name)
     if gate_reason is not None:
         raise drf_serializers.ValidationError({"procedure_id": gate_reason})
+
+    # #166: opt-in + selected backend are authoritative at creation time.  The
+    # root-lane source gate above is intentionally pure and precedes this first
+    # settings/backend access.
+    authoritative_backend_id = _require_enabled_and_authoritative_backend(user)
     protected_backend_target: object | None = None
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
         authoritative_backend_id = _require_concrete_protected_backend_id(
@@ -394,24 +412,6 @@ def create_execution(
             raise PermissionDenied(
                 "This procedure requires approval (approve_rpcprocedure permission)."
             )
-    params = serializer.validated_data.get("params") or {}
-    # #215 round 3: ``.get("params") or {}`` builds a brand-new, unlinked dict
-    # when the caller's original ``params`` was falsy (``None``/``{}`` --
-    # common for procedures with no/optional params). Re-assign it back onto
-    # ``validated_data`` immediately so every later in-place mutation of this
-    # local ``params`` (the password scrub below, the timeout-snapshot stamp
-    # further down) is guaranteed visible to ``serializer.save()`` regardless
-    # of whether the original value was falsy -- this same gap silently
-    # existed in ``_scrub_password_param()`` already, currently masked only
-    # because both password-bearing handlers require "password", so their
-    # params is never falsy in practice.
-    serializer.validated_data["params"] = params
-    if procedure.params_schema:
-        try:
-            jsonschema.validate(params, procedure.params_schema)
-        except jsonschema.ValidationError as exc:
-            raise drf_serializers.ValidationError({"params": exc.message}) from exc
-
     # Reject caller-supplied OpenBao secret material before target lookups or
     # capability work. A second scan immediately before persistence below
     # covers the complete payload after platform-owned stamps.
@@ -1092,6 +1092,43 @@ def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
             "RPC_PROCEDURE_DISABLED",
         )
         return
+    if procedure.name == GITEA_ORG_CI_RUNNER_PROVISION:
+        params = execution.params if isinstance(execution.params, dict) else None
+        internal_keys = {
+            "_intent",
+            "_intent_name",
+            "_timeout_seconds_snapshot",
+        }
+        if params is None or any(
+            key not in gitea_org_ci_runner_contract.PARAMS_SCHEMA["properties"]
+            and key not in internal_keys
+            for key in params
+        ):
+            agg.fail(
+                "Gitea organization CI runner params do not match the closed schema.",
+                "RPC_PARAM_INVALID",
+            )
+            return
+        raw_params = {
+            key: value for key, value in params.items() if key not in internal_keys
+        }
+        try:
+            jsonschema.validate(
+                raw_params,
+                gitea_org_ci_runner_contract.PARAMS_SCHEMA,
+            )
+        except jsonschema.ValidationError:
+            agg.fail(
+                "Gitea organization CI runner params do not match the closed schema.",
+                "RPC_PARAM_INVALID",
+            )
+            return
+        activation_reason = gitea_org_ci_runner_contract.activation_unavailable_reason(
+            raw_params
+        )
+        if activation_reason is not None:
+            agg.fail(activation_reason, "RPC_HOST_GENERATION_UNAVAILABLE")
+            return
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
         try:
             _require_protected_procedure_policy(procedure)
@@ -1117,7 +1154,27 @@ def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
     agg.start()
 
 
-def _gitea_runner_fence_is_quiescent(fence: object) -> bool:
+def _gitea_runner_scope_contract(execution: object):
+    if getattr(getattr(execution, "procedure", None), "name", "") == (
+        GITEA_ORG_CI_RUNNER_PROVISION
+    ):
+        return gitea_org_ci_runner_contract
+    return gitea_runner_contract
+
+
+def _gitea_runner_start_operation(execution: object) -> str:
+    if getattr(getattr(execution, "procedure", None), "name", "") == (
+        GITEA_ORG_CI_RUNNER_PROVISION
+    ):
+        return "provision"
+    return "register"
+
+
+def _gitea_runner_fence_is_quiescent(
+    fence: object,
+    *,
+    delay_seconds: int,
+) -> bool:
     """Require terminal ownership plus the full remote-operation safety window."""
     blocking_execution_id = getattr(fence, "blocking_execution_id", None)
     blocking_execution = getattr(fence, "blocking_execution", None)
@@ -1136,8 +1193,7 @@ def _gitea_runner_fence_is_quiescent(fence: object) -> bool:
         and isinstance(last_updated, datetime)
         and last_updated.tzinfo is not None
         and last_updated
-        <= datetime.now(timezone.utc)
-        - timedelta(seconds=gitea_runner_contract.RECONCILIATION_QUIESCENCE_SECONDS)
+        <= datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
     )
 
 
@@ -1148,6 +1204,8 @@ def _reserve_gitea_runner_scope(
     """Durably fence one canonical token scope before any backend request."""
     from ..models import RPCGiteaRunnerScopeFence
 
+    contract = _gitea_runner_scope_contract(execution)
+    start_operation = _gitea_runner_start_operation(execution)
     operation = str(normalized.get("operation") or "")
     canonical_scope = str(normalized.get("gitea_scope") or "")
     with transaction.atomic():
@@ -1162,20 +1220,28 @@ def _reserve_gitea_runner_scope(
             ) from exc
         current_digest = str(fence.expected_token_sha256 or "")
         normalized_digest = str(normalized.get("fence_expected_sha256") or "")
-        expected_snapshot_digest = (
-            current_digest or gitea_runner_contract.FENCE_UNKNOWN_SHA256
-        )
+        expected_snapshot_digest = current_digest or contract.FENCE_UNKNOWN_SHA256
+        normalized_generation = normalized.get("fence_generation")
+        current_generation = getattr(fence, "takeover_generation", None)
         if (
             str(fence.state) != str(normalized.get("fence_state") or "")
             or getattr(fence, "blocking_execution_id", None)
             != normalized.get("fence_execution_id")
             or expected_snapshot_digest != normalized_digest
+            or (
+                not isinstance(normalized_generation, int)
+                or isinstance(normalized_generation, bool)
+                or not isinstance(current_generation, int)
+                or isinstance(current_generation, bool)
+                or normalized_generation != current_generation + 1
+                or normalized_generation > contract.JS_SAFE_INTEGER_MAX
+            )
         ):
             raise RPCExecutionError(
                 "Gitea runner scope fence changed after approval.",
                 code="RPC_SCOPE_FENCE_CHANGED",
             )
-        if operation == "register":
+        if operation == start_operation:
             if (
                 fence.state != RPCGiteaRunnerScopeFence.STATE_CLEAR
                 or fence.blocking_execution_id is not None
@@ -1202,7 +1268,10 @@ def _reserve_gitea_runner_scope(
                     "Gitea runner token scope has no blocked operation.",
                     code="RPC_SCOPE_FENCE_CLEAR",
                 )
-            if not _gitea_runner_fence_is_quiescent(fence):
+            if not _gitea_runner_fence_is_quiescent(
+                fence,
+                delay_seconds=contract.RECONCILIATION_QUIESCENCE_SECONDS,
+            ):
                 raise RPCExecutionError(
                     "Gitea runner scope is still inside its remote-operation safety window.",
                     code="RPC_SCOPE_FENCE_BUSY",
@@ -1244,11 +1313,13 @@ def _reserve_gitea_runner_scope(
                 "Gitea runner lifecycle operation is invalid.",
                 code="RPC_PARAM_INVALID",
             )
+        fence.takeover_generation = normalized_generation
         fence.save(
             update_fields=[
                 "state",
                 "blocking_execution",
                 "reconciliation_execution",
+                "takeover_generation",
                 "expected_token_sha256",
                 "last_updated",
             ]
@@ -1262,13 +1333,21 @@ def _block_gitea_runner_scope(
     """Conservatively block a reserved scope after an unclassified failure."""
     from ..models import RPCGiteaRunnerScopeFence
 
+    start_operation = _gitea_runner_start_operation(execution)
     canonical_scope = str(normalized.get("gitea_scope") or "")
     operation = str(normalized.get("operation") or "")
     with transaction.atomic():
         fence = RPCGiteaRunnerScopeFence.objects.select_for_update().get(
             canonical_scope=canonical_scope
         )
-        if operation == "register" and (
+        if getattr(fence, "takeover_generation", None) != (
+            normalized.get("fence_generation")
+        ):
+            raise RPCExecutionError(
+                "Gitea runner scope fence generation differs.",
+                code="RPC_SCOPE_FENCE_CHANGED",
+            )
+        if operation == start_operation and (
             fence.blocking_execution_id != execution.pk
             or fence.reconciliation_execution_id is not None
         ):
@@ -1299,6 +1378,8 @@ def _record_gitea_runner_response(
     """Atomically persist the terminal result and its scope-fence transition."""
     from ..models import RPCGiteaRunnerScopeFence
 
+    contract = _gitea_runner_scope_contract(execution)
+    start_operation = _gitea_runner_start_operation(execution)
     result = response.get("result") if isinstance(response, dict) else None
     valid = (
         isinstance(result, dict)
@@ -1308,13 +1389,22 @@ def _record_gitea_runner_response(
     )
     if valid:
         try:
-            jsonschema.validate(result, gitea_runner_contract.RESULT_SCHEMA)
+            jsonschema.validate(result, contract.RESULT_SCHEMA)
         except jsonschema.ValidationError:
             valid = False
     operation = str(normalized.get("operation") or "")
     scope = str(normalized.get("scope") or "")
     canonical_scope = str(normalized.get("gitea_scope") or "")
     if valid and (result.get("operation") != operation or result.get("scope") != scope):
+        valid = False
+    if valid and (
+        result.get("fence_execution_id") != normalized.get("fence_execution_id")
+        or result.get("fence_generation") != normalized.get("fence_generation")
+        or (
+            contract is gitea_org_ci_runner_contract
+            and result.get("lane") != normalized.get("lane")
+        )
+    ):
         valid = False
     if not valid:
         raise RPCExecutionError(
@@ -1334,7 +1424,16 @@ def _record_gitea_runner_response(
         fence = RPCGiteaRunnerScopeFence.objects.select_for_update().get(
             canonical_scope=canonical_scope
         )
-        if operation == "register" and (
+        if getattr(
+            fence,
+            "takeover_generation",
+            None,
+        ) != normalized.get("fence_generation"):
+            raise RPCExecutionError(
+                "Gitea runner scope fence generation differs.",
+                code="RPC_SCOPE_FENCE_CHANGED",
+            )
+        if operation == start_operation and (
             fence.blocking_execution_id != execution.pk
             or fence.reconciliation_execution_id is not None
         ):
@@ -1351,8 +1450,9 @@ def _record_gitea_runner_response(
             )
 
         clear_without_token = bool(
-            operation == "register"
-            and result.get("stage") == "generate_token"
+            operation == start_operation
+            and result.get("stage")
+            in {"generate_token", "preconditions", "docker", "image", "config"}
             and result.get("token_sha256") is None
             and result.get("token_reset_required") is False
         )
@@ -1361,7 +1461,7 @@ def _record_gitea_runner_response(
             and result.get("token_reset_required") is False
         )
         if isinstance(token_sha256, str):
-            if operation == "register":
+            if operation == start_operation:
                 fence.expected_token_sha256 = token_sha256
 
         fence.last_reset_state = str(result.get("reset_state") or "")
@@ -1399,25 +1499,24 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
     # disabled integration must fail closed rather than dispatch.
     from ..models import RpcPluginSettings
 
-    if not RpcPluginSettings.get_solo().enabled:
-        try:
-            RPCExecutionAggregate(execution).fail(
-                "The netbox-rpc integration is disabled; execution not dispatched.",
-                "RPC_INTEGRATION_DISABLED",
-            )
-        except RPCExecutionAggregateError:
-            pass
-        return
-
     try:
         execution = _transition_locked(execution, _claim_if_procedure_enabled)
     except RPCExecutionAggregateError:
         # Lost the race to a cancel (or already terminal): nothing to run.
         return
     if execution.status != execution.STATUS_RUNNING:
-        # The locked claim failed closed because the procedure was disabled.
+        # The locked claim failed closed before backend/settings access.
         return
     aggregate = RPCExecutionAggregate(execution)
+    if not RpcPluginSettings.get_solo().enabled:
+        try:
+            aggregate.fail(
+                "The netbox-rpc integration is disabled; execution not dispatched.",
+                "RPC_INTEGRATION_DISABLED",
+            )
+        except RPCExecutionAggregateError:
+            pass
+        return
     runner_scope_reserved = False
     normalized: dict[str, Any] = {}
 
@@ -1481,10 +1580,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                 execution,
                 backend_target=target,
             )
-        if (
-            execution.procedure.name
-            in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES
-        ):
+        if execution.procedure.name in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES:
             _verify_backend_capability(
                 execution.procedure,
                 backend_target=target,
@@ -1515,11 +1611,17 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                 code="RPC_DISPATCH_LEASE_REQUIRED",
             )
 
-        if execution.procedure.name == GITEA_RUNNER_REGISTER:
+        if execution.procedure.name in {
+            GITEA_RUNNER_REGISTER,
+            GITEA_ORG_CI_RUNNER_PROVISION,
+        }:
             _reserve_gitea_runner_scope(execution, normalized)
             runner_scope_reserved = True
         response = jobs._call_backend(target, execution, lease=lease)
-        if execution.procedure.name == GITEA_RUNNER_REGISTER:
+        if execution.procedure.name in {
+            GITEA_RUNNER_REGISTER,
+            GITEA_ORG_CI_RUNNER_PROVISION,
+        }:
             _record_gitea_runner_response(execution, normalized, response)
         else:
             aggregate.record_backend_response(response)
