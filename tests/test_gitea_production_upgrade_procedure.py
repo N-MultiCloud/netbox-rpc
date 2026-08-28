@@ -286,13 +286,13 @@ def test_gitea_semantic_capability_fixture_is_canonical_and_hashes_exactly(
     assert runtime["SEMANTIC_CAPABILITY_EXTENSION"]["executable"] == {
         "version": 1,
         "canonicalization": "json-sort-keys-compact-utf8",
-        "script_length_bytes": 60_316,
+        "script_length_bytes": 60_755,
         "script_sha256": (
-            "008625ea7e4282625f1610b68c96413a79c945e041885c18a1288338ee27c01a"
+            "86c07f48a100f540fb456bd14ba3b442c44759380b7edbfe85d0ae06ab2fa3cf"
         ),
-        "argv_length_bytes": 63_880,
+        "argv_length_bytes": 64_346,
         "argv_sha256": (
-            "2c80df45366637e889848a606e12fdaec86dbe245c1114608349e1fc3138c1d7"
+            "ded81b3549e237608ee858e05fdc6a59994e6804915e5501a009b67038cafd48"
         ),
     }
     assert runtime["SSH_HOST_KEY_BYTES"] == 32

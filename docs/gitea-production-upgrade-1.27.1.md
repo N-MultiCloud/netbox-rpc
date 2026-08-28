@@ -120,10 +120,10 @@ artifact URL/digest, guest paths/unit/health URLs, 1725-second handler and
 1690-second process budgets, the SSH pin parser, closed
 caller/normalized/fingerprint schemas, all result tuples, and executable
 contract version 1. The executable identity binds the backend's exact upgrade
-script (59,952 bytes, SHA-256
-`8cb74c96ebbc278eaa1e23f0f22d0c4a19fa044a00e15503be95ac54a5d80f93`)
-and complete fixed argv (63,492 canonical bytes, SHA-256
-`c8ba17a10783f0ebe6823026571ac388fbcf75fc4d5443c9c7d309792f4a3631`)
+script (60,755 bytes, SHA-256
+`86c07f48a100f540fb456bd14ba3b442c44759380b7edbfe85d0ae06ab2fa3cf`)
+and complete fixed argv (64,346 canonical bytes, SHA-256
+`ded81b3549e237608ee858e05fdc6a59994e6804915e5501a009b67038cafd48`)
 under the shared `json-sort-keys-compact-utf8` canonicalization; changing
 mutation, rollback, or invocation bytes therefore changes capability
 compatibility. Its compact
@@ -139,10 +139,15 @@ deleted or left behind while Django records the migration unapplied. Operators
 must keep `0073` applied; removal or repair requires a reviewed forward migration
 with explicit ownership evidence.
 
-The backend must verify the official digest before stopping Gitea, create and
-verify a restorable backup before mutation, atomically install the new binary,
-and confirm both the exact version and service/application health. A failure
-after mutation must attempt rollback and re-check health. `indeterminate` or
+The backend must verify the official digest before stopping Gitea, run every
+embedded root Python program in isolated mode from a root-owned working
+directory, create and verify a restorable backup before mutation, and include
+repositories, LFS, attachments, packages, repository archives, custom data,
+avatars, Actions logs, and Actions artifacts in stopped source/archive byte
+parity. Exact SQLite verification scratch files are removed on every normal or
+trapped failure exit. It then atomically installs the new binary and confirms
+both the exact version and service/application health. A failure after mutation
+must attempt rollback and re-check health. `indeterminate` or
 `changed=true, healthy=false` is never automatically retried: reconcile the
 installed binary, service, database state, and backup before a new request.
 Never expose binary contents, credentials, configuration, backup paths, command
