@@ -281,8 +281,10 @@ foundation for `service.netbox.staging.rotate_backend_token` and
   representative command hash, and params/result schemas. The snapshot also binds the
   concrete backend ID and a non-secret URL/TLS identity fingerprint. They also
   require non-null distinct actors and revalidate the approval snapshot. Each
-  authenticated capability probe validates the protected target first and the
-  same resolved target is reused for snapshot, lease, and dispatch;
+  authenticated capability probe validates the protected target first; after
+  request creation, approval and worker claim recompare that target's URL/TLS
+  fingerprint with the immutable request snapshot before sending credentials.
+  The same resolved target is reused for snapshot, lease, and dispatch;
 - approval and rejection accept no caller reason for this procedure; their
   durable event uses a fixed bounded audit phrase;
 - all protected procedures require a signed one-time lease. Missing signing-key

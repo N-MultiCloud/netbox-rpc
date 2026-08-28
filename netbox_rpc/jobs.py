@@ -63,6 +63,16 @@ def _protected_backend_wall_clock(deadline: float):
         )
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_remaining, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    if previous_remaining > 0 and previous_remaining <= remaining:
+        # The worker's outer death penalty is already the tighter boundary.
+        # Leave both its handler and timer untouched so its exception cannot be
+        # consumed and projected as an ordinary protected-transport failure.
+        yield
+        if time.monotonic() >= deadline:
+            raise _ProtectedBackendWallClockError(
+                "protected backend request exceeded its total deadline"
+            )
+        return
     started = deadline - remaining
     ended: float | None = None
 
@@ -74,7 +84,7 @@ def _protected_backend_wall_clock(deadline: float):
     signal.signal(signal.SIGALRM, _deadline_exceeded)
     signal.setitimer(
         signal.ITIMER_REAL,
-        min(remaining, previous_remaining) if previous_remaining > 0 else remaining,
+        remaining,
     )
     try:
         yield

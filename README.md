@@ -179,7 +179,10 @@ The procedure catalog is intentionally narrow:
   known-host digest; point-of-use drift is rejected. Admission and worker claim
   both require an exact compatible backend capability whose golden semantic
   digest includes the reviewed wrapper, sudoers, and runtime generation held
-  under the shared publication lock through execution. The
+  under the shared publication lock through execution. Approval and worker
+  claim recompare the selected backend's URL/TLS fingerprint with the immutable
+  request snapshot before sending its authentication header to a capability
+  endpoint, so post-request backend-row drift cannot receive that credential. The
   result contains only `ok`, constant `procedure`, constant
   `target`, the approved `commit_sha`, nullable `deployed`, and `stage`: proven
   success is `true/true/complete`, proven pre-process failure is

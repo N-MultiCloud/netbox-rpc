@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -124,7 +125,7 @@ _PROTECTED_LABELS = {
     GITEA_RUNNER_REGISTER: "Gitea runner registration",
     GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
 }
-_GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
+_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
     {
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
@@ -298,7 +299,7 @@ def _verify_backend_capability(
     manifest = capabilities.fetch_backend_capabilities(target, use_cache=use_cache)
     status = capabilities.verify_procedure_capability(procedure, manifest)
     requires_explicit_capability = (
-        getattr(procedure, "name", "") in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES
+        getattr(procedure, "name", "") in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES
     )
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
@@ -944,6 +945,37 @@ def _protected_backend_target_sha256(
     )
 
 
+def _require_approved_backend_target_before_io(
+    execution: object,
+    *,
+    backend_target: object,
+) -> None:
+    """Reject mutable backend drift before any authenticated network request."""
+    procedure_name = execution.procedure.name
+    snapshot = getattr(execution, "approval_request", None)
+    expected = str(getattr(snapshot, "backend_target_sha256", "") or "")
+    try:
+        current = _protected_backend_target_sha256(
+            execution.backend_id,
+            procedure_name=procedure_name,
+            backend_target=backend_target,
+        )
+    except drf_serializers.ValidationError as exc:
+        raise RPCExecutionError(
+            f"{_protected_label(procedure_name)} backend binding changed after approval.",
+            code="RPC_APPROVAL_INVALIDATED",
+        ) from exc
+    if (
+        len(expected) != 64
+        or len(current) != 64
+        or not hmac.compare_digest(expected, current)
+    ):
+        raise RPCExecutionError(
+            f"{_protected_label(procedure_name)} backend binding changed after approval.",
+            code="RPC_APPROVAL_INVALIDATED",
+        )
+
+
 def _require_staging_rotation_creation_shape(serializer: object) -> None:
     """Reject all caller metadata outside the exact secret-silent request."""
     _require_protected_creation_shape(
@@ -1419,7 +1451,12 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                     f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
                     code="RPC_BACKEND_BINDING_INVALID",
                 ) from exc
-        if execution.procedure.name in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
+        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+            _require_approved_backend_target_before_io(
+                execution,
+                backend_target=target,
+            )
+        if execution.procedure.name in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
             _verify_backend_capability(
                 execution.procedure,
                 backend_target=target,
@@ -1693,6 +1730,10 @@ def _approve_protected_execution(
             backend_target = _resolve_validated_protected_backend_target(
                 locked.backend_id,
                 locked.procedure.name,
+            )
+            _require_approved_backend_target_before_io(
+                locked,
+                backend_target=backend_target,
             )
             _verify_backend_capability(
                 locked.procedure,

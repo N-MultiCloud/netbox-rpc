@@ -248,7 +248,9 @@ until they are migrated deliberately.
   to a single deterministic event.
   For each protected procedure, validate the immutable backend target before
   sending authenticated capability traffic and reuse that exact resolved target
-  through snapshot/lease/dispatch. Approval must obtain an uncached compatible
+  through snapshot/lease/dispatch. At approval and worker claim, compare its
+  URL/TLS fingerprint with the immutable request snapshot before capability I/O.
+  Approval must obtain an uncached compatible
   capability while holding the row lock; failure leaves pending state and its
   event stream unchanged and must not enqueue.
 - **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
@@ -553,6 +555,8 @@ claim require `COMPATIBLE`; an absent capability is a hard failure. A distinct
 approver and accept-once signed lease freeze the exact local SSH service and
 credential IDs/revisions, host/port, principal/method, and known-host digest.
 The approval-aware point-of-use resolver must reject any drift.
+The selected backend's URL/TLS fingerprint must also match the immutable
+request snapshot before approval or worker capability traffic sends its bearer.
 
 Only exit 0 proves `deployed=true, stage=complete`. A provable failure before
 remote process creation is `deployed=false, stage=execute`. Once channel
