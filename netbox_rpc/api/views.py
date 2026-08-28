@@ -28,6 +28,7 @@ from .serializers import (
     RPCIntentRunSerializer,
     RPCIntentSerializer,
     RPCLinuxServiceAllowlistSerializer,
+    RPCNetBoxPluginAllowlistSerializer,
     RPCExecutionEventSerializer,
     RPCExecutionSerializer,
     RPCProcedureCommandSerializer,
@@ -207,6 +208,12 @@ class RPCLinuxServiceAllowlistViewSet(NetBoxModelViewSet):
     queryset = models.RPCLinuxServiceAllowlist.objects.prefetch_related("tags")
     serializer_class = RPCLinuxServiceAllowlistSerializer
     filterset_class = filtersets.RPCLinuxServiceAllowlistFilterSet
+
+
+class RPCNetBoxPluginAllowlistViewSet(NetBoxModelViewSet):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.prefetch_related("tags")
+    serializer_class = RPCNetBoxPluginAllowlistSerializer
+    filterset_class = filtersets.RPCNetBoxPluginAllowlistFilterSet
 
 
 class RPCExecutionViewSet(NetBoxModelViewSet):

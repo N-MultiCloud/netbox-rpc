@@ -120,11 +120,15 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "service.gitea.production.upgrade_1_27_1"
     )
     constants.GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
+    constants.GITEA_ORG_CI_RUNNER_PROVISION = (
+        "service.gitea.actions_runner.provision_org_ci_runner"
+    )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
         constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
         constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
+        constants.GITEA_ORG_CI_RUNNER_PROVISION,
     }
     aggregate = types.ModuleType("netbox_rpc.domain.aggregate")
     aggregate.RPCExecutionAggregate = type("RPCExecutionAggregate", (), {})
@@ -136,6 +140,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization = types.ModuleType("netbox_rpc.domain.normalization")
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
+    normalization.validate_gitea_org_ci_runner_target = lambda *args, **kwargs: {}
     normalization.validate_gitea_runner_target = lambda *args, **kwargs: {}
     normalization.validate_gitea_upgrade_target = lambda *args, **kwargs: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
@@ -485,6 +490,211 @@ def test_gitea_upgrade_target_lookup_is_exact_and_user_restricted(
                 procedure,
                 user,
             )
+
+
+def test_gitea_org_ci_runner_uses_protected_exact_viewable_target_paths(
+    command_handlers_module,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure_name = "service.gitea.actions_runner.provision_org_ci_runner"
+    procedure = SimpleNamespace(name=procedure_name)
+    user = object()
+    target = SimpleNamespace(pk=416, name="Gitea-Runner")
+    manager = _RestrictedManager(target)
+    content_type = SimpleNamespace(
+        app_label="virtualization",
+        model="virtualmachine",
+        model_class=lambda: SimpleNamespace(objects=manager),
+    )
+    validated_data = {
+        "assigned_object_type": content_type,
+        "assigned_object_id": 416,
+    }
+
+    assert procedure_name in command_handlers.PROTECTED_APPROVAL_PROCEDURE_NAMES
+    assert procedure_name in command_handlers._ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES
+    assert (
+        command_handlers._protected_contract(procedure_name)
+        is command_handlers.gitea_org_ci_runner_contract
+    )
+    assert command_handlers._PROTECTED_APPROVAL_REASON[procedure_name] != (
+        command_handlers._GITEA_RUNNER_APPROVAL_REASON
+    )
+    assert command_handlers._PROTECTED_REJECTION_REASON[procedure_name] != (
+        command_handlers._GITEA_RUNNER_REJECTION_REASON
+    )
+
+    command_handlers._require_viewable_assigned_object(
+        validated_data,
+        procedure,
+        user,
+    )
+    command_handlers._require_gitea_runner_assigned_object(
+        validated_data,
+        procedure,
+        user,
+    )
+    assert manager.restricted_user is user
+    assert manager.restricted_action == "view"
+    assert manager.queryset.filtered_pk == 416
+
+    for object_id in (None, True, 241, 417):
+        with pytest.raises(ValidationError):
+            command_handlers._require_gitea_runner_assigned_object(
+                {
+                    "assigned_object_type": content_type,
+                    "assigned_object_id": object_id,
+                },
+                procedure,
+                user,
+            )
+
+    manager.queryset.result = None
+    with pytest.raises(ValidationError) as exc_info:
+        command_handlers._require_viewable_assigned_object(
+            validated_data,
+            procedure,
+            user,
+        )
+    assert exc_info.value.code == "does_not_exist"
+
+
+def test_gitea_org_ci_runner_creation_requests_two_person_approval_without_enqueue(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    contract = command_handlers.gitea_org_ci_runner_contract
+    procedure = SimpleNamespace(
+        name=contract.PROCEDURE_NAME,
+        handler_id=contract.HANDLER_ID,
+        enabled=True,
+        approval_required=True,
+        params_schema=contract.PARAMS_SCHEMA,
+        timeout_seconds=contract.TIMEOUT_SECONDS,
+    )
+    params = {
+        "lane": "untrusted-python312",
+        "registration_token_secret_ref": (
+            "nms-secret:11111111-1111-4111-8111-111111111111"
+        ),
+    }
+    execution = SimpleNamespace(
+        pk=277,
+        procedure=procedure,
+        params=params,
+        backend_id=contract.BACKEND_ID,
+    )
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": params}
+        initial_data = {
+            "procedure_id": procedure.name,
+            "assigned_object_type": "virtualization.virtualmachine",
+            "assigned_object_id": contract.TARGET_OBJECT_ID,
+            "params": params,
+        }
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            execution.requested_by = kwargs["requested_by"]
+            execution.requested_by_id = kwargs["requested_by"].pk
+            return execution
+
+    transitions = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            pytest.fail("protected creation must not queue before approval")
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: contract.BACKEND_ID,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_creation_shape",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_gitea_runner_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.name}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="a" * 64),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: pytest.fail(
+            "protected creation must not enqueue before approval"
+        ),
+    )
+    user = SimpleNamespace(pk=2770, has_perm=lambda permission: True)
+
+    created = command_handlers.create_execution(
+        serializer=Serializer(),
+        user=user,
+    )
+
+    assert created is execution
+    assert transitions == [
+        ("request", user.pk),
+        ("request_approval", "a" * 64, user.pk),
+    ]
 
 
 def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(

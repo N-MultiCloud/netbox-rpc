@@ -1,3 +1,5 @@
+import re
+
 HUAWEI_MA5800_R024_START_ONT = "network.device.huawei.olt.ma5800.r024.start_ont"
 HUAWEI_MA5800_R024_START_ONT_HANDLER = "network.huawei_olt_ma5800_r024.start_ont"
 HUAWEI_NE8000_F1A_SHOW_BGP_PEER = (
@@ -126,12 +128,43 @@ GITEA_PRODUCTION_UPGRADE_1_27_1 = "service.gitea.production.upgrade_1_27_1"
 GITEA_PRODUCTION_UPGRADE_1_27_1_HANDLER = GITEA_PRODUCTION_UPGRADE_1_27_1
 GITEA_RUNNER_REGISTER = "service.gitea.runner.register"
 GITEA_RUNNER_REGISTER_HANDLER = GITEA_RUNNER_REGISTER
+
+# Disabled, approval-bound Gitea Actions org CI runner provisioning. The caller
+# chooses one reviewed lane; its runner name, labels, image, executor, project
+# directory, and trust posture are fixed in the normalizer/backend contract.
+# The one-time Gitea registration token remains an nms-secret reference.
+GITEA_ORG_CI_RUNNER_PROVISION = "service.gitea.actions_runner.provision_org_ci_runner"
+GITEA_ORG_CI_RUNNER_PROVISION_HANDLER = GITEA_ORG_CI_RUNNER_PROVISION
+GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
+    {
+        GITEA_ORG_CI_RUNNER_PROVISION,
+    }
+)
+# A vaulted secret REFERENCE, never secret material: "nms-secret:<uuid>" is an
+# opaque pointer that the execution backend redeems against the netbox-nms secret
+# bridge. Resolving it still requires the backend's own credentials, so persisting
+# the reference discloses nothing, while persisting a raw value would.
+#
+# This distinction has to be enforced by VALUE, not by key name. Every reference
+# parameter in this catalog is named something like ``admin_secret_ref``,
+# ``operator_token_secret_ref``, or ``registration_token_secret_ref``, so all of
+# them trip the event ledger's key-name redaction rule and would otherwise be
+# stored as "[REDACTED]" -- destroying the approved reference the pull-based
+# backend needs, and desynchronising the persisted fingerprint from
+# ``resolved_command_hash`` and the dispatch lease, which are computed before
+# redaction.
+NMS_SECRET_REFERENCE_RE = re.compile(
+    r"nms-secret:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\Z"
+)
+
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
     {
         NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
         NETBOX_STAGING_DEPLOY_DNS_PAIR,
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
+        GITEA_ORG_CI_RUNNER_PROVISION,
     }
 )
 
@@ -465,6 +498,7 @@ UBUNTU_24_JOURNAL_TAIL_HANDLER = "os.linux_ubuntu_24.journal_tail"
 # environment file and systemd unit from RPCLinuxServiceAllowlist; callers pass
 # only a service slug, a confined variable name, and a DeviceCredential PK.
 LINUX_ENV_FILE_UPSERT_VAR = "os.linux_env_file.upsert_var"
+NETBOX_PLUGIN_INSTALL = "netbox.plugin.install"
 LINUX_ENV_FILE_UPSERT_VAR_HANDLER = "os.linux_env_file.upsert_var"
 
 _SSH_INSTALL_KEY_PARAMS_SCHEMA = {

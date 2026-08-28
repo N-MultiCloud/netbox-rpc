@@ -57,6 +57,29 @@ The procedure catalog is intentionally narrow:
   services.
   Restarting `netbox-rq` is the audited way to sweep a NetBox RQ job stuck in
   `running` after its worker died.
+- `netbox.plugin.install` — installs an **allowlisted** NetBox plugin at an
+  **exact** version on a managed NetBox host, registers it in `PLUGINS`,
+  migrates, collects static, restarts the allowlisted services, health checks,
+  and **restores the previous settings file if NetBox does not come back**.
+  `approval_required=True`.
+
+  Params are only `plugin_slug`, `version`, and optional `dry_run`. Everything
+  that decides what runs — distribution, module, interpreter, settings file,
+  services — comes from an operator-managed `RPCNetBoxPluginAllowlist` row. A
+  caller-supplied distribution would be remote code execution with an audit
+  trail attached: it reaches `pip install`, which accepts URLs, paths and VCS
+  references, and whatever it fetches is then imported by a NetBox restart.
+
+  The rollback is the reason this is a procedure at all. A plugin outside the
+  running NetBox's version window does not degrade — NetBox refuses to start —
+  so a bad install is an outage on a host whose NetBox is already down.
+  `dry_run=true` runs the version pre-flight and stops.
+
+  Restart targets resolve through `RPCLinuxServiceAllowlist`, so this procedure
+  can only bounce units that catalog already permits. Seeded `enabled=False`
+  **and** hard-gated in code; do not open either until the paired nms-backend
+  handler is deployed.
+
 - `os.linux_env_file.upsert_var` — writes a single `KEY=VALUE` line (backend
   resolves the value from a `credential_pk` reference and delivers it over
   stdin; no raw secret is ever accepted as a param) into the allowlisted
@@ -231,6 +254,26 @@ The procedure catalog is intentionally narrow:
   `netbox-network` credential-identity API, signed lease, and scheduling-domain
   isolation are deployed together. See
   [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
+- `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
+  approval-required provisioning contract for the two organization CI lanes on
+  exact `Gitea-Runner` VM PK 416 (`10.0.30.241`). The required closed `lane`
+  enum selects either the
+  no-socket, `cap_drop: ALL`, no-new-privileges, non-root `cirunner`
+  `untrusted-python312` host-executor stack or the `general-ubuntu` Docker-
+  executor stack, where only the runner mounts `/var/run/docker.sock` and jobs
+  run as sibling containers without that socket. Runner name, ordered labels,
+  image, executor, Compose directory, and trust posture are frozen server-side;
+  callers cannot override them. Callers provide only the lane, bounded common
+  controls, and `registration_token_secret_ref`; the Gitea origin and
+  `N-MultiCloud` organization are frozen server-side, and SSH resolves
+  exclusively from the exact, requester-viewable assigned VM. The protected
+  workflow requires a distinct approver, immutable snapshot, compatible
+  capability, and signed one-time dispatch lease. Migration `0084` depends on
+  `0083`, seeds the row
+  and representative command with `enabled=False`, and a three-layer code gate
+  keeps it non-advertised and non-dispatchable until the matching
+  `netbox-rpc-backend` handler and approved capability contract ship. See
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,
@@ -1316,8 +1359,8 @@ queues and never falls back to a mirror or production-capable runner. The
 workflow checks out the triggering commit with a full-SHA-pinned checkout
 action and no persisted credentials, requires preprovisioned CPython 3.12.14
 at `/usr/local/bin/python3.12` plus uv 0.12.5 at `/usr/local/bin/uv`, and forbids
-ambient-`PATH` tool selection or toolchain download/bootstrap. Its exact runtime
-and test closure is `.gitea/ci-requirements.lock`, containing one compatible
+ambient-`PATH` tool selection or toolchain download/bootstrap. Its exact runtime,
+build-backend, and test closure is `.gitea/ci-requirements.lock`, containing one compatible
 hashed wheel per package for CPython 3.12 on x86_64 glibc 2.34. Installation
 uses hash checking, wheel-only resolution, an empty inherited environment, the
 explicit PyPI simple index, no uv configuration/project sources/cache, and
@@ -1334,6 +1377,12 @@ rejects duplicate/alias/flow constructs, and mutation-tests runner, permissions,
 job count, checkout, toolchain, installer, source, pin, hash, and pytest-bypass
 regressions.
 
+`tests/test_deploy_manifest_contract.py` also runs the canonical manifest check,
+builds a wheel with the locked build backend, and compares the embedded
+migration/static path-and-digest maps to the exact archive. A migration added
+without renewing both the reviewed migration policy and generated manifest now
+fails ordinary CI before the production deploy gateway sees it.
+
 The workflow and its repository tests are defense in depth; they are not the
 runner authorization boundary because a candidate branch can modify its own
 workflow. Gitea's trusted repository/organization runner policy must make
@@ -1341,6 +1390,14 @@ mirror and production-capable runners ineligible for pull-request jobs and
 permit ordinary CI to match only the isolated runner label. Until that external
 policy is provisioned and proven, this CI contract must remain blocked/queued
 rather than activated on a broader runner.
+
+Migration `0084` adds
+`service.gitea.actions_runner.provision_org_ci_runner` as the audited catalog
+procedure for provisioning that isolated organization runner on exact
+`Gitea-Runner` VM PK 416 (`10.0.30.241`). It is seeded disabled and hard-gated
+until its backend handler is available. See
+[`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md)
+for the exact SSH/Docker commands to translate into Ansible.
 
 Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, the
 rebuild oracle, the append-only ledger, the command handlers, and the

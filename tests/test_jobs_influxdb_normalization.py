@@ -448,6 +448,9 @@ def _install_runtime_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     models = types.ModuleType("netbox_rpc.models")
     models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    # Imported by netbox_rpc.domain.normalization for netbox.plugin.install
+    # (#262); the stub must define it or this module fails at import.
+    models.RPCNetBoxPluginAllowlist = type("RPCNetBoxPluginAllowlist", (), {})
     models.RPCExecution = type("RPCExecution", (), {})
     models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
 

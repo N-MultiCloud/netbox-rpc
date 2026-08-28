@@ -42,6 +42,14 @@ _MAX_HANDLERS = 2000
 # every create/claim while still reflecting drift promptly.
 _CACHE_TTL_SECONDS = 30.0
 _MANIFEST_CACHE: dict[str, tuple[float, "BackendCapabilityManifest | None"]] = {}
+_SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
+    {
+        "service.gitea.production.upgrade_1_27_1",
+        "service.gitea.runner.register",
+        "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.netbox.staging.deploy_dns_pair",
+    }
+)
 
 
 class CapabilityStatus(StrEnum):
@@ -82,11 +90,11 @@ def derive_command_contract_hash(procedure: Any) -> str:
     """Derive the shared contract hash for a procedure.
 
     Canonical sha256 over the procedure's identity + its ordered command
-    contract. The production Gitea upgrade additionally includes its complete
-    semantic capability extension (target, guest constants, SSH pin policy,
-    normalized/fingerprint schemas, and result states); legacy handler hashes
-    remain byte-for-byte unchanged. The paired backend derives the same value,
-    so a hash mismatch means the two sides disagree on what will run.
+    contract. Protected Gitea procedures additionally include their complete
+    semantic capability extension (targets, policy constants, and closed
+    schemas); legacy handler hashes remain byte-for-byte unchanged. The paired
+    backend derives the same value, so a hash mismatch means the two sides
+    disagree on what will run.
     """
     commands = []
     command_qs = getattr(procedure, "commands", None)
@@ -114,18 +122,28 @@ def derive_command_contract_hash(procedure: Any) -> str:
         "effect": str(getattr(procedure, "effect", "")),
         "commands": commands,
     }
-    if payload["handler_id"] == "service.gitea.production.upgrade_1_27_1":
-        from .gitea_upgrade_contract import SEMANTIC_CAPABILITY_EXTENSION
+    if payload["handler_id"] in _SEMANTIC_CAPABILITY_HANDLER_IDS:
+        from .gitea_org_ci_runner_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as org_ci_runner_contract,
+        )
+        from .gitea_runner_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as runner_contract,
+        )
+        from .gitea_upgrade_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as upgrade_contract,
+        )
+        from .dns_staging_deploy_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as dns_staging_contract,
+        )
 
-        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
-    if payload["handler_id"] == "service.gitea.runner.register":
-        from .gitea_runner_contract import SEMANTIC_CAPABILITY_EXTENSION
-
-        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
-    if payload["handler_id"] == "service.netbox.staging.deploy_dns_pair":
-        from .dns_staging_deploy_contract import SEMANTIC_CAPABILITY_EXTENSION
-
-        payload["semantic_contract"] = SEMANTIC_CAPABILITY_EXTENSION
+        payload["semantic_contract"] = {
+            "service.gitea.production.upgrade_1_27_1": upgrade_contract,
+            "service.gitea.runner.register": runner_contract,
+            "service.gitea.actions_runner.provision_org_ci_runner": (
+                org_ci_runner_contract
+            ),
+            "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
+        }[payload["handler_id"]]
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

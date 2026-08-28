@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
@@ -34,6 +35,8 @@ from ..constants import (
     DELL_OS10_S5232F_WRITE_MEMORY,
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
+    GITEA_ORG_CI_RUNNER_PROVISION,
+    GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     HUAWEI_MA5800_R024_START_ONT,
@@ -55,6 +58,7 @@ from ..constants import (
     INFLUXDB_1_TOKEN_CREATE,
     LINUX_COLLECT_FACTS,
     LINUX_ENV_FILE_UPSERT_VAR,
+    NETBOX_PLUGIN_INSTALL,
     LINUX_INSTALL_QEMU_GUEST_AGENT,
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
@@ -118,7 +122,14 @@ from ..constants import (
     UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
     UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE,
 )
-from ..models import RPCExecution, RPCLinuxServiceAllowlist
+from ..models import (
+    RPCExecution,
+    RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
+)
+from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
+from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
+from ..transport import driver_capability as _driver_capability
 
 _PROXMOX_NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -126,6 +137,13 @@ _LINUX_ENV_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 # models.ENVIRONMENT_FILE_PATH_RE (duplicated, not imported, so the
 # stub-based pure-domain test suite need not model netbox_rpc.models).
 _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
+# Duplicated from models for the same reason as the path regex above: the
+# pure-domain test suite must not have to model netbox_rpc.models.
+_PYTHON_DISTRIBUTION_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\Z"
+)
+_PYTHON_MODULE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_PYTHON_EXACT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.!+-]{0,63}\Z")
 
 # Hard-coded fail-closed gate for os.linux_env_file.upsert_var, independent of
 # RPCProcedure.enabled (ordinary mutable catalog data that an operator could
@@ -166,6 +184,7 @@ _ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 # are met.
 _LINUX_ENV_FILE_UPSERT_AVAILABLE = False
 _HUAWEI_NE8000_BGP_AVAILABLE = False
+_NETBOX_PLUGIN_INSTALL_AVAILABLE = False
 # No os.linux_debian_13.* handler exists in netbox-rpc-backend yet. Capability
 # discovery is NOT a substitute for this gate: a backend that advertises no
 # manifest yields verification UNKNOWN and admission proceeds, so without the gate
@@ -179,6 +198,11 @@ _INFLUXDB3_DEBIAN13_AVAILABLE = False
 # is also seeded disabled; this code gate prevents an operator toggle from
 # bypassing the coordinated rollout order.
 _GITEA_RUNNER_REGISTER_AVAILABLE = False
+# No service.gitea.actions_runner.* handler exists in netbox-rpc-backend yet.
+# Keep this independent of RPCProcedure.enabled so an operator cannot make the
+# catalog dispatchable without the paired backend implementation and capability
+# contract. Flip to True only in the same additive rollout that enables the row.
+_GITEA_ORG_CI_RUNNER_AVAILABLE = False
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -202,6 +226,15 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "object-scoped-authorization checked against the requester "
             "(issue #203), and approval decisions are not yet bound to an "
             "allowlist-policy snapshot (issue #163)."
+        )
+    if procedure_name == NETBOX_PLUGIN_INSTALL and not _NETBOX_PLUGIN_INSTALL_AVAILABLE:
+        return (
+            "netbox.plugin.install cannot run yet: the nms-backend execution "
+            "handler is not deployed. Note also that approval decisions are not "
+            "yet bound to a snapshot of the RPCNetBoxPluginAllowlist row the "
+            "worker resolves at claim time (issue #163), so an approver could "
+            "approve against one row and the worker execute against another "
+            "edited in between."
         )
     if procedure_name == GITEA_RUNNER_REGISTER and not _GITEA_RUNNER_REGISTER_AVAILABLE:
         return (
@@ -229,6 +262,17 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "execution could only queue and then fail on an unknown handler. "
             "Enable it in the coordinated rollout that ships the handlers and "
             "their approved capability contract."
+        )
+    if (
+        procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
+        and not _GITEA_ORG_CI_RUNNER_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no service.gitea.actions_runner.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handler and "
+            "its approved capability contract."
         )
     return None
 
@@ -438,6 +482,44 @@ _INFLUXDB3_INTERNAL_PARAM_KEYS = frozenset(
     }
 )
 
+# Gitea Actions org CI runner provisioning catalog (migration 0084). This is a
+# backend-owned SSH/Docker workflow: NetBox supplies a closed, approval-bound
+# contract, and the backend resolves the target host and SSH credential from the
+# assigned object. Each lane's runtime authority and trust posture are fixed here.
+_GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL = (
+    gitea_org_ci_runner_contract.DEFAULT_GITEA_INSTANCE_URL
+)
+_GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION = (
+    gitea_org_ci_runner_contract.DEFAULT_ORGANIZATION
+)
+_GITEA_ORG_CI_RUNNER_LANES = gitea_org_ci_runner_contract.LANES
+_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS = (
+    gitea_org_ci_runner_contract.BOOLEAN_PARAM_DEFAULTS
+)
+_GITEA_ORG_CI_RUNNER_PARAM_KEYS = frozenset(
+    {
+        "lane",
+        "registration_token_secret_ref",
+        *_GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS,
+    }
+)
+_GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
+    {
+        "rpc_ssh_credential_pk",
+        "rpc_ssh_host",
+        "rpc_ssh_port",
+        "rpc_ssh_known_hosts_entry",
+        "rpc_ssh_strict_host_key_checking",
+    }
+)
+_GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS = frozenset(
+    {
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+)
+
 _AKVORADO_MAX_CONTENT_LEN = 1024 * 1024
 _AKVORADO_SENSITIVE_KEY_RE = re.compile(
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
@@ -619,10 +701,6 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
 # default would make every asyncssh procedure stop pinning its driver.
 
 _UNSET = object()
-
-from ..transport import ANSIBLE_DRIVERS as _ANSIBLE_DRIVERS
-from ..transport import RAW_CAPABILITY_DEFAULT as _RAW_CAPABILITY_DEFAULT
-from ..transport import driver_capability as _driver_capability
 
 
 def _transport_policy() -> Any | None:
@@ -941,6 +1019,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
     if procedure_name == LINUX_ENV_FILE_UPSERT_VAR:
         return _normalize_linux_env_file_upsert_execution(execution, target)
 
+    if procedure_name == NETBOX_PLUGIN_INSTALL:
+        return _normalize_netbox_plugin_install_execution(execution, target)
+
     if procedure_name == HUAWEI_MA5800_R024_START_ONT:
         params = execution.params or {}
         normalized = {
@@ -1025,6 +1106,8 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == GITEA_RUNNER_REGISTER:
         return _normalize_gitea_runner_registration_execution(execution)
+    if procedure_name == GITEA_ORG_CI_RUNNER_PROVISION:
+        return _normalize_gitea_org_ci_runner_provision_execution(execution)
 
     if procedure_name in SAMBA_1_PROCEDURE_NAMES:
         return _normalize_samba_1_execution(execution, target)
@@ -2114,6 +2197,195 @@ def _normalize_influxdb3_debian13_execution(
     normalized["remote_bind"] = remote_bind
     normalized["command_fingerprint"]["remote_bind"] = remote_bind
 
+    return normalized
+
+
+def validate_gitea_org_ci_runner_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> dict[str, object]:
+    """Validate the exact dedicated runner VM selected by reviewed policy."""
+
+    contract = gitea_org_ci_runner_contract
+    if (
+        target_model_label != contract.TARGET_OBJECT["content_type"]
+        or assigned_object_id != contract.TARGET_OBJECT_ID
+        or isinstance(assigned_object_id, bool)
+        or target is None
+        or getattr(target, "pk", None) != contract.TARGET_OBJECT_ID
+        or getattr(target, "name", None) != contract.TARGET_NAME
+        or (target_display is not None and target_display != contract.TARGET_NAME)
+    ):
+        raise RPCExecutionError(
+            "Gitea org CI runner provisioning requires the exact dedicated runner VM.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    primary_ip4 = getattr(target, "primary_ip4", None)
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        ipv4 = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Gitea org CI runner target primary_ip4 is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if ipv4.version != 4 or str(ipv4) != contract.TARGET_IPV4_ADDRESS:
+        raise RPCExecutionError(
+            "Gitea org CI runner target primary_ip4 does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    raw_status = getattr(target, "status", None)
+    status = str(getattr(raw_status, "value", raw_status) or "").lower()
+    if status != "active":
+        raise RPCExecutionError(
+            "Gitea org CI runner target must be active.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    return {
+        "target": contract.TARGET_NAME,
+        "target_object": dict(contract.TARGET_OBJECT),
+        "runner_ipv4": str(ipv4),
+    }
+
+
+def _normalize_gitea_org_ci_runner_provision_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Normalize the Gitea Actions org CI runner provision procedure."""
+
+    procedure_name = execution.procedure.name
+    params = execution.params or {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            f"{procedure_name} params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    gate_reason = code_gate_unavailable_reason(procedure_name)
+    if gate_reason is not None:
+        raise RPCExecutionError(gate_reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    content_type = f"{app_label}.{model}"
+    object_id = getattr(execution, "assigned_object_id", None)
+    if content_type != target_model:
+        raise RPCExecutionError(
+            "Gitea org CI runner target content type is inconsistent.",
+            code="RPC_TARGET_INVALID",
+        )
+    target_metadata = validate_gitea_org_ci_runner_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=content_type,
+        assigned_object_id=object_id,
+        target_display=getattr(execution, "target_display", None),
+    )
+
+    supplied_overrides = sorted(
+        set(params) & _GITEA_ORG_CI_RUNNER_FORBIDDEN_SSH_OVERRIDE_PARAMS
+    )
+    if supplied_overrides:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied_overrides)}. The execution "
+            "backend resolves host, port, credential, and known-host policy from "
+            "the execution's assigned NetBox object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(
+        set(params)
+        - _GITEA_ORG_CI_RUNNER_PARAM_KEYS
+        - _GITEA_ORG_CI_RUNNER_INTERNAL_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    secret_ref = params.get("registration_token_secret_ref")
+    if not isinstance(secret_ref, str) or not _INFLUXDB_SECRET_REF_RE.fullmatch(
+        secret_ref.strip()
+    ):
+        raise RPCExecutionError(
+            "registration_token_secret_ref must be an nms-secret:<uuid> reference.",
+            code="RPC_PARAM_INVALID",
+        )
+    secret_ref = secret_ref.strip()
+
+    lane = params.get("lane")
+    if not isinstance(lane, str) or lane not in _GITEA_ORG_CI_RUNNER_LANES:
+        raise RPCExecutionError(
+            "lane must be 'untrusted-python312' or 'general-ubuntu'.",
+            code="RPC_PARAM_INVALID",
+        )
+    lane_contract = _GITEA_ORG_CI_RUNNER_LANES[lane]
+
+    # Frozen server-side. The backend resolves the vaulted registration token
+    # and then registers against this origin, so letting a caller choose either
+    # value would let the requester decide where that credential is delivered.
+    gitea_instance_url = _GITEA_ORG_CI_RUNNER_DEFAULT_INSTANCE_URL
+    organization = _GITEA_ORG_CI_RUNNER_DEFAULT_ORGANIZATION
+    booleans = {
+        key: _bool_param(params, key, default)
+        for key, default in _GITEA_ORG_CI_RUNNER_BOOLEAN_PARAM_DEFAULTS.items()
+    }
+    if booleans["build_runner_image"] and booleans["load_prebuilt_runner_image"]:
+        raise RPCExecutionError(
+            "build_runner_image and load_prebuilt_runner_image are mutually exclusive.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    normalized: dict[str, Any] = {
+        **target_metadata,
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "lane": lane,
+        "runner_name": lane_contract["runner_name"],
+        "runner_labels": list(lane_contract["runner_labels"]),
+        "runner_image": lane_contract["runner_image"],
+        "compose_project_dir": lane_contract["compose_project_dir"],
+        "executor": lane_contract["executor"],
+        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
+        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
+        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
+        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
+        "job_user": lane_contract["job_user"],
+        **booleans,
+    }
+    fingerprint = {
+        "handler_id": execution.procedure.handler_id,
+        "procedure": procedure_name,
+        "target_content_type": content_type,
+        "target_object_id": object_id,
+        "target_object_sha256": gitea_org_ci_runner_contract.TARGET_OBJECT_SHA256,
+        "runner_ipv4": target_metadata["runner_ipv4"],
+        "gitea_instance_url": gitea_instance_url,
+        "organization": organization,
+        "registration_token_secret_ref": secret_ref,
+        "lane": lane,
+        "runner_name": lane_contract["runner_name"],
+        "runner_labels_sha256": _hash_json(list(lane_contract["runner_labels"])),
+        "runner_image": lane_contract["runner_image"],
+        "compose_project_dir": lane_contract["compose_project_dir"],
+        "executor": lane_contract["executor"],
+        "runner_mounts_docker_socket": lane_contract["runner_mounts_docker_socket"],
+        "jobs_mount_docker_socket": lane_contract["jobs_mount_docker_socket"],
+        "runner_cap_drop_all": lane_contract["runner_cap_drop_all"],
+        "runner_no_new_privileges": lane_contract["runner_no_new_privileges"],
+        "job_user": lane_contract["job_user"] or "",
+        **booleans,
+    }
+    normalized["command_fingerprint"] = fingerprint
     return normalized
 
 
@@ -3324,6 +3596,137 @@ def _normalize_linux_service_execution(
         "command_fingerprint": {
             "handler_id": execution.procedure.handler_id,
             "systemd_unit": unit,
+        },
+    }
+    if allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    return result
+
+
+def _normalize_netbox_plugin_install_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Resolve an allowlisted NetBox plugin install; callers name only a slug.
+
+    Everything that decides what runs comes from the allowlist row. The caller
+    supplies the row's slug and a version, and nothing else reaches the backend
+    that could redirect the install -- a caller-supplied distribution would be
+    a string handed to ``pip install`` and then imported by a NetBox restart.
+
+    The services to restart are resolved through ``RPCLinuxServiceAllowlist``
+    rather than being named on the plugin row. That is deliberate: it means a
+    unit this procedure can restart is a unit an operator already approved for
+    restarting, and the two allowlists cannot drift into letting this procedure
+    bounce something the service catalog forbids.
+    """
+
+    # Defense in depth, as for the env-file upsert: create_execution() and
+    # /procedures/available/ already consult the gate, but a worker can claim a
+    # row created by an older process during a rolling deployment. Recheck
+    # before any allowlist lookup runs.
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+
+    params = execution.params or {}
+    slug = str(params.get("plugin_slug") or "").strip()
+    allow = RPCNetBoxPluginAllowlist.objects.filter(slug=slug, enabled=True).first()
+    if allow is None:
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} is not allowlisted.",
+            code="RPC_NETBOX_PLUGIN_NOT_ALLOWLISTED",
+        )
+
+    target_models = set(allow.target_models or [])
+    if target_models and execution.target_model_label not in target_models:
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} is not allowed for {execution.target_model_label}.",
+            code="RPC_NETBOX_PLUGIN_TARGET_DENIED",
+        )
+
+    # Defensive revalidation of the row itself. The model's clean() enforces
+    # these already, but a row written outside full_clean() -- a fixture, a data
+    # migration, a bulk update -- must not reach the backend unvalidated. This
+    # is the same reasoning as the env-file path recheck above, and it matters
+    # more here: these strings become a pip target and a settings-file path.
+    distribution = str(allow.distribution or "").strip()
+    module = str(allow.module or "").strip()
+    if not _PYTHON_DISTRIBUTION_RE.fullmatch(distribution):
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} has a malformed distribution name.",
+            code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+        )
+    if not _PYTHON_MODULE_RE.fullmatch(module):
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} has a malformed module path.",
+            code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+        )
+    paths = {
+        "venv_python": str(allow.venv_python or "").strip(),
+        "manage_py": str(allow.manage_py or "").strip(),
+        "settings_file": str(allow.settings_file or "").strip(),
+    }
+    for field, value in paths.items():
+        if not _ENVIRONMENT_FILE_PATH_RE.fullmatch(value):
+            raise RPCExecutionError(
+                f"NetBox plugin {slug!r} has a malformed {field}.",
+                code="RPC_NETBOX_PLUGIN_ROW_INVALID",
+            )
+
+    version = str(params.get("version") or "").strip()
+    if not _PYTHON_EXACT_VERSION_RE.fullmatch(version):
+        raise RPCExecutionError(
+            "version must be an exact version, not a range or an unpinned name.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    # Resolve each restart target through the *service* allowlist, so this
+    # procedure can only bounce units that catalog already permits.
+    service_slugs = list(allow.service_slugs or [])
+    systemd_units: list[str] = []
+    for service_slug in service_slugs:
+        service = RPCLinuxServiceAllowlist.objects.filter(
+            slug=str(service_slug).strip(), enabled=True
+        ).first()
+        if service is None:
+            raise RPCExecutionError(
+                f"NetBox plugin {slug!r} lists service {service_slug!r}, which is "
+                f"not allowlisted.",
+                code="RPC_LINUX_SERVICE_NOT_ALLOWLISTED",
+            )
+        systemd_units.append(service.systemd_unit)
+
+    if not systemd_units:
+        # Installing without restarting leaves the plugin on disk and absent
+        # from the running process -- a half-applied change that reports
+        # success and shows no plugin. Refuse rather than pretend.
+        raise RPCExecutionError(
+            f"NetBox plugin {slug!r} lists no services to restart; the install "
+            f"would never take effect.",
+            code="RPC_NETBOX_PLUGIN_NO_SERVICES",
+        )
+
+    result: dict[str, Any] = {
+        "target": target,
+        "plugin_slug": slug,
+        "distribution": distribution,
+        "module": module,
+        "version": version,
+        "venv_python": paths["venv_python"],
+        "manage_py": paths["manage_py"],
+        "settings_file": paths["settings_file"],
+        "systemd_units": systemd_units,
+        "dry_run": bool(params.get("dry_run", False)),
+        # The fingerprint is what an approver is really approving: the exact
+        # artifact and the exact units, not the slug that stands for them.
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "distribution": distribution,
+            "version": version,
+            "module": module,
+            "settings_file": paths["settings_file"],
+            "systemd_units": systemd_units,
         },
     }
     if allow.ssh_credential_override_id is not None:

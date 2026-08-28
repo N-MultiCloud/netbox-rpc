@@ -25,7 +25,7 @@ INTEGRATION_WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "integration.yml"
 LOCK_PATH = ROOT / ".gitea" / "ci-requirements.lock"
 PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
 CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
-LOCK_SHA256 = "b4db7757dbbc9669e1bcbc57c1c2bc81580ce0ca6043f7a75ec9d76ac3d454b4"
+LOCK_SHA256 = "e26ad1915e48f6a20916ddb2c72ad3bda27b4c36266d7ec6249939a2fda97842"
 PYTEST_CONFIG_SHA256 = "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
 INTEGRATION_WORKFLOW_SHA256 = "85a25dc1c6fadf45a018bd4b148473b258d4b1eb4807d414c8c45b63af966403"
 STEP_RUN_SHA256 = {
@@ -66,6 +66,7 @@ LOCKED_VERSIONS = {
     "referencing": "0.37.0",
     "requests": "2.34.2",
     "rpds-py": "2026.6.3",
+    "setuptools": "83.0.0",
     "typing-extensions": "4.16.0",
     "typing-inspection": "0.4.4",
     "urllib3": "2.7.0",
@@ -312,6 +313,7 @@ def _assert_declared_requirements_satisfied(
     requirements = [
         *project["dependencies"],
         *project["optional-dependencies"]["test"],
+        *tomllib.loads(pyproject)["build-system"]["requires"],
         "pytest",
         "pytest-asyncio",
     ]

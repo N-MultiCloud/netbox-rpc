@@ -14,6 +14,7 @@ from ..models import (
     RPCIntent,
     RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
+    RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
     RpcPluginSettings,
@@ -465,3 +466,34 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
                 }
             )
         return data
+
+
+class RPCNetBoxPluginAllowlistSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpcnetboxpluginallowlist-detail",
+    )
+
+    class Meta:
+        model = RPCNetBoxPluginAllowlist
+        fields = (
+            "id",
+            "url",
+            "display",
+            "slug",
+            "distribution",
+            "module",
+            "venv_python",
+            "manage_py",
+            "settings_file",
+            "service_slugs",
+            "enabled",
+            "target_models",
+            "description",
+            "comments",
+            "ssh_credential_override",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "slug", "distribution", "module")

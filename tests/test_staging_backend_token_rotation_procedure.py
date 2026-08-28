@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator, ValidationError, validate
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0068_seed_staging_backend_token_rotation"
-DNS_MIGRATION_MODULE = "netbox_rpc.migrations.0082_seed_dns_staging_deploy"
+DNS_MIGRATION_MODULE = "netbox_rpc.migrations.0085_seed_dns_staging_deploy"
 DNS_PROCEDURE_ID = "service.netbox.staging.deploy_dns_pair"
 PROCEDURE_ID = "service.netbox.staging.rotate_backend_token"
 PARAM_KEYS: set[str] = set()

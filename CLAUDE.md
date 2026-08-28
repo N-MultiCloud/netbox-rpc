@@ -76,6 +76,18 @@ command behavior changes.
 > pin into approval/lease evidence, and reports every uncertain post-process outcome as
 > `deployed=null, stage=indeterminate`. Never place provider credentials, DNS
 > records, routing, command output, or operator notes in this execution.
+> `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
+> runner-host provisioning procedure, seeded disabled and hard-gated until the
+> paired backend handler exists. It is pinned to `Gitea-Runner` VM PK 416
+> (`10.0.30.241`) and uses the protected two-person approval and signed-lease
+> workflow. Its closed `lane` enum selects either the
+> no-socket/non-root `untrusted-python312` host-executor stack or the
+> runner-socket-only `general-ubuntu` Docker-executor stack. Every lane-specific
+> name, label, image, directory, executor, and trust-posture value is frozen
+> server-side, including the Gitea origin and organization. It accepts the
+> registration credential only as an
+> `nms-secret:<uuid>` reference and rejects caller SSH routing. See
+> `docs/gitea-org-ci-runner-provision.md`.
 
 @AGENTS.md
 
@@ -166,6 +178,13 @@ manylinux_2_17_x86_64 runtime target, a sha256 over the wheel's sorted
 migration and static file in the wheel. The gateway recomputes those digests
 from the archive and refuses any mismatch, so the manifest cannot drift from
 what is actually shipped.
+
+Ordinary CI enforces the same boundary before deployment:
+`tests/test_deploy_manifest_contract.py` runs the canonical generator check,
+builds a real wheel with the hash-locked `setuptools` backend from
+`.gitea/ci-requirements.lock`, compares the exact archive maps, and mutation-tests
+a stale embedded manifest. Keep that test and build dependency in the locked CI
+closure whenever this contract changes.
 
 Generate it — never hand-edit it:
 

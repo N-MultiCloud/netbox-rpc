@@ -1086,7 +1086,10 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    assert len(extras_dependencies) == 6
+    # 7 since #262 added 0082_rpcnetboxpluginallowlist. Raising this number
+    # is meant to be deliberate: the assertion below is what actually
+    # matters, and every entry must stay anchored to the 4.5.8 floor.
+    assert len(extras_dependencies) == 7
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
@@ -1094,6 +1097,7 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         "0033_rpcbackend.py",
         "0039_rpcintent.py",
         "0044_rpcpluginsettings.py",
+        "0082_rpcnetboxpluginallowlist.py",
     ):
         # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
         # remains an ancestor of the 4.6 migration graph.
@@ -1113,6 +1117,7 @@ def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> No
         "netbox_rpc/migrations/0033_rpcbackend.py",
         "netbox_rpc/migrations/0039_rpcintent.py",
         "netbox_rpc/migrations/0044_rpcpluginsettings.py",
+        "netbox_rpc/migrations/0082_rpcnetboxpluginallowlist.py",
     )
     for path in migration_paths:
         migration = read(path)

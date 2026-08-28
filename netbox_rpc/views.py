@@ -210,6 +210,46 @@ class RPCLinuxServiceAllowlistBulkDeleteView(generic.BulkDeleteView):
     table = tables.RPCLinuxServiceAllowlistTable
 
 
+# ── RPCNetBoxPluginAllowlist ─────────────────────────────────────────────────
+
+
+@register_model_view(models.RPCNetBoxPluginAllowlist, "list", path="", detail=False)
+class RPCNetBoxPluginAllowlistListView(generic.ObjectListView):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.all()
+    table = tables.RPCNetBoxPluginAllowlistTable
+    filterset = filtersets.RPCNetBoxPluginAllowlistFilterSet
+    filterset_form = forms.RPCNetBoxPluginAllowlistFilterForm
+    actions = LIST_ACTIONS
+
+
+@register_model_view(models.RPCNetBoxPluginAllowlist)
+class RPCNetBoxPluginAllowlistView(generic.ObjectView):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.all()
+
+
+@register_model_view(models.RPCNetBoxPluginAllowlist, "add", detail=False)
+@register_model_view(models.RPCNetBoxPluginAllowlist, "edit")
+class RPCNetBoxPluginAllowlistEditView(RequestAwareObjectEditView):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.all()
+    form = forms.RPCNetBoxPluginAllowlistForm
+
+
+@register_model_view(models.RPCNetBoxPluginAllowlist, "delete")
+class RPCNetBoxPluginAllowlistDeleteView(generic.ObjectDeleteView):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.all()
+
+
+@register_model_view(
+    models.RPCNetBoxPluginAllowlist,
+    "bulk_delete",
+    path="delete",
+    detail=False,
+)
+class RPCNetBoxPluginAllowlistBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.RPCNetBoxPluginAllowlist.objects.all()
+    table = tables.RPCNetBoxPluginAllowlistTable
+
+
 # ── RPCIntent ────────────────────────────────────────────────────────────────
 
 

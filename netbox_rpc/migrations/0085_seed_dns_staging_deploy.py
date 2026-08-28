@@ -101,7 +101,7 @@ def seed_dns_staging_deploy(apps, schema_editor):
     RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
     if RPCProcedure.objects.filter(name=_PROCEDURE_NAME).exists():
         raise RuntimeError(
-            "Migration 0082 cannot adopt an existing staging DNS deploy procedure; "
+            "Migration 0085 cannot adopt an existing staging DNS deploy procedure; "
             "reconcile the operator-owned row before retrying."
         )
     procedure = RPCProcedure.objects.create(
@@ -117,13 +117,13 @@ def seed_dns_staging_deploy(apps, schema_editor):
 
 def unseed_dns_staging_deploy(apps, schema_editor):
     raise IrreversibleError(
-        "Migration 0082 is intentionally irreversible because catalog row "
+        "Migration 0085 is intentionally irreversible because catalog row "
         "ownership cannot be proven after operator mutation."
     )
 
 
 class Migration(migrations.Migration):
-    dependencies = [("netbox_rpc", "0081_gitea_runner_scope_fence")]
+    dependencies = [("netbox_rpc", "0084_seed_gitea_org_ci_runner_provision")]
 
     operations = [
         migrations.RunPython(

@@ -18,9 +18,10 @@ and an operator has authorized the maintenance window.
 - Policy: `effect="destructive"`, approval required, 1800-second timeout,
   1725-second handler budget, 1690-second guest process timeout, and exact
   empty closed params object.
-- Backend: `RPCBackend` PK `1`, exact loopback base URL
-  `http://127.0.0.1:16005`, and `verify_ssl=false`. Dispatch through the public
-  Nginx vhost is unsupported.
+- Backend: the execution serializer carries scalar `RPCBackend` PK `1`; the
+  backend re-fetches that authoritative row at dispatch and requires exact
+  loopback base URL `http://127.0.0.1:16005` with `verify_ssl=false`. Dispatch
+  through the public Nginx vhost is unsupported.
 - Guest: `/usr/local/bin/gitea`, `gitea.service`, unit path
   `/etc/systemd/system/gitea.service` with SHA-256
   `557ad3478e463075b1f6dd3a459207631ca6114371a9db670458e76515d4b7f6`,
@@ -120,10 +121,10 @@ artifact URL/digest, guest paths/unit/health URLs, 1725-second handler and
 1690-second process budgets, the SSH pin parser, closed
 caller/normalized/fingerprint schemas, all result tuples, and executable
 contract version 1. The executable identity binds the backend's exact upgrade
-script (59,952 bytes, SHA-256
-`8cb74c96ebbc278eaa1e23f0f22d0c4a19fa044a00e15503be95ac54a5d80f93`)
-and complete fixed argv (63,492 canonical bytes, SHA-256
-`c8ba17a10783f0ebe6823026571ac388fbcf75fc4d5443c9c7d309792f4a3631`)
+script (68,394 bytes, SHA-256
+`7e6fdacd945f038e06eb0c4f12752b72c702bfde984ff47a89cce2d68fffad41`)
+and complete fixed argv (72,240 canonical bytes, SHA-256
+`cc41baaa641673a191a4163595cacecb9df5d2233edbdb385cfec741b6ffb2d0`)
 under the shared `json-sort-keys-compact-utf8` canonicalization; changing
 mutation, rollback, or invocation bytes therefore changes capability
 compatibility. Its compact
@@ -139,10 +140,19 @@ deleted or left behind while Django records the migration unapplied. Operators
 must keep `0073` applied; removal or repair requires a reviewed forward migration
 with explicit ownership evidence.
 
-The backend must verify the official digest before stopping Gitea, create and
-verify a restorable backup before mutation, atomically install the new binary,
-and confirm both the exact version and service/application health. A failure
-after mutation must attempt rollback and re-check health. `indeterminate` or
+The backend must verify the official digest before stopping Gitea, run every
+embedded root Python program in isolated mode from a root-owned working
+directory, create and verify a restorable backup before mutation, and include
+repositories, LFS, attachments, packages, repository archives, custom data,
+avatars, Actions logs, and Actions artifacts in stopped source/archive byte
+parity. Gitea 1.26.2 intentionally excludes repository-archive storage from its
+dump command, so the root transaction must append that stopped tree to the
+descriptor-sealed archive before parity verification. Curl configuration,
+proxy, and TLS environment are discarded for artifact and health requests.
+Exact SQLite verification scratch files are removed on every normal or
+trapped failure exit. It then atomically installs the new binary and confirms
+both the exact version and service/application health. A failure after mutation
+must attempt rollback and re-check health. `indeterminate` or
 `changed=true, healthy=false` is never automatically retried: reconcile the
 installed binary, service, database state, and backup before a new request.
 Never expose binary contents, credentials, configuration, backup paths, command

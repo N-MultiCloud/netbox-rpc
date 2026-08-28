@@ -50,6 +50,10 @@ def _stub_netbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
     models = types.ModuleType("netbox_rpc.models")
     models.RPCLinuxServiceAllowlist = type("RPCLinuxServiceAllowlist", (), {})
+    # netbox_rpc.domain.normalization imports this alongside the service
+    # allowlist for netbox.plugin.install (#262); without it every module
+    # that stubs netbox_rpc.models fails at import, not just that one.
+    models.RPCNetBoxPluginAllowlist = type("RPCNetBoxPluginAllowlist", (), {})
     models.RPCExecution = type(
         "RPCExecution",
         (),

@@ -214,7 +214,8 @@ activate the complete two-person route for
 `service.netbox.staging.rotate_backend_token` and
 `service.netbox.staging.deploy_dns_pair`,
 `service.gitea.production.upgrade_1_27_1`, plus the disabled
-`service.gitea.runner.register`; other legacy
+`service.gitea.runner.register` and
+`service.gitea.actions_runner.provision_org_ci_runner`; other legacy
 `approval_required` procedures retain their existing requester permission gate
 until they are migrated deliberately.
 
@@ -748,6 +749,27 @@ pending approval or distinct-actor check.
     non-daemon unit fails the test and forces a deliberate decision rather than
     silently widening it. Adding a maintenance unit under this prefix therefore
     requires updating that set, not the seed migration.
+- **Gitea Actions org CI runner provisioning** is seeded disabled by migration
+  `0084` (depending on `0083`) as
+  `service.gitea.actions_runner.provision_org_ci_runner`. It is a distinct
+  protected two-person install/register/start/verify workflow for the two runner
+  lanes on exact `Gitea-Runner` VM PK 416 (`10.0.30.241`), not a restart of an
+  existing systemd unit. The
+  closed `lane` enum freezes the name, ordered labels, image, executor, Compose
+  directory, and trust posture. `untrusted-python312` uses the host executor,
+  no Docker socket, `cap_drop: ALL`, no-new-privileges, and non-root `cirunner`;
+  `general-ubuntu` uses Docker-executor labels and mounts the Docker socket only
+  into the runner so jobs are socket-free sibling containers. The procedure
+  requires `registration_token_secret_ref` as an `nms-secret:<uuid>`, rejects
+  `rpc_ssh_*` routing overrides, freezes the Gitea origin and `N-MultiCloud`
+  organization server-side, and resolves SSH only from the exact,
+  requester-viewable assigned VM. A distinct approver, immutable approval
+  snapshot, compatible capability, and signed one-time dispatch lease are
+  mandatory. The hard gate `_GITEA_ORG_CI_RUNNER_AVAILABLE` must stay false until
+  the paired `netbox-rpc-backend` handler and approved capability contract are
+  deployed, then a forward migration may enable the row and open the gate. The
+  complete frozen contract lives in
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - **Debian 13 InfluxDB 3 Core installation** is seeded by migrations `0071`
   (allowlist row) and `0072` (procedures). The `service.influxdb.1.*` family
   above manages an instance that already *exists*; these two stand one up, so a
@@ -1045,6 +1067,62 @@ pending approval or distinct-actor check.
   `netbox_rpc/tests/test_linux_env_file_upsert_code_gate.py` (admission +
   advertisement, procedure forced `enabled=True`) alongside the existing
   `test_upsert_var_gate_blocks_by_default` (worker-claim layer).
+- `netbox.plugin.install` (migrations `0082`/`0083`) installs an **allowlisted**
+  NetBox plugin at an **exact** version on a managed NetBox host, registers it in
+  `PLUGINS`, migrates, collects static, restarts the allowlisted services, health
+  checks, and **restores the previous settings file if NetBox does not come
+  back**. `effect="write"`, `approval_required=True`, 900s.
+
+  It exists because nothing else could do this: `deploy-plugin` upgrades plugins
+  already installed and already listed in `PLUGINS`, `restart_service` restarts
+  one, and neither installs a distribution or runs a new app's migrations — so a
+  first-time install was reachable only by SSH.
+
+  **`RPCNetBoxPluginAllowlist` is what makes it safe.** Params are only
+  `plugin_slug`, `version`, and optional `dry_run`; the row supplies the
+  `distribution`, `module`, `venv_python`, `manage_py`, `settings_file`, and
+  `service_slugs`. A caller-supplied distribution would be remote code execution
+  with an audit trail attached — the string reaches `pip install`, which accepts
+  URLs, paths, VCS references and options, and whatever it fetches is then
+  imported by a NetBox restart. `version` is the one caller-supplied value that
+  reaches pip and is constrained to an exact version, never a range, so the audit
+  record names the precise artifact.
+
+  Restart targets resolve through `RPCLinuxServiceAllowlist` (migration `0058`'s
+  `netbox`/`netbox-rq` rows), not through unit names on the plugin row, so a unit
+  this procedure can bounce is one an operator already approved for bouncing. A
+  row listing no services is refused: installing without restarting leaves the
+  plugin on disk and absent from the running process, which would report success
+  and show no plugin.
+
+  **It takes no `credential_pk`** — SSH resolves from the target device's own
+  `DeviceService`, as `restart_service` does — so unlike
+  `os.linux_env_file.upsert_var` it does **not** inherit #203. It does inherit
+  #163's approval TOCTOU: an approver could approve against one
+  `RPCNetBoxPluginAllowlist` row while the worker resolves a different one edited
+  in between. That is recorded in the gate text.
+
+  **Why the rollback is the point.** A plugin whose `min_version`/`max_version`
+  window excludes the running NetBox does not degrade — NetBox refuses to start.
+  Observed while testing `netbox-openbao` against 4.6: the container went from
+  healthy to exited and stayed down until the entry was removed from `PLUGINS`.
+  On production that is an outage whose fix requires editing the configuration of
+  a host whose NetBox is already down. `dry_run=true` runs the version-window
+  pre-flight and stops, turning that outage into a rejected request.
+
+  **No `config` parameter, deliberately.** The settings file is Python and JSON
+  is not a subset of it (`null`/`true`/`false` are not `None`/`True`/`False`), so
+  writing caller-supplied JSON there either corrupts the file or needs a
+  converter whose bugs are settings-file corruption on a production host. It is
+  also unnecessary: a plugin with `required_settings = []` loads with no entry.
+
+  Seeded `enabled=False` **and** hard-gated in code
+  (`_NETBOX_PLUGIN_INSTALL_AVAILABLE = False`), enforced through
+  `code_gate_unavailable_reason()` at admission, advertisement, and worker-claim
+  time. Flip neither until the nms-backend handler is deployed and verified.
+  Listed in `EXEMPT_HANDLER_RATIONALE` with one representative command row —
+  the rollback alone has no fixed-argv form, since whether it runs depends on
+  whether the health check passed.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`, migration `0066`,
   `tests/test_huawei_ne8000_bgp_procedure.py`, and
@@ -1283,6 +1361,21 @@ pending approval or distinct-actor check.
   unapplied migration with deleted, surviving, or orphaned rows. Removal or
   repair requires a reviewed forward migration with explicit ownership
   evidence.
+- Gitea org CI runner provisioning is seeded disabled by migration `0084` as
+  `service.gitea.actions_runner.provision_org_ci_runner` (write, 1800s,
+  approval required), targeting only exact `virtualization.virtualmachine` PK
+  416 (`Gitea-Runner`, `10.0.30.241`).
+  Its required `lane` enum selects one of two fully frozen stacks:
+  `untrusted-python312` has no Docker socket, drops all capabilities, enables
+  no-new-privileges, and runs jobs as non-root `cirunner` with the host executor;
+  `general-ubuntu` uses three Docker-executor Ubuntu labels and exposes the
+  Docker socket only to the runner, never its sibling job containers. Callers
+  cannot provide names, labels, images, directories, executors, or posture.
+  The one-time registration credential is accepted only through
+  `registration_token_secret_ref`; caller-supplied SSH routing is rejected. Its
+  reverse is non-destructive: disable only, never delete. Keep it gated until
+  the paired backend handler is deployed. Contract:
+  [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve
@@ -1756,7 +1849,8 @@ Two tiers (see `docs/architecture.md` → Testing):
    must pre-provision exact CPython 3.12.14 at `/usr/local/bin/python3.12` and
    uv 0.12.5 at `/usr/local/bin/uv`; the workflow verifies those fixed
    executables and never selects them through ambient `PATH`, downloads, or
-   bootstraps a toolchain. Dependencies come only
+   bootstraps a toolchain. Dependencies, including the exact build backend used
+   by the wheel regression, come only
    from `.gitea/ci-requirements.lock`, the canonical CPython 3.12 / x86_64 glibc
    2.34 wheel closure, installed with hashes, wheel-only resolution, an empty
    inherited environment, no uv config/project sources/cache, and
@@ -1768,7 +1862,12 @@ Two tiers (see `docs/architecture.md` → Testing):
    turn execution into a collect-only or deselected false green.
    `tests/test_ci_workflow_security.py`
    parses YAML with duplicate/alias/flow constructs rejected and mutation-tests
-   the complete fail-closed contract. Provisioning the dedicated runner is an
+   the complete fail-closed contract. `tests/test_deploy_manifest_contract.py`
+   checks the canonical generated files, builds the wheel with that locked
+   backend, and requires the manifest's migration/static paths and SHA-256
+   digests to equal the exact archive; its hostile stale-manifest mutation must
+   fail. Renew this gate whenever a migration or static file changes.
+   Provisioning the dedicated runner is an
    external workspace prerequisite; an offline runner means ordinary CI remains
    queued, not rerouted. These candidate-side files are defense in depth, not
    runner authority: the Gitea repository/organization runner policy must make
