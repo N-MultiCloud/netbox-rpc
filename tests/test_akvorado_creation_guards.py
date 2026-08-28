@@ -6,13 +6,12 @@ import importlib
 import json
 import sys
 import types
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from itertools import product
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
-
 
 OPENBAO_DECLARED_STRING_FIELDS = (
     ("auth_enable", "auth_type"),
@@ -114,6 +113,9 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
         "service.netbox.staging.rotate_backend_token"
     )
+    constants.NETBOX_STAGING_DEPLOY_DNS_PAIR = (
+        "service.netbox.staging.deploy_dns_pair"
+    )
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
@@ -123,6 +125,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
         constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
         constants.GITEA_ORG_CI_RUNNER_PROVISION,
@@ -854,6 +857,13 @@ def test_run_execution_persists_jobs_closed_gitea_indeterminate_response(
         url="http://127.0.0.1:16005",
         verify_ssl=False,
     )
+    execution.approval_request = SimpleNamespace(
+        backend_target_sha256=command_handlers._protected_backend_target_sha256(
+            execution.backend_id,
+            procedure_name=procedure.name,
+            backend_target=backend_target,
+        )
+    )
     monkeypatch.setattr(
         command_handlers,
         "resolve_backend",
@@ -1016,6 +1026,151 @@ def test_worker_rejects_backend_drift_before_capability_or_dispatch(
 
     assert raised.value.code == "RPC_BACKEND_BINDING_INVALID"
     assert observed == [("fail", "RPC_BACKEND_BINDING_INVALID")]
+
+
+def test_dns_approval_rejects_snapshot_backend_drift_before_capability_probe(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        name="service.netbox.staging.deploy_dns_pair",
+    )
+    approved_target = SimpleNamespace(
+        url="https://backend-a.invalid",
+        verify_ssl=True,
+    )
+    drifted_target = SimpleNamespace(
+        url="https://backend-b.invalid",
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(
+        pk=2701,
+        procedure=procedure,
+        backend_id=1,
+        approval_request=SimpleNamespace(
+            backend_target_sha256=(
+                command_handlers._protected_backend_target_sha256(
+                    1,
+                    procedure_name=procedure.name,
+                    backend_target=approved_target,
+                )
+            )
+        ),
+    )
+
+    class Manager:
+        def select_for_update(self, **kwargs):
+            assert kwargs == {"of": ("self", "procedure")}
+            return self
+
+        def select_related(self, *fields):
+            assert "procedure" in fields
+            return self
+
+        def get(self, *, pk):
+            assert pk == execution.pk
+            return execution
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type("RPCExecution", (), {"objects": Manager()})
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "resolve_backend",
+        lambda backend_id: drifted_target,
+    )
+    capability_calls = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: capability_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValidationError):
+        command_handlers._approve_protected_execution(
+            execution,
+            SimpleNamespace(pk=2702),
+        )
+
+    assert capability_calls == []
+
+
+def test_dns_worker_rejects_snapshot_backend_drift_before_authenticated_io(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    procedure = SimpleNamespace(
+        name="service.netbox.staging.deploy_dns_pair",
+    )
+    approved_target = SimpleNamespace(
+        url="https://backend-a.invalid",
+        verify_ssl=True,
+    )
+    drifted_target = SimpleNamespace(
+        url="https://backend-b.invalid",
+        verify_ssl=True,
+    )
+    execution = SimpleNamespace(
+        pk=2703,
+        procedure=procedure,
+        backend_id=1,
+        status="running",
+        STATUS_RUNNING="running",
+        approval_request=SimpleNamespace(
+            backend_target_sha256=(
+                command_handlers._protected_backend_target_sha256(
+                    1,
+                    procedure_name=procedure.name,
+                    backend_target=approved_target,
+                )
+            )
+        ),
+    )
+    observed = []
+
+    class Aggregate:
+        def __init__(self, candidate):
+            assert candidate is execution
+
+        def fail(self, message, code):
+            observed.append(("fail", code))
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RpcPluginSettings = type(
+        "RpcPluginSettings",
+        (),
+        {"get_solo": classmethod(lambda cls: SimpleNamespace(enabled=True))},
+    )
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs._call_backend = lambda *args, **kwargs: observed.append(("dispatch", None))
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    monkeypatch.setattr(sys.modules["netbox_rpc"], "jobs", jobs, raising=False)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(command_handlers, "_transition_locked", lambda ex, fn: ex)
+    monkeypatch.setattr(
+        command_handlers,
+        "resolve_backend",
+        lambda backend_id: drifted_target,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: observed.append(("capability", None)),
+    )
+
+    with pytest.raises(RPCExecutionError) as raised:
+        command_handlers.run_execution(execution)
+
+    assert raised.value.code == "RPC_APPROVAL_INVALIDATED"
+    assert observed == [("fail", "RPC_APPROVAL_INVALIDATED")]
 
 
 def test_protected_worker_terminalizes_resolver_exception_without_contact(

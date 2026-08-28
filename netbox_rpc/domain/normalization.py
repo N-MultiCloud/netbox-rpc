@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import yaml
 
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
+from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
     AKVORADO_1_PROCEDURE_NAMES,
@@ -40,6 +41,9 @@ from ..constants import (
     GITEA_RUNNER_REGISTER,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
+    INFLUXDB3_DEBIAN13_INSTALL,
+    INFLUXDB3_DEBIAN13_PREFLIGHT,
+    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     INFLUXDB_1_BOOTSTRAP,
     INFLUXDB_1_CONFIG_DEPLOY,
     INFLUXDB_1_CONFIG_ROLLBACK,
@@ -52,9 +56,6 @@ from ..constants import (
     INFLUXDB_1_PROCEDURE_NAMES,
     INFLUXDB_1_SERVICE_CONTROL,
     INFLUXDB_1_TOKEN_CREATE,
-    INFLUXDB3_DEBIAN13_INSTALL,
-    INFLUXDB3_DEBIAN13_PREFLIGHT,
-    INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     LINUX_COLLECT_FACTS,
     LINUX_ENV_FILE_UPSERT_VAR,
     NETBOX_PLUGIN_INSTALL,
@@ -68,6 +69,7 @@ from ..constants import (
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
@@ -89,27 +91,23 @@ from ..constants import (
     PTERODACTYL_WINGS_STATUS,
     SAMBA_1_CONFIG_DEPLOY,
     SAMBA_1_CONFIG_ROLLBACK,
-    SAMBA_1_INCLUDE_FILE_READ,
+    SAMBA_1_GROUP_ADD_MEMBERS,
+    SAMBA_1_GROUP_CREATE,
+    SAMBA_1_GROUP_DELETE,
+    SAMBA_1_GROUP_REMOVE_MEMBERS,
     SAMBA_1_INCLUDE_FILE_DELETE,
+    SAMBA_1_INCLUDE_FILE_READ,
     SAMBA_1_INCLUDE_FILE_WRITE,
     SAMBA_1_PROCEDURE_NAMES,
+    SAMBA_1_SERVICE_CONTROL,
     SAMBA_1_SHARE_ACL_READ,
     SAMBA_1_SHARE_DELETE,
     SAMBA_1_SHARE_UPSERT,
-    SAMBA_1_SERVICE_CONTROL,
     SAMBA_1_USER_CREATE,
     SAMBA_1_USER_DELETE,
-    SAMBA_1_USER_SET_PASSWORD,
-    SAMBA_1_USER_ENABLE,
     SAMBA_1_USER_DISABLE,
-    SAMBA_1_GROUP_CREATE,
-    SAMBA_1_GROUP_DELETE,
-    SAMBA_1_GROUP_ADD_MEMBERS,
-    SAMBA_1_GROUP_REMOVE_MEMBERS,
-    UBUNTU_UPGRADE_26_PROCEDURE_NAMES,
-    UBUNTU_UPGRADE_26_RUN_UPGRADE,
-    UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
-    UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE,
+    SAMBA_1_USER_ENABLE,
+    SAMBA_1_USER_SET_PASSWORD,
     UBUNTU_24_DAEMON_RELOAD,
     UBUNTU_24_DISABLE_SERVICE,
     UBUNTU_24_ENABLE_SERVICE,
@@ -119,8 +117,11 @@ from ..constants import (
     UBUNTU_24_START_SERVICE,
     UBUNTU_24_STATUS_SERVICE,
     UBUNTU_24_STOP_SERVICE,
+    UBUNTU_UPGRADE_26_PROCEDURE_NAMES,
+    UBUNTU_UPGRADE_26_RUN_UPGRADE,
+    UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
+    UBUNTU_UPGRADE_26_VERIFY_POSTUPGRADE,
 )
-from ..command_templating import RENDER_JINJA
 from ..models import (
     RPCExecution,
     RPCLinuxServiceAllowlist,
@@ -1096,6 +1097,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
             execution,
             target,
         )
+
+    if procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR:
+        return _normalize_dns_staging_deploy_execution(execution, target)
 
     if procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1:
         return _normalize_gitea_production_upgrade_execution(execution)
@@ -5191,6 +5195,116 @@ def _normalize_staging_backend_token_rotation_execution(
     }
 
     return normalized
+
+
+def _normalize_dns_staging_deploy_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize one exact commit onto the fixed staging deploy target."""
+    from .. import dns_staging_deploy_contract as contract
+
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "Staging DNS deployment requires the nms-front-door device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    if not isinstance(target, str) or target.strip() != "nms-front-door":
+        raise RPCExecutionError(
+            "Staging DNS deployment requires the nms-front-door target.",
+            code="RPC_TARGET_INVALID",
+        )
+    target = target.strip()
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+        or getattr(assigned_object, "name", None) != target
+    ):
+        raise RPCExecutionError(
+            "Staging DNS deployment requires the existing nms-front-door device.",
+            code="RPC_TARGET_INVALID",
+        )
+    params = execution.params
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "Staging DNS deployment params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    allowed = {
+        "commit_sha",
+        "_intent",
+        "_intent_name",
+        "_timeout_seconds_snapshot",
+    }
+    unexpected = sorted(set(params) - allowed)
+    commit_sha = params.get("commit_sha")
+    if (
+        unexpected
+        or not isinstance(commit_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None
+    ):
+        raise RPCExecutionError(
+            "Staging DNS deployment requires only one lowercase 40-hex commit_sha.",
+            code="RPC_PARAM_INVALID",
+        )
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    raw_address = getattr(
+        getattr(assigned_object, "primary_ip4", None),
+        "address",
+        getattr(assigned_object, "primary_ip4", None),
+    )
+    try:
+        ssh_host = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Staging DNS deployment requires one explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if ssh_host.version != 4:
+        raise RPCExecutionError(
+            "Staging DNS deployment requires one explicit primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+    policy_ref = f"target-owned-ssh:dcim.device:{assigned_object_id}"
+    ssh_snapshot = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+        assigned_object_id=assigned_object_id,
+        expected_host=str(ssh_host),
+        policy_ref=policy_ref,
+    )
+    if (
+        ssh_snapshot.get("ssh_principal") != contract.RPC_PRINCIPAL
+        or ssh_snapshot.get("ssh_policy_ref") != policy_ref
+    ):
+        raise RPCExecutionError(
+            "Staging DNS deployment requires the dedicated nms-proxy SSH identity.",
+            code="RPC_TARGET_INVALID",
+        )
+    ssh_snapshot_sha256 = _hash_json(ssh_snapshot)
+    return {
+        "target": target,
+        "commit_sha": commit_sha,
+        "target_object": target_object,
+        "ssh_snapshot": ssh_snapshot,
+        "ssh_policy_ref": policy_ref,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "target": target,
+            "commit_sha": commit_sha,
+            "assigned_object_id": assigned_object_id,
+            "target_object_sha256": _hash_json(target_object),
+            "ssh_snapshot_sha256": ssh_snapshot_sha256,
+            "ssh_policy_ref": policy_ref,
+        },
+    }
 
 
 _GITEA_PRODUCTION_UPGRADE_INTERNAL_PARAM_KEYS = frozenset(

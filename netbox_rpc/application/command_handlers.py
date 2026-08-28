@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,6 +11,11 @@ from django.db import transaction
 from rest_framework import serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 
+from .. import dns_staging_deploy_contract as dns_staging_contract
+from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
+from .. import gitea_runner_contract as gitea_runner_contract
+from .. import gitea_upgrade_contract as gitea_contract
+from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
     AKVORADO_1_PROCEDURE_NAMES,
@@ -17,6 +23,7 @@ from ..constants import (
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
 )
@@ -35,10 +42,6 @@ from ..openbao_validation import (
     OpenBaoSecretIngressError,
     validate_openbao_params_for_persistence,
 )
-from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
-from .. import gitea_upgrade_contract as gitea_contract
-from .. import gitea_runner_contract as gitea_runner_contract
-from .. import staging_rotation_contract as staging_contract
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
 # service.samba.1.user_create / user_set_password). The raw password must
@@ -80,6 +83,8 @@ _STAGING_ROTATION_CREATE_FIELDS = frozenset(
 )
 _STAGING_ROTATION_APPROVAL_REASON = "Approved audited staging backend token rotation."
 _STAGING_ROTATION_REJECTION_REASON = "Rejected audited staging backend token rotation."
+_DNS_STAGING_DEPLOY_APPROVAL_REASON = "Approved audited staging DNS-pair deployment."
+_DNS_STAGING_DEPLOY_REJECTION_REASON = "Rejected audited staging DNS-pair deployment."
 _GITEA_UPGRADE_APPROVAL_REASON = "Approved audited production Gitea 1.27.1 upgrade."
 _GITEA_UPGRADE_REJECTION_REASON = "Rejected audited production Gitea 1.27.1 upgrade."
 _GITEA_RUNNER_APPROVAL_REASON = "Approved audited Gitea runner registration."
@@ -93,12 +98,14 @@ _GITEA_ORG_CI_RUNNER_REJECTION_REASON = (
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: _DNS_STAGING_DEPLOY_APPROVAL_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_APPROVAL_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: _DNS_STAGING_DEPLOY_REJECTION_REASON,
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_REJECTION_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_REJECTION_REASON,
@@ -106,21 +113,24 @@ _PROTECTED_REJECTION_REASON = {
 
 _PROTECTED_CONTRACTS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: staging_contract,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: dns_staging_contract,
     GITEA_PRODUCTION_UPGRADE_1_27_1: gitea_contract,
     GITEA_RUNNER_REGISTER: gitea_runner_contract,
     GITEA_ORG_CI_RUNNER_PROVISION: gitea_org_ci_runner_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
+    NETBOX_STAGING_DEPLOY_DNS_PAIR: "Staging DNS-pair deployment",
     GITEA_PRODUCTION_UPGRADE_1_27_1: "Production Gitea upgrade",
     GITEA_RUNNER_REGISTER: "Gitea runner registration",
     GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
 }
-_GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
+_EXPLICIT_CAPABILITY_PROCEDURE_NAMES = frozenset(
     {
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
     }
 )
 _GITEA_RUNNER_TARGET_POLICIES = {
@@ -279,8 +289,9 @@ def _verify_backend_capability(
     Fetches the selected backend's capability manifest and verifies the
     procedure's handler/version/effect/contract-hash/envelope against it. A
     ``MISMATCH`` (advertised but incompatible) is rejected (400). Legacy
-    procedures retain graceful ``UNKNOWN`` handling; protected Gitea procedures
-    require an explicit compatible manifest at admission and claim.
+    procedures retain graceful ``UNKNOWN`` handling; procedures in the explicit
+    protected-capability registry require a compatible manifest at admission
+    and claim.
     """
     from .. import capabilities
     from ..models import RpcPluginSettings
@@ -289,7 +300,7 @@ def _verify_backend_capability(
     manifest = capabilities.fetch_backend_capabilities(target, use_cache=use_cache)
     status = capabilities.verify_procedure_capability(procedure, manifest)
     requires_explicit_capability = (
-        getattr(procedure, "name", "") in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES
+        getattr(procedure, "name", "") in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES
     )
     if status is capabilities.CapabilityStatus.MISMATCH or (
         requires_explicit_capability
@@ -663,8 +674,11 @@ def _require_staging_rotation_assigned_object(
     procedure: object,
     user: object,
 ) -> None:
-    """Pin token rotation to the existing, viewable nms-front-door device."""
-    if getattr(procedure, "name", "") != NETBOX_STAGING_ROTATE_BACKEND_TOKEN:
+    """Pin protected staging operations to the viewable front-door device."""
+    if getattr(procedure, "name", "") not in {
+        NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        NETBOX_STAGING_DEPLOY_DNS_PAIR,
+    }:
         return
     content_type = validated_data.get("assigned_object_type")
     object_id = validated_data.get("assigned_object_id")
@@ -930,6 +944,37 @@ def _protected_backend_target_sha256(
             "verify_ssl": bool(getattr(target, "verify_ssl", False)),
         }
     )
+
+
+def _require_approved_backend_target_before_io(
+    execution: object,
+    *,
+    backend_target: object,
+) -> None:
+    """Reject mutable backend drift before any authenticated network request."""
+    procedure_name = execution.procedure.name
+    snapshot = getattr(execution, "approval_request", None)
+    expected = str(getattr(snapshot, "backend_target_sha256", "") or "")
+    try:
+        current = _protected_backend_target_sha256(
+            execution.backend_id,
+            procedure_name=procedure_name,
+            backend_target=backend_target,
+        )
+    except drf_serializers.ValidationError as exc:
+        raise RPCExecutionError(
+            f"{_protected_label(procedure_name)} backend binding changed after approval.",
+            code="RPC_APPROVAL_INVALIDATED",
+        ) from exc
+    if (
+        len(expected) != 64
+        or len(current) != 64
+        or not hmac.compare_digest(expected, current)
+    ):
+        raise RPCExecutionError(
+            f"{_protected_label(procedure_name)} backend binding changed after approval.",
+            code="RPC_APPROVAL_INVALIDATED",
+        )
 
 
 def _require_staging_rotation_creation_shape(serializer: object) -> None:
@@ -1407,7 +1452,12 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                     f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
                     code="RPC_BACKEND_BINDING_INVALID",
                 ) from exc
-        if execution.procedure.name in _GITEA_EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
+        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+            _require_approved_backend_target_before_io(
+                execution,
+                backend_target=target,
+            )
+        if execution.procedure.name in _EXPLICIT_CAPABILITY_PROCEDURE_NAMES:
             _verify_backend_capability(
                 execution.procedure,
                 backend_target=target,
@@ -1681,6 +1731,10 @@ def _approve_protected_execution(
             backend_target = _resolve_validated_protected_backend_target(
                 locked.backend_id,
                 locked.procedure.name,
+            )
+            _require_approved_backend_target_before_io(
+                locked,
+                backend_target=backend_target,
             )
             _verify_backend_capability(
                 locked.procedure,

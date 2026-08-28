@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import importlib
 import json
+import signal
 import sys
 import threading
 import time
@@ -935,6 +936,34 @@ def test_runner_backend_total_deadline_interrupts_a_blocked_body_read(
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
+
+
+def test_protected_wall_clock_preserves_an_earlier_outer_alarm(jobs_module) -> None:
+    class OuterDeathPenalty(BaseException):
+        pass
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def raise_outer_death_penalty(_signum, _frame) -> None:
+        raise OuterDeathPenalty
+
+    signal.signal(signal.SIGALRM, raise_outer_death_penalty)
+    signal.setitimer(signal.ITIMER_REAL, 0.05)
+    started = time.monotonic()
+    try:
+        with pytest.raises(OuterDeathPenalty):
+            with jobs_module._protected_backend_wall_clock(
+                deadline=time.monotonic() + 1,
+            ):
+                time.sleep(0.2)
+        assert time.monotonic() - started < 0.5
+        assert signal.getsignal(signal.SIGALRM) is raise_outer_death_penalty
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _execution(params: object):

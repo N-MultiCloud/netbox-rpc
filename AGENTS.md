@@ -212,6 +212,7 @@ The execution aggregate carries an additive **approval-workflow** surface (the
 foundation of the P0 two-person-approval epic #163). Issues #221 and #224
 activate the complete two-person route for
 `service.netbox.staging.rotate_backend_token` and
+`service.netbox.staging.deploy_dns_pair`,
 `service.gitea.production.upgrade_1_27_1`, plus the disabled
 `service.gitea.runner.register` and
 `service.gitea.actions_runner.provision_org_ci_runner`; other legacy
@@ -247,7 +248,9 @@ until they are migrated deliberately.
   to a single deterministic event.
   For each protected procedure, validate the immutable backend target before
   sending authenticated capability traffic and reuse that exact resolved target
-  through snapshot/lease/dispatch. Approval must obtain an uncached compatible
+  through snapshot/lease/dispatch. At approval and worker claim, compare its
+  URL/TLS fingerprint with the immutable request snapshot before capability I/O.
+  Approval must obtain an uncached compatible
   capability while holding the row lock; failure leaves pending state and its
   event stream unchanged and must not enqueue.
 - **Command-only decision API (#165)**: `RPCExecutionViewSet` exposes POST
@@ -532,6 +535,39 @@ procedure never falls back when dispatch-lease keys are absent or invalid.
 `RPC_DISPATCH_LEASE_REQUIRED` is the expected fail-closed result until the root
 deployment provisions coordinated issuer/verifier keys; the backend is not
 called in that state.
+
+### Staging DNS Pair Deployment
+
+`service.netbox.staging.deploy_dns_pair` is the only RPC catalog path for the
+root-owned staging DNS pair helper. Keep it destructive, approval-required,
+transport-pinned to AsyncSSH, and fixed to the existing/viewable
+`nms-front-door` `dcim.device`. The caller supplies exactly one lowercase
+40-hex `commit_sha`; never add provider, PAT, DNS-record, route, credential,
+path, ref, command, stdin, or output fields.
+
+The immutable capability extension binds the exact target/model, normalized
+fingerprint schema, closed result schema, fixed deploy argv prefix, no-fallback
+strict-auth/no-capture transport, dedicated `nms-proxy` principal, reviewed
+self-verifying wrapper/sudoers/runtime generation, 2,640-second absolute route
+budget, 60/90-second handler/process completion margins, and 4,096-byte backend response cap
+under the 2,700-second catalog timeout. Both admission and uncached worker
+claim require `COMPATIBLE`; an absent capability is a hard failure. A distinct
+approver and accept-once signed lease freeze the exact local SSH service and
+credential IDs/revisions, host/port, principal/method, and known-host digest.
+The approval-aware point-of-use resolver must reject any drift.
+The selected backend's URL/TLS fingerprint must also match the immutable
+request snapshot before approval or worker capability traffic sends its bearer.
+
+Only exit 0 proves `deployed=true, stage=complete`. A provable failure before
+remote process creation is `deployed=false, stage=execute`. Once channel
+creation can have been accepted, every nonzero exit, signal, missing status,
+timeout, transport loss, redirect, malformed/oversized/trickled header or body, or
+outer/nested mismatch is `deployed=null, stage=indeterminate`. Responses carry
+no events or diagnostics and must echo the approved commit exactly. Inspect the
+staging transaction/service state before retrying uncertainty. Activate in
+order: reviewed root helper/sudoers, backend handler plus exact capability,
+catalog migration, then an operator-approved execution; never dispatch it
+autonomously.
 
 ### Production Gitea 1.27.1 Upgrade
 

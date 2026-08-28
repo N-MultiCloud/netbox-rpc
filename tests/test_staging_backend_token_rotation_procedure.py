@@ -11,9 +11,10 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import Draft202012Validator, ValidationError, validate
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0068_seed_staging_backend_token_rotation"
+DNS_MIGRATION_MODULE = "netbox_rpc.migrations.0085_seed_dns_staging_deploy"
+DNS_PROCEDURE_ID = "service.netbox.staging.deploy_dns_pair"
 PROCEDURE_ID = "service.netbox.staging.rotate_backend_token"
 PARAM_KEYS: set[str] = set()
 RESULT_KEYS = {"ok", "procedure", "target", "rotated", "stage"}
@@ -26,6 +27,131 @@ def migration(monkeypatch: pytest.MonkeyPatch):
     module = importlib.import_module(MIGRATION_MODULE)
     yield module
     sys.modules.pop(MIGRATION_MODULE, None)
+
+
+@pytest.fixture()
+def dns_migration(monkeypatch: pytest.MonkeyPatch):
+    _install_migration_import_stubs(monkeypatch)
+    sys.modules.pop(DNS_MIGRATION_MODULE, None)
+    module = importlib.import_module(DNS_MIGRATION_MODULE)
+    yield module
+    sys.modules.pop(DNS_MIGRATION_MODULE, None)
+
+
+def test_dns_staging_deploy_policy_migration_matches_runtime_contract(
+    dns_migration,
+) -> None:
+    defaults = dns_migration._PROCEDURE_DEFAULTS
+    runtime = runpy.run_path(str(ROOT / "netbox_rpc/dns_staging_deploy_contract.py"))
+
+    assert defaults == {
+        "handler_id": DNS_PROCEDURE_ID,
+        "version": 1,
+        "enabled": True,
+        "target_models": ["dcim.device"],
+        "effect": "destructive",
+        "timeout_seconds": 2700,
+        "approval_required": True,
+        "params_schema": runtime["PARAMS_SCHEMA"],
+        "result_schema": runtime["RESULT_SCHEMA"],
+        "transport_driver": "asyncssh",
+        "transport_driver_chain": [],
+        "transport_pinned": True,
+        "output_parser": "none",
+        "output_schema": {},
+        "description": defaults["description"],
+    }
+    assert runtime["COMMAND_CONTRACT"] == [
+        {"sequence": 1, **dns_migration._REPRESENTATIVE_COMMAND}
+    ]
+    assert (
+        runtime["PROCEDURE_POLICY"]["semantic_contract_sha256"]
+        == runtime["SEMANTIC_CAPABILITY_SHA256"]
+    )
+    assert (
+        runtime["SEMANTIC_CAPABILITY_SHA256"]
+        == "ec137f258aab79cf992ea95b98dbcf93054e9431a57755cad5fd67529a6e013c"
+    )
+    assert (
+        runtime["COMMAND_CONTRACT_SHA256"]
+        == "d3a41e414f0e839cc8ae52e5a5064fd2c1816fb4da1f26916ef134e21f042836"
+    )
+    assert (
+        runtime["PROCESS_TIMEOUT_SECONDS"]
+        < runtime["HANDLER_BUDGET_SECONDS"]
+        < runtime["ROUTE_BUDGET_SECONDS"]
+        < defaults["timeout_seconds"]
+    )
+
+
+def test_dns_staging_deploy_accepts_only_one_exact_lowercase_commit(
+    dns_migration,
+) -> None:
+    schema = dns_migration._PARAMS_SCHEMA
+    validate({"commit_sha": "a" * 40}, schema)
+
+    for invalid in (
+        {},
+        {"commit_sha": "a" * 39},
+        {"commit_sha": "A" * 40},
+        {"commit_sha": "a" * 40 + "\n"},
+        {"commit_sha": "a" * 40, "rpc_ssh_host": "attacker.invalid"},
+        {"commit_sha": "a" * 40, "provider": "godaddy"},
+        {"commit_sha": "a" * 40, "token": "must-not-enter-rpc"},
+    ):
+        with pytest.raises(ValidationError):
+            validate(invalid, schema)
+
+
+def test_dns_staging_deploy_result_has_only_three_closed_states(
+    dns_migration,
+) -> None:
+    schema = dns_migration._RESULT_SCHEMA
+    base = {
+        "procedure": DNS_PROCEDURE_ID,
+        "target": "nms-front-door",
+        "commit_sha": "a" * 40,
+    }
+    for state in (
+        {**base, "ok": True, "deployed": True, "stage": "complete"},
+        {**base, "ok": False, "deployed": False, "stage": "execute"},
+        {**base, "ok": False, "deployed": None, "stage": "indeterminate"},
+    ):
+        validate(state, schema)
+    for invalid in (
+        {**base, "ok": False, "deployed": False, "stage": "complete"},
+        {**base, "ok": False, "deployed": True, "stage": "complete"},
+        {**base, "ok": False, "deployed": None, "stage": "execute"},
+        {**base, "ok": True, "deployed": True, "stage": "complete", "output": "x"},
+    ):
+        with pytest.raises(ValidationError):
+            validate(invalid, schema)
+
+
+def test_dns_staging_deploy_seed_refuses_adoption_and_is_irreversible(
+    dns_migration,
+) -> None:
+    procedures = _FakeProcedureManager()
+    commands = _FakeCommandManager()
+    procedures.commands = commands
+    _FakeRPCProcedure.objects = procedures
+    _FakeRPCProcedureCommand.objects = commands
+    apps = _fake_apps()
+
+    dns_migration.seed_dns_staging_deploy(apps, None)
+    with pytest.raises(RuntimeError):
+        dns_migration.seed_dns_staging_deploy(apps, None)
+    with pytest.raises(
+        dns_migration.IrreversibleError,
+        match="intentionally irreversible",
+    ):
+        dns_migration.unseed_dns_staging_deploy(apps, None)
+
+    assert procedures.rows[DNS_PROCEDURE_ID]["transport_pinned"] is True
+    assert commands.rows[(DNS_PROCEDURE_ID, 1)]["argv"] == [
+        "backend-orchestrated",
+        "netbox-staging-deploy-dns-pair",
+    ]
 
 
 def test_staging_rotation_policy_and_schema_contract(migration) -> None:
@@ -328,6 +454,9 @@ class _FakeProcedureQuerySet:
             return None
         return _FakeProcedureRow(self.manager, self.name)
 
+    def exists(self) -> bool:
+        return self.name in self.manager.rows
+
     def update(self, **fields: object) -> int:
         """Table-level update: never walks relations, never touches commands."""
 
@@ -376,6 +505,12 @@ class _FakeProcedureManager:
         self.rows[name] = dict(defaults)
         return SimpleNamespace(name=name, **defaults), created
 
+    def create(self, *, name: str, **defaults: object):
+        if name in self.rows:
+            raise AssertionError("duplicate fake procedure")
+        self.rows[name] = dict(defaults)
+        return SimpleNamespace(name=name, **defaults)
+
     def filter(self, *, name: str) -> _FakeProcedureQuerySet:
         return _FakeProcedureQuerySet(self, name)
 
@@ -395,6 +530,13 @@ class _FakeCommandManager:
         created = key not in self.rows
         self.rows[key] = dict(defaults)
         return SimpleNamespace(procedure=procedure, sequence=sequence), created
+
+    def create(self, *, procedure, sequence: int, **defaults: object):
+        key = (procedure.name, sequence)
+        if key in self.rows:
+            raise AssertionError("duplicate fake command")
+        self.rows[key] = dict(defaults)
+        return SimpleNamespace(procedure=procedure, sequence=sequence, **defaults)
 
 
 class _FakeRPCProcedureCommand:
@@ -422,6 +564,10 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     django_db_models_deletion = types.ModuleType("django.db.models.deletion")
     django_db_models_deletion.ProtectedError = type("ProtectedError", (Exception,), {})
     django_migrations = types.ModuleType("django.db.migrations")
+    django_migration_exceptions = types.ModuleType("django.db.migrations.exceptions")
+    django_migration_exceptions.IrreversibleError = type(
+        "IrreversibleError", (RuntimeError,), {}
+    )
     django_migrations.Migration = type("Migration", (), {})
     django_migrations.RunPython = lambda *args, **kwargs: (args, kwargs)
     django_db.migrations = django_migrations
@@ -439,3 +585,8 @@ def _install_migration_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         django_db_models_deletion,
     )
     monkeypatch.setitem(sys.modules, "django.db.migrations", django_migrations)
+    monkeypatch.setitem(
+        sys.modules,
+        "django.db.migrations.exceptions",
+        django_migration_exceptions,
+    )

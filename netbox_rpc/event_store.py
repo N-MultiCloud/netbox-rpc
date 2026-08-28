@@ -14,6 +14,7 @@ from django.utils import timezone
 from .constants import (
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NMS_SECRET_REFERENCE_RE,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
@@ -516,6 +517,7 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         getattr(getattr(execution, "procedure", None), "name", "") or ""
     )
     is_staging_rotation = procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
+    is_dns_staging_deploy = procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR
     is_protected_procedure = procedure_name in PROTECTED_APPROVAL_PROCEDURE_NAMES
     is_gitea_upgrade = procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1
     # Protected procedures and the InfluxDB installers carry a closed oneOf
@@ -567,6 +569,19 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         schema_mismatch = _gitea_backend_response_mismatch(response, raw_result)
     elif is_staging_rotation:
         schema_mismatch = _staging_backend_response_mismatch(response, raw_result)
+    elif is_dns_staging_deploy:
+        schema_mismatch = _protected_backend_response_mismatch(response, raw_result)
+        expected_commit = (
+            execution.params.get("commit_sha")
+            if isinstance(execution.params, dict)
+            else None
+        )
+        if (
+            not schema_mismatch
+            and isinstance(raw_result, dict)
+            and raw_result.get("commit_sha") != expected_commit
+        ):
+            schema_mismatch = "Backend result schema mismatch at commit_sha."
     elif requires_envelope_state_match:
         schema_mismatch = _envelope_ok_state_mismatch(response, raw_result)
     if should_validate_result and not schema_mismatch:

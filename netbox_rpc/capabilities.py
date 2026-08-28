@@ -47,6 +47,7 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.production.upgrade_1_27_1",
         "service.gitea.runner.register",
         "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.netbox.staging.deploy_dns_pair",
     }
 )
 
@@ -131,6 +132,9 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_upgrade_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as upgrade_contract,
         )
+        from .dns_staging_deploy_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as dns_staging_contract,
+        )
 
         payload["semantic_contract"] = {
             "service.gitea.production.upgrade_1_27_1": upgrade_contract,
@@ -138,6 +142,7 @@ def derive_command_contract_hash(procedure: Any) -> str:
             "service.gitea.actions_runner.provision_org_ci_runner": (
                 org_ci_runner_contract
             ),
+            "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
         }[payload["handler_id"]]
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
