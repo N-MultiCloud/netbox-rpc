@@ -1435,6 +1435,51 @@ scopes `ssh_credential_override` choices with
 `DeviceCredential.objects.restrict(user, "view")` and falls back to an empty
 queryset if no request context is available.
 
+## Package release evidence
+
+`.gitea/workflows/publish-pypi.yml` is deliberately inert: it has no event,
+permission, job, runner, action, command, or secret reference. Gitea 1.26.2
+selects manual-dispatch workflow bytes from the caller-selected ref before any
+job guard runs, and repository or owner secrets are attached to a matching task
+before workflow-local source checks. A secret-bearing application-repository
+publisher therefore has no enforceable canonical-main boundary.
+
+Do not add a trigger, job, package credential, or publisher runner to this
+repository. Publication remains disabled until the locked automation-control
+repository owns a server-side, pre-assignment binding for the exact source
+repository/ref/SHA, workflow identity, actor/attempt, and positive
+repository-scoped runner ID. The control must keep the credential outside every
+caller-selected application task.
+
+`.gitea/scripts/release_artifacts.py` is the controller-facing build-evidence
+helper. It describes exactly one pure-Python wheel and one sdist with their
+names, sizes, SHA-256 values, and exact source commit in canonical schema-1
+`release-manifest.json`, then verifies local and registry copies byte-for-byte.
+
+The helper's Python package upload is resumable without `--skip-existing`: an
+existing file is accepted only when the full documented Gitea PackageFile row,
+projected name/size/SHA-256 evidence, and downloaded bytes match, and only
+missing files are requested. A future trusted controller must link and verify
+both Python artifacts before publishing the manifest last as the sole file in
+`netbox-rpc-release-manifest/<version>`.
+
+NMS deployment proof contract v3 treats that package as exact registry-bound
+build evidence. It verifies current Gitea association, inventory, canonical
+manifest bytes, and downloaded artifact bytes. It is not a cryptographic origin
+signature: owner-level package writers and Gitea registry administration remain
+trusted, and repository/package linking is mutable. It also does not assert
+that a production deployment succeeded or is healthy.
+
+Do not create evidence after the fact for an already-consumed version. A
+release that predates this contract must be superseded by a new append-only
+post release carrying evidence produced in the same build.
+
+The future controller's publication environment must be an isolated task-scoped
+virtual environment. Its complete CPython 3.12 / x86_64 manylinux wheel closure is hash-locked in
+`.gitea/release-tools.lock` from the reviewed direct inputs in
+`.gitea/release-tools.in`; package builds run with `--no-isolation` so a second
+unreviewed build-backend resolution cannot bypass that lock.
+
 ## Testing
 
 The suite is two tiers (see `docs/architecture.md` → Testing):

@@ -126,12 +126,55 @@ bounded end-to-end route deadlines.
 
 ## Package Publishing (Gitea Package Registry)
 
-`.gitea/workflows/publish-pypi.yml` builds sdist+wheel and publishes to the
-internal registry (`git.nmulti.cloud/api/packages/N-MultiCloud/pypi`) on
-`v*` tag push, or via `workflow_dispatch` with a `version` input (used when a
-tag predates the workflow). Registry-only: production deploys stay with
-`deploy-production.yml`. Verify a published version with `nms git packages`
-and confirm the wheel contains `templates/netbox_rpc/*.html` (package-data).
+`.gitea/workflows/publish-pypi.yml` is intentionally inert: no trigger,
+permission, job, runner, action, command, or secret is permitted. Gitea 1.26.2
+chooses caller-ref workflow bytes before an in-workflow ref guard and delivers
+repository/owner secrets when a matching task is assigned. Do not provision a
+package secret or restore application-repository publication until the locked
+automation-control repository enforces the exact source/ref/SHA, workflow,
+actor/attempt, and positive repository-scoped runner ID server-side before
+assignment, with package credentials unavailable to caller-selected tasks.
+
+`.gitea/scripts/release_artifacts.py` remains the future trusted controller's
+registry-only build and evidence helper; production deploys remain in
+`deploy-production.yml`.
+
+The helper creates canonical schema-1 `release-manifest.json` evidence with
+the exact source SHA plus the name, size, and SHA-256 of exactly one
+`py3-none-any` wheel and one sdist. Publication is resumable: every existing
+PyPI PackageFile row must match the documented seven-field Gitea schema and its
+projected local evidence, only genuinely missing artifacts are requested, the
+linked package and downloaded bytes are reverified, and the manifest is
+published last as
+`netbox-rpc-release-manifest/<version>/release-manifest.json`. A conflict is
+accepted only when the existing generic file is byte-identical and linked to
+`N-MultiCloud/netbox-rpc`. NMS proof contract v3 treats this as exact
+registry-bound build evidence under the owner package-writer and Gitea
+administrator trust boundary. Repository/package association remains mutable;
+the manifest is not a cryptographic origin signature, a deployment-success
+attestation, or runtime-health proof.
+
+Never synthesize or backfill this evidence for a package built before the
+contract existed. Version `0.1.8` is already consumed without it, so the first
+eligible corrected artifact must use an append-only post release after the
+trusted controller exists. Verify a published version with `nms git packages`,
+confirm both the PyPI and generic packages are repository-linked, and confirm
+the wheel contains `templates/netbox_rpc/*.html` (package-data).
+
+Release tooling is isolated under `RUNNER_TEMP` and installed wheel-only with
+`--require-hashes --no-deps` from `.gitea/release-tools.lock`; the build then
+uses `--no-isolation`, so it cannot resolve a second unreviewed build backend.
+`.gitea/release-tools.in` is the three-entry direct input. Regenerate the full
+CPython 3.12 / x86_64 manylinux closure deliberately with uv 0.12.5 and review
+every version/hash change:
+
+```bash
+uv pip compile .gitea/release-tools.in --python-version 3.12 \
+  --python-platform x86_64-manylinux_2_34 --no-config --no-cache \
+  --no-sources --index-strategy first-index \
+  --default-index https://pypi.org/simple --generate-hashes \
+  --output-file .gitea/release-tools.lock
+```
 
 ## Production Deployment (source-aware)
 
@@ -189,8 +232,10 @@ exact `==` version whose sha256 matches the artifact on PyPI:
 past the pinned version — or the gateway bumping its own pins — requires
 regenerating this file, or every `main_branch` deploy fails closed.
 
-The `latest_package` path does **not** read this lock; it is separately blocked
-on the deploy attestation ("completion") package (issue #258).
+The `latest_package` path does **not** read this lock. Under NMS deployment
+proof contract v3 it instead requires the repository-linked generic release
+manifest described above (with the older completion-package contract retained
+only as a legacy compatibility path).
 
 **Embedded deployment manifest (required for every path).** The gateway then
 reads `netbox_rpc/_nmulticloud_deploy.json` **out of the built wheel**. It

@@ -1902,6 +1902,43 @@ pending approval or distinct-actor check.
 - Tests must use mocks and fixtures only; do not connect to real Linux hosts,
   containers, VMs, or Huawei OLTs.
 
+## Package Release Evidence
+
+- `.gitea/workflows/publish-pypi.yml` stays exactly inert: no trigger,
+  permission, job, runner, action, command, or secret. On Gitea 1.26.2 a
+  caller-selected ref supplies workflow bytes before job guards, and secrets
+  reach a matching task before workflow-local validation. Never provision an
+  application-repository package secret or restore publication here.
+- Publication requires the locked automation-control repository to enforce the
+  exact source repository/ref/SHA, workflow identity, actor/attempt, and
+  positive repository-scoped runner ID server-side before task assignment,
+  while keeping package credentials outside caller-selected tasks.
+- A release is exactly one `netbox_rpc-<version>-py3-none-any.whl` and one
+  `netbox_rpc-<version>.tar.gz`. `.gitea/scripts/release_artifacts.py` hashes
+  those local bytes into canonical schema-1 evidence containing only
+  `artifacts`, `package`, `schema`, `source_sha`, and `version`.
+- Resume a partial upload only by reading the Gitea inventory and accepting
+  existing artifacts whose documented seven-field PackageFile response, exact
+  projected name/size/SHA-256, repository identity, and downloaded bytes match.
+  Never use `--skip-existing`, overwrite a conflict, accept an extra file,
+  follow a redirect, or put a credential in a URL.
+- Link and verify the PyPI package before publishing the sole generic
+  `netbox-rpc-release-manifest/<version>/release-manifest.json` file. Publish
+  the generic evidence last; on a conflict, accept only byte-identical evidence
+  linked to `N-MultiCloud/netbox-rpc`.
+- NMS proof contract v3 treats the manifest as exact registry-bound build
+  evidence under the owner package-writer and Gitea-administrator trust
+  boundary. Repository/package association is mutable; this is not a
+  cryptographic origin signature or proof of successful deployment. Never
+  backfill it for an already-consumed version; publish a new append-only post
+  release through the trusted controller instead.
+- Install release tools only into a task-scoped virtual environment from the
+  complete `.gitea/release-tools.lock` with hashes, wheel-only resolution,
+  `--no-deps`, and no ambient pip/keyring configuration. The only direct inputs
+  are `.gitea/release-tools.in`; review the full regenerated closure. Build with
+  `--no-isolation` after installing its exact `setuptools` row so PEP 517 cannot
+  resolve an unreviewed backend outside the lock.
+
 ## CI / Testing
 
 > **The pure-domain tier is blind to every database constraint.** Seed-migration tests
