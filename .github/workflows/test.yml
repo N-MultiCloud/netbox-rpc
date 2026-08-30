@@ -29,11 +29,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        netbox-version:
-          - v4.5.8
-          - v4.6.5
+        include:
+          - netbox-version: v4.5.8
+            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
+          - netbox-version: v4.6.5
+            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
+          - netbox-version: v4.7.0-beta2
+            netbox-ref: aa1d49d0f5021a28e6efc2d0364b84c5bcec7137
     env:
       NETBOX_VERSION: ${{ matrix.netbox-version }}
+      NETBOX_REF: ${{ matrix.netbox-ref }}
       NETBOX_DB_NAME: netbox
       NETBOX_DB_USER: netbox
       NETBOX_DB_PASSWORD: netbox
@@ -68,7 +73,12 @@ jobs:
           python-version: "3.12"
 
       - name: Check out NetBox
-        run: git clone --depth 1 -b "${NETBOX_VERSION}" https://github.com/netbox-community/netbox.git netbox
+        run: |
+          git init netbox
+          git -C netbox remote add origin https://github.com/netbox-community/netbox.git
+          git -C netbox fetch --depth 1 origin "${NETBOX_REF}"
+          git -C netbox checkout --detach "${NETBOX_REF}"
+          test "$(git -C netbox rev-parse HEAD)" = "${NETBOX_REF}"
 
       - name: Install NetBox + plugin
         run: |

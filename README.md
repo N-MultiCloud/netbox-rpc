@@ -16,12 +16,17 @@ empty `{}` POST body.
 
 ## Compatibility
 
-`netbox-rpc` supports NetBox **4.5.8 through 4.6.x**. The plugin declares
-`min_version = "4.5.8"` and `max_version = "4.6.99"`, covering the Django 5.2
-runtime shipped by NetBox 4.5.x and the Django 6.0 runtime shipped by NetBox
-4.6.x. Its external `extras` migration dependencies are anchored to
+`netbox-rpc` supports NetBox **4.5.8 through 4.7.x**. The plugin declares
+`min_version = "4.5.8"` and `max_version = "4.7.0"`, with `netbox_rpc/release_guard.py` reading NetBox's canonical `release.yaml` so only the reviewed v4.7.0-beta2 identity is admitted on the 4.7 line, covering Django 5.2,
+6.0, and 6.1. The current target is verified against the exact NetBox
+`v4.7.0-beta2` source revision. Its external `extras` migration dependencies are anchored to
 `0134_owner`, the final `extras` migration in NetBox 4.5.8 and an ancestor of
 the 4.6.x migration graph.
+
+`RPCProcedureCommand` carries the complete inherited NetBox metadata schema:
+tags plus custom-field JSON encoding. Migration `0086` adds that missing state
+while retaining `extras.0134_owner` as its dependency, so the repair installs
+throughout the supported NetBox range instead of depending on a 4.7-only leaf.
 
 `netbox-nms` remains optional: fresh installs have no `netbox_nms` migration
 dependency, while deployments that install it retain the guarded runtime
@@ -321,9 +326,9 @@ Operators call named procedures, not arbitrary SSH commands.
 
 ## Compatibility
 
-This release supports NetBox 4.5.8 through 4.6.x, including NetBox 4.6.5.
-The plugin pins `max_version = "4.6.99"` and its migration dependencies target
-NetBox migration anchors that exist in both 4.5.8 and 4.6.x.
+This release supports NetBox 4.5.8 through 4.7.x, including exact
+`v4.7.0-beta2`. The plugin pins `max_version = "4.7.0"`, guards the 4.7 identity, and its migration
+dependencies target NetBox migration anchors that exist throughout the range.
 
 ## Procedure command source of truth
 

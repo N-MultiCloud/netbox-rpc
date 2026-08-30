@@ -1,1 +1,5 @@
-{"migration_count":98,"reviewed_migrations_sha256":"af3e26d5dd47bb2c98b276ee7d19877e2f5d62701123447bc8f8413510972aaf","schema":1}
+{
+  "migration_count": 99,
+  "reviewed_migrations_sha256": "ef525a2f35e8a85a564b3d178b542189e01758a8355cc5878947424c5fcb0231",
+  "schema": 1
+}

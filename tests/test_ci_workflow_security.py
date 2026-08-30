@@ -27,7 +27,7 @@ PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
 CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 LOCK_SHA256 = "e26ad1915e48f6a20916ddb2c72ad3bda27b4c36266d7ec6249939a2fda97842"
 PYTEST_CONFIG_SHA256 = "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
-INTEGRATION_WORKFLOW_SHA256 = "85a25dc1c6fadf45a018bd4b148473b258d4b1eb4807d414c8c45b63af966403"
+INTEGRATION_WORKFLOW_SHA256 = "91b65a7ef8a6176e729f5d156ac2f732ce4f4cef7fc714c6d2b21d03d3be6414"
 STEP_RUN_SHA256 = {
     "Verify preprovisioned toolchain": (
         "8e371c88d91f45cbdce5d25a290abaf45e3ba899effcdfe0ab43c2056150b038"
@@ -253,13 +253,24 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
     assert loaded["on"] == {"workflow_dispatch": ""}
     assert loaded["permissions"] == {"contents": "read"}
     assert set(loaded["jobs"]) == {"integration", "compatibility"}
-    exact_job_guard = (
+    integration_guard = (
         "${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
         "github.ref == 'refs/heads/main' }}"
     )
-    for job in loaded["jobs"].values():
-        assert job["if"] == exact_job_guard
-        assert job["runs-on"] == "mirror-host"
+    # The compatibility leg also accepts an owner dispatch on a candidate
+    # branch, so a reviewed head can produce exact-source evidence before it
+    # merges. It runs on `trusted-exact`, the host executor on the dedicated
+    # credentials-free CI VM; the integration leg stays on `mirror-host`
+    # because it drives a real /opt/netbox deployment.
+    compatibility_guard = (
+        "${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
+        "(github.ref == 'refs/heads/main' || "
+        "github.actor == 'emersonfelipesp') }}"
+    )
+    assert loaded["jobs"]["integration"]["if"] == integration_guard
+    assert loaded["jobs"]["integration"]["runs-on"] == "mirror-host"
+    assert loaded["jobs"]["compatibility"]["if"] == compatibility_guard
+    assert loaded["jobs"]["compatibility"]["runs-on"] == "trusted-exact"
     assert workflow.count(CHECKOUT_ACTION) == 2
     assert workflow.count("ref: ${{ github.sha }}") == 2
     assert workflow.count("persist-credentials: false") == 2

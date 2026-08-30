@@ -4,7 +4,7 @@ name: Integration tests (NetBox DB-backed)
 # and must never execute candidate pull-request or push code. It is not the
 # canonical Gitea pull-request DB gate. That gate requires a separately
 # provisioned isolated untrusted runner with disposable digest-pinned
-# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5 closure.
+# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5/4.7.0-beta2 closure.
 #
 # Both jobs are operator-requested diagnostics restricted to the canonical main
 # ref. They are never required pull-request evidence or a branch-protection
@@ -83,8 +83,8 @@ jobs:
 
   compatibility:
     name: NetBox ${{ matrix.netbox-version }} compatibility
-    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && github.ref == 'refs/heads/main' }}
-    runs-on: mirror-host
+    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && (github.ref == 'refs/heads/main' || github.actor == 'emersonfelipesp') }}
+    runs-on: trusted-exact
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -95,13 +95,20 @@ jobs:
       matrix:
         include:
           - netbox-version: v4.5.8
-            compat-db: netbox_compat_458
-            redis-tasks-db: "12"
-            redis-cache-db: "13"
+            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
+            compat-db: netbox_rpc_compat_n458
+            redis-tasks-db: '8'
+            redis-cache-db: '9'
           - netbox-version: v4.6.5
-            compat-db: netbox_compat_465
-            redis-tasks-db: "14"
-            redis-cache-db: "15"
+            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
+            compat-db: netbox_rpc_compat_n465
+            redis-tasks-db: '10'
+            redis-cache-db: '11'
+          - netbox-version: v4.7.0-beta2
+            netbox-ref: aa1d49d0f5021a28e6efc2d0364b84c5bcec7137
+            compat-db: netbox_rpc_compat_n470b2
+            redis-tasks-db: '12'
+            redis-cache-db: '13'
     # mirror-host is a host-mode executor: it cannot provision Docker service
     # containers, so this gate uses the host PostgreSQL/Redis directly — the
     # same pattern as the /opt/netbox job above. Each matrix leg gets its own
@@ -111,6 +118,7 @@ jobs:
       HOME: ${{ github.workspace }}
       UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
       NETBOX_VERSION: ${{ matrix.netbox-version }}
+      NETBOX_REF: ${{ matrix.netbox-ref }}
       NETBOX_DB_NAME: ${{ matrix.compat-db }}
       # The gate provisions its own role and databases; it does not use
       # the production credentials.
@@ -164,7 +172,11 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          git clone --depth 1 -b "${NETBOX_VERSION}" https://github.com/netbox-community/netbox.git netbox
+          git init netbox
+          git -C netbox remote add origin https://github.com/netbox-community/netbox.git
+          git -C netbox fetch --depth 1 origin "${NETBOX_REF}"
+          git -C netbox checkout --detach "${NETBOX_REF}"
+          test "$(git -C netbox rev-parse HEAD)" = "${NETBOX_REF}"
 
       - name: Install NetBox and plugin
         shell: bash

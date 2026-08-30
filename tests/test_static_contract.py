@@ -138,6 +138,22 @@ def test_driver_fields_migration_is_additive_and_depends_on_previous() -> None:
     assert 'default="none"' in migration
 
 
+def test_command_model_inherits_complete_netbox_metadata_schema() -> None:
+    migration = read(
+        "netbox_rpc/migrations/0086_rpcprocedurecommand_tags_and_custom_fields.py"
+    )
+
+    assert '("netbox_rpc", "0085_seed_dns_staging_deploy")' in migration
+    # Keep the dependency at the supported NetBox 4.5.8 floor. Depending on
+    # NetBox 4.7's current extras leaf would make this additive migration
+    # impossible to install on the older supported releases.
+    assert '("extras", "0134_owner")' in migration
+    assert 'name="tags"' in migration
+    assert "taggit.managers.TaggableManager" in migration
+    assert 'name="custom_field_data"' in migration
+    assert "utilities.json.CustomFieldJSONEncoder" in migration
+
+
 def test_pipeline_exemplar_procedures_are_seeded_by_migration_0031() -> None:
     constants = read("netbox_rpc/constants.py")
     migration = read("netbox_rpc/migrations/0031_seed_pipeline_exemplar_procedures.py")
@@ -1048,18 +1064,24 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
     assert '"sequence": ip.sequence' in models
 
 
-def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
+def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     init = read("netbox_rpc/__init__.py")
     gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.6.99"' in init
+    # The 4.7 line is release-held: NetBox reports the bare version "4.7.0" for
+    # beta2, so the ceiling stays at 4.7.0 and the release guard decides which
+    # 4.7 identity is actually admitted.
+    assert 'max_version = "4.7.0"' in init
+    assert 'approved_netbox_version = "4.7.0"' in init
+    assert 'approved_netbox_designation = "beta2"' in init
+    assert "validate_netbox_release(cls, netbox_version)" in init
     assert "on:\n  workflow_dispatch:" in gitea_workflow
     assert "pull_request:" not in gitea_workflow
     assert "push:" not in gitea_workflow
     assert "Manual, non-gating diagnostics only" in gitea_workflow
     assert "\n  compatibility:\n" in gitea_workflow
     compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
-    assert "runs-on: mirror-host" in compatibility_job
+    assert "runs-on: trusted-exact" in compatibility_job
     assert "fail-fast: false" in compatibility_job
     assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
     # Host-mode manual diagnostic: it provisions per-leg UTF8 databases on host
@@ -1068,10 +1090,16 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
     assert "Provision a UTF8 compatibility database" in compatibility_job
     assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
     assert "v4.5.8" in compatibility_job
+    assert "75e1b86613792458b4d4c8d0cbbfc94df16cfaaf" in compatibility_job
     assert "v4.6.5" in compatibility_job
+    assert "v4.7.0-beta2" in compatibility_job
+    assert "aa1d49d0f5021a28e6efc2d0364b84c5bcec7137" in compatibility_job
+    # An owner dispatch on a candidate branch is also accepted, so a reviewed
+    # head can produce exact-source evidence before it merges.
     assert (
         "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
-        "github.ref == 'refs/heads/main' }}"
+        "(github.ref == 'refs/heads/main' || "
+        "github.actor == 'emersonfelipesp') }}"
     ) in compatibility_job
     assert "soft-skip" not in compatibility_job
 
@@ -1086,10 +1114,10 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    # 7 since #262 added 0082_rpcnetboxpluginallowlist. Raising this number
+    # 8 after the RPCProcedureCommand metadata repair added 0086. Raising this number
     # is meant to be deliberate: the assertion below is what actually
     # matters, and every entry must stay anchored to the 4.5.8 floor.
-    assert len(extras_dependencies) == 7
+    assert len(extras_dependencies) == 8
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (
@@ -1106,11 +1134,11 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_6() -> None:
 
 def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
     # The migration graph uses extras.0134 because it is present in both
-    # NetBox 4.5.8 and 4.6.x. Do not move these anchors back to 4.6-only
+    # NetBox 4.5.8 through 4.7.x. Do not move these anchors back to newer-only
     # migrations unless the declared floor is raised intentionally.
     init = read("netbox_rpc/__init__.py")
     assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.6.99"' in init
+    assert 'max_version = "4.7.0"' in init
 
     migration_paths = (
         "netbox_rpc/migrations/0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",
