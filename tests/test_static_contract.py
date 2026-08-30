@@ -140,10 +140,12 @@ def test_driver_fields_migration_is_additive_and_depends_on_previous() -> None:
 
 def test_command_model_inherits_complete_netbox_metadata_schema() -> None:
     migration = read(
-        "netbox_rpc/migrations/0086_rpcprocedurecommand_tags_and_custom_fields.py"
+        "netbox_rpc/migrations/0088_rpcprocedurecommand_tags_and_custom_fields.py"
     )
 
-    assert '("netbox_rpc", "0085_seed_dns_staging_deploy")' in migration
+    # This migration must sit on the single leaf of the app's own graph, not on
+    # the node it was branched from: two leaves make the graph unloadable.
+    assert '("netbox_rpc", "0087_extend_gitea_org_ci_runner_contract")' in migration
     # Keep the dependency at the supported NetBox 4.5.8 floor. Depending on
     # NetBox 4.7's current extras leaf would make this additive migration
     # impossible to install on the older supported releases.

@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("extras", "0134_owner"),
-        ("netbox_rpc", "0085_seed_dns_staging_deploy"),
+        ("netbox_rpc", "0087_extend_gitea_org_ci_runner_contract"),
     ]
 
     operations = [
