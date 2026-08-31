@@ -1918,6 +1918,19 @@ pending approval or distinct-actor check.
 > `tests/test_influxdb3_debian13_procedures.py::test_seeded_descriptions_fit_the_model_column`,
 > which reads `max_length` out of `models.py`).
 >
+> **A second migration numbered from the same parent stops NetBox from
+> starting.** Django refuses to plan a graph with more than one leaf, and
+> `netbox.service` runs `migrate` as `ExecStartPre`, so the service never comes
+> up — production sat in a restart loop for roughly fifteen hours across 1256
+> failed starts before it was caught. This has now happened twice (#218, #294).
+> Two branches each numbering a migration from the same parent is the ordinary
+> outcome of parallel work, and the conflict only exists once both land, so no
+> single pull request looks wrong. `tests/test_migration_graph_single_leaf.py`
+> computes the graph from the files with `ast` — no Django, no database — and
+> fails the ordinary suite on the merged tree. When it fires, renumber the newer
+> migration onto the current leaf and depend it on that migration; never resolve
+> it by editing an applied migration in place.
+
 > **Never delete through a historical model in a data migration.** `Model.delete()` and
 > `QuerySet.delete()` both run Django's deletion collector, which walks related models —
 > and a related model whose app has no migrations is rendered from the *real* app
