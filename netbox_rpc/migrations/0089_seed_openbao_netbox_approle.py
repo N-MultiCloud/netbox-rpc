@@ -201,11 +201,9 @@ _RESULT = {
 }
 
 _DESCRIPTION = (
-    "Provision the NetBox AppRole on an OpenBao server: ensure the KV v2 "
-    "mount, an ACL policy generated from a fixed template and scoped to that "
-    "mount alone, the approle auth method, and the role; then issue a SecretID "
-    "and write it with the RoleID to the environment file the NetBox service "
-    "reads. Idempotent. Accepts no free-form text and returns no credential."
+    "Provision the NetBox AppRole on OpenBao: KV mount, templated ACL policy, "
+    "approle auth, role, and SecretID written to NetBox env file. Idempotent; "
+    "no free-form text; returns no credential."
 )
 
 _PROCEDURE = {
