@@ -387,6 +387,91 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
     sys.modules.pop("netbox_rpc.domain.normalization", None)
 
 
+def test_provision_approle_normalizer_carries_every_declared_field(jobs_module) -> None:
+    """Acceptance is not delivery: a validated field that is not copied is lost.
+
+    The per-operation allowlist decides only what may be *accepted*. The backend
+    receives an execution id and reads `normalized_params`, so a field that
+    passes validation and is then dropped here is a field the backend silently
+    replaces with its own default — provisioning a different mount, role or
+    prefix than the operator asked for.
+
+    An earlier version of this test searched the normalizer's source for the
+    field names. It passed while every value was being discarded, which is
+    exactly the failure mode a source-shape assertion cannot see.
+    """
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.openbao.1.provision_netbox_approle",
+            handler_id="service.openbao_1.provision_netbox_approle",
+        ),
+        params={
+            "mount": "netbox",
+            "role_name": "netbox",
+            "engine_slug": "prod-core",
+            "path_prefix": "netbox",
+            "ttl_seconds": 3600,
+            "restart_netbox": True,
+            "_timeout_seconds_snapshot": 180,
+        },
+        target_display="bao01",
+        target_model_label="dcim.device",
+        assigned_object_id=871,
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    expected = {
+        "mount": "netbox",
+        "role_name": "netbox",
+        "engine_slug": "prod-core",
+        "path_prefix": "netbox",
+        "ttl_seconds": 3600,
+        "restart_netbox": True,
+    }
+    for key, value in expected.items():
+        assert normalized[key] == value, f"{key} was not carried into normalized_params"
+        assert normalized["command_fingerprint"][key] == value, (
+            f"{key} is missing from the command fingerprint, so two different "
+            "provisioning requests would hash identically"
+        )
+    assert "_timeout_seconds_snapshot" not in normalized
+    assert "rpc_ssh_" not in json.dumps(normalized, sort_keys=True)
+
+
+def test_provision_approle_normalizer_refuses_values_that_reach_a_command(
+    jobs_module,
+) -> None:
+    def execution(**overrides):
+        params = {"mount": "netbox", "role_name": "netbox", "engine_slug": "prod-core"}
+        params.update(overrides)
+        return SimpleNamespace(
+            procedure=SimpleNamespace(
+                name="service.openbao.1.provision_netbox_approle",
+                handler_id="service.openbao_1.provision_netbox_approle",
+            ),
+            params=params,
+            target_display="bao01",
+            target_model_label="dcim.device",
+            assigned_object_id=871,
+        )
+
+    jobs_module.normalize_execution_params(execution())
+
+    for override in (
+        {"role_name": "netbox; id"},
+        {"role_name": "netbox\nid"},
+        {"engine_slug": "PROD"},
+        {"path_prefix": "../etc"},
+        {"ttl_seconds": -1},
+        {"ttl_seconds": True},
+        {"restart_netbox": "yes"},
+        {"mount": "netbox\nid"},
+    ):
+        with pytest.raises(Exception):
+            jobs_module.normalize_execution_params(execution(**override))
+
+
 def test_openbao_normalizer_emits_no_ssh_override(jobs_module) -> None:
     execution = SimpleNamespace(
         procedure=SimpleNamespace(

@@ -1329,6 +1329,42 @@ operator holding `add_rpcprocedure` could hand-create a row pointing at one of
 them. That is an explicit, audited act rather than ambient exposure — but it is
 not impossible.
 
+### `provision_netbox_approle` — the AppRole NetBox authenticates with
+
+Seeded by `0089`, **disabled**, and the only OpenBao procedure not seeded
+enabled. `netbox-openbao` is installed on the estate and inert until an AppRole
+exists for NetBox to authenticate with; creating one otherwise means a human
+running `bao` at a shell with an admin token.
+
+It is one procedure rather than a sequence of `secrets_enable` + `auth_enable`
+because provisioning is idempotent **as a unit** — mount, policy, auth method,
+role, then a SecretID delivered to the environment file NetBox reads. A caller
+driving several approval-gated procedures could stop half way and leave a policy
+with no role, or a role with no credential. Neither existing procedure can write
+a policy at all.
+
+**It writes a policy without reopening the hole `policy_write` was withheld to
+close.** It accepts no policy text. The document is generated in the backend
+from a fixed template whose only variable is `mount`, already bounded by this
+catalogue's mount pattern, so there is no parameter through which arbitrary text
+can reach a policy. The structural guarantee holds: still no seeded procedure
+accepts free-form text. `tests/test_openbao_netbox_approle_procedure.py` asserts
+it directly — every string parameter must carry a `pattern`, because an
+unconstrained string is free-form text whatever it is named.
+
+**The credential never comes back.** `RPCExecution.params` is persisted before
+the backend validates anything and `result` after, so neither the RoleID nor the
+SecretID may appear in either. The result carries the mount, policy, role, the
+SecretID **accessor** — which revokes a SecretID and cannot authenticate with
+one — and the environment file path. `additionalProperties: false` plus a test
+pinning the exact field set is what makes that enforceable rather than a
+convention.
+
+Enable it only once the `service.openbao_1.provision_netbox_approle` handler is
+deployed **and** a scoped provisioning token exists in the backend's
+environment. Minting that token stays a deliberate one-time human act:
+bootstrapping a secret store from inside the system it secures is circular.
+
 ### This plugin is the primary control for connection overrides
 
 OpenBao `params_schema` rows declare **no** `rpc_ssh_*` property and set

@@ -481,6 +481,10 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
         constants.GITEA_ORG_CI_RUNNER_PROVISION,
+        # Mints and rotates the credential NetBox authenticates to OpenBao
+        # with, so it carries the same fail-closed capability check as the
+        # other credential-bearing procedures.
+        constants.OPENBAO_1_PROVISION_NETBOX_APPROLE,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows

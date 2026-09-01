@@ -335,6 +335,14 @@ AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES = frozenset(
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
     }
 )
+#: Mints and rotates the credential NetBox authenticates to OpenBao with, so
+#: it sits in the protected paths alongside the other credential-bearing
+#: procedures: a distinct approver, an immutable snapshot, a fail-closed
+#: capability check, and a one-time signed dispatch lease. Without the lease,
+#: replaying a backend execution id mints another credential with no new
+#: approval decision.
+OPENBAO_1_PROVISION_NETBOX_APPROLE = "service.openbao.1.provision_netbox_approle"
+
 EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
     AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
     | {
@@ -342,6 +350,7 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        OPENBAO_1_PROVISION_NETBOX_APPROLE,
     }
 )
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
@@ -352,6 +361,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+        OPENBAO_1_PROVISION_NETBOX_APPROLE,
     }
 )
 
@@ -383,6 +393,7 @@ OPENBAO_1_PROCEDURE_NAMES = frozenset(
         "service.openbao.1.raft_list_peers",
         "service.openbao.1.raft_autopilot_state",
         "service.openbao.1.snapshots_list",
+        OPENBAO_1_PROVISION_NETBOX_APPROLE,
         "service.openbao.1.auth_enable",
         "service.openbao.1.secrets_enable",
         "service.openbao.1.audit_enable",

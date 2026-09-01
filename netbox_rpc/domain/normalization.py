@@ -582,6 +582,10 @@ _OPENBAO_MOUNT_PATH_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})*/?$"
 )
+#: Role, engine slug and credential prefix are single path segments that reach a
+#: remote command, so they are narrower than the mount pattern.
+_OPENBAO_APPROLE_SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
+_OPENBAO_ENGINE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 _OPENBAO_FORBIDDEN_SSH_OVERRIDE_PARAMS = frozenset(
     {
         "rpc_ssh_credential_pk",
@@ -1608,6 +1612,19 @@ def _normalize_openbao_1_execution(
         "auth_disable": frozenset({"mount_path"}),
         "secrets_disable": frozenset({"mount_path"}),
         "audit_disable": frozenset({"mount_path"}),
+        # Every field is a bounded identifier; there is deliberately no
+        # policy parameter, which is what keeps this operation from
+        # reopening the free-form-text path policy_write is withheld to close.
+        "provision_netbox_approle": frozenset(
+            {
+                "mount",
+                "role_name",
+                "engine_slug",
+                "path_prefix",
+                "ttl_seconds",
+                "restart_netbox",
+            }
+        ),
     }
     allowed = allowed_by_operation.get(operation)
     if allowed is None:
@@ -1765,6 +1782,51 @@ def _normalize_openbao_1_execution(
         peer_id = required_string("peer_id", _OPENBAO_NAME_RE)
         normalized["peer_id"] = peer_id
         normalized["command_fingerprint"]["peer_id"] = peer_id
+
+    if operation == "provision_netbox_approle":
+        # Every declared field is copied through. The allowlist above only
+        # decides what may be *accepted*; the backend receives an execution id
+        # and reads `normalized_params`, so a field validated and then dropped
+        # here is a field the backend silently replaces with its own default.
+        mount = required_string("mount", _OPENBAO_MOUNT_PATH_RE).rstrip("/")
+        role_name = required_string("role_name", _OPENBAO_APPROLE_SEGMENT_RE)
+        engine_slug = required_string("engine_slug", _OPENBAO_ENGINE_SLUG_RE)
+        normalized["mount"] = mount
+        normalized["role_name"] = role_name
+        normalized["engine_slug"] = engine_slug
+        normalized["command_fingerprint"]["mount"] = mount
+        normalized["command_fingerprint"]["role_name"] = role_name
+        normalized["command_fingerprint"]["engine_slug"] = engine_slug
+
+        if "path_prefix" in params and params.get("path_prefix") is not None:
+            path_prefix = required_string("path_prefix", _OPENBAO_APPROLE_SEGMENT_RE)
+            normalized["path_prefix"] = path_prefix
+            normalized["command_fingerprint"]["path_prefix"] = path_prefix
+
+        if "ttl_seconds" in params and params.get("ttl_seconds") is not None:
+            ttl_seconds = params.get("ttl_seconds")
+            if (
+                isinstance(ttl_seconds, bool)
+                or not isinstance(ttl_seconds, int)
+                or ttl_seconds < 0
+                or ttl_seconds > 31536000
+            ):
+                raise RPCExecutionError(
+                    "ttl_seconds has an invalid or unsupported value.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["ttl_seconds"] = ttl_seconds
+            normalized["command_fingerprint"]["ttl_seconds"] = ttl_seconds
+
+        if "restart_netbox" in params and params.get("restart_netbox") is not None:
+            restart_netbox = params.get("restart_netbox")
+            if not isinstance(restart_netbox, bool):
+                raise RPCExecutionError(
+                    "restart_netbox must be a boolean.",
+                    code="RPC_PARAM_INVALID",
+                )
+            normalized["restart_netbox"] = restart_netbox
+            normalized["command_fingerprint"]["restart_netbox"] = restart_netbox
 
     return normalized
 
