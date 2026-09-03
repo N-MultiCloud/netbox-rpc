@@ -393,7 +393,7 @@ done; the procedures (with their commands) declare *how*. See
   **before** the model save on the update path (Django never fires `m2m_changed`
   for a through-M2M with extra fields).
 - The supported NetBox range is **4.5.8 through 4.7.x**
-  (`min_version = "4.5.8"`, `max_version = "4.7.99"`), covering Django 5.2,
+  (`min_version = "4.5.8"`, `max_version = "4.7.0"`), covering Django 5.2,
   6.0, and 6.1. The current exact target is official `v4.7.0` GA. External `extras`
   dependencies are intentionally anchored to
   `extras.0134_owner`, the final NetBox 4.5.8 migration and an ancestor in

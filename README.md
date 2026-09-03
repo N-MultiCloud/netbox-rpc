@@ -17,7 +17,7 @@ empty `{}` POST body.
 ## Compatibility
 
 `netbox-rpc` supports NetBox **4.5.8 through 4.7.x**. The plugin declares
-`min_version = "4.5.8"` and `max_version = "4.7.99"`, covering Django 5.2,
+`min_version = "4.5.8"` and `max_version = "4.7.0"`, covering Django 5.2,
 6.0, and 6.1. The current target is verified against the exact NetBox
 `v4.7.0` GA source revision. Its external `extras` migration dependencies are anchored to
 `0134_owner`, the final `extras` migration in NetBox 4.5.8 and an ancestor of
@@ -327,7 +327,7 @@ Operators call named procedures, not arbitrary SSH commands.
 ## Compatibility
 
 This release supports NetBox 4.5.8 through 4.7.x, including official
-`v4.7.0` GA. The plugin pins `max_version = "4.7.99"` and its migration
+`v4.7.0` GA. The plugin pins `max_version = "4.7.0"` and its migration
 dependencies target NetBox migration anchors that exist throughout the range.
 
 ## Procedure command source of truth

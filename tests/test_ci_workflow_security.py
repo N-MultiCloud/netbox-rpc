@@ -26,8 +26,12 @@ LOCK_PATH = ROOT / ".gitea" / "ci-requirements.lock"
 PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
 CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 LOCK_SHA256 = "e26ad1915e48f6a20916ddb2c72ad3bda27b4c36266d7ec6249939a2fda97842"
-PYTEST_CONFIG_SHA256 = "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
-INTEGRATION_WORKFLOW_SHA256 = "45c07ff96cd5d430012d8dc72656f95ea6a42bb805fb6b63cc08a98b3e7855c8"
+PYTEST_CONFIG_SHA256 = (
+    "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
+)
+INTEGRATION_WORKFLOW_SHA256 = (
+    "133da60b10397137fd09729deea602e71cff8f0fab79e73f50205707de5dc126"
+)
 STEP_RUN_SHA256 = {
     "Verify preprovisioned toolchain": (
         "8e371c88d91f45cbdce5d25a290abaf45e3ba899effcdfe0ab43c2056150b038"
@@ -154,15 +158,15 @@ def _assert_ci_contract(workflow: str) -> None:
     for step in steps[1:]:
         assert set(step) == {"name", "shell", "run"}
         assert step["shell"] == "bash"
-        assert hashlib.sha256(step["run"].encode()).hexdigest() == STEP_RUN_SHA256[
-            step["name"]
-        ]
+        assert (
+            hashlib.sha256(step["run"].encode()).hexdigest()
+            == STEP_RUN_SHA256[step["name"]]
+        )
 
     assert 'test "$("$python_bin" --version)" = "Python 3.12.14"' in workflow
     assert (
         'test "$("$uv_bin" --version)" = '
-        '"uv 0.12.5 (x86_64-unknown-linux-gnu)"'
-        in workflow
+        '"uv 0.12.5 (x86_64-unknown-linux-gnu)"' in workflow
     )
     assert workflow.count('python_bin="/usr/local/bin/python3.12"') == 2
     assert workflow.count('uv_bin="/usr/local/bin/uv"') == 2
@@ -173,7 +177,7 @@ def _assert_ci_contract(workflow: str) -> None:
     assert "sys.version_info[:3] != (3, 12, 14)" in workflow
     assert 'platform.machine() != "x86_64"' in workflow
     assert 'libc_name != "glibc"' in workflow
-    assert '< (2, 34)' in workflow
+    assert "< (2, 34)" in workflow
 
     assert "UV_PYTHON_DOWNLOADS: never" in workflow
     assert 'UV_NO_CONFIG: "1"' in workflow
@@ -274,6 +278,9 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
     assert workflow.count(CHECKOUT_ACTION) == 2
     assert workflow.count("ref: ${{ github.sha }}") == 2
     assert workflow.count("persist-credentials: false") == 2
+    assert workflow.count("NETBOX_TAG: ${{ matrix.netbox-tag }}") == 1
+    assert workflow.count("refs/tags/${NETBOX_TAG}:refs/tags/${NETBOX_TAG}") == 1
+    assert workflow.count("${NETBOX_TAG}^{commit}") == 1
     assert "pull_request:" not in workflow
     assert "push:" not in workflow
     assert "fail-closed Gitea gate" not in workflow
@@ -310,7 +317,7 @@ def _parse_lock(lock: str) -> dict[str, tuple[str, str, str]]:
         assert ".tar.gz" not in wheel and ".zip" not in wheel
         assert re.fullmatch(r"[0-9a-f]{64}", digest)
         if not wheel.endswith("-py3-none-any.whl"):
-            assert ("-cp312-" in wheel or "-cp311-abi3-" in wheel)
+            assert "-cp312-" in wheel or "-cp311-abi3-" in wheel
             assert "manylinux" in wheel
             assert "x86_64.whl" in wheel
     return entries
@@ -444,14 +451,11 @@ def test_manual_privileged_integration_rejects_trigger_or_ref_drift(
         ),
         (
             "runs-on: ci-untrusted-python312",
-            "runs-on: ci-untrusted-python312\n"
-            "    permissions:\n"
-            "      contents: write",
+            "runs-on: ci-untrusted-python312\n    permissions:\n      contents: write",
         ),
         (
             "runs-on: ci-untrusted-python312",
-            "runs-on: ci-untrusted-python312\n"
-            "    runs-on: ci-untrusted-python312",
+            "runs-on: ci-untrusted-python312\n    runs-on: ci-untrusted-python312",
         ),
         (
             "runs-on: ci-untrusted-python312",
@@ -545,7 +549,7 @@ def test_pytest_config_rejects_bypass_mutations(
     "replacement",
     (
         '"requests>=999"',
-        '"requests>=2.32; python_version < \'3.12\'"',
+        "\"requests>=2.32; python_version < '3.12'\"",
     ),
 )
 def test_lock_rejects_unsatisfied_direct_specs_or_markers(replacement: str) -> None:

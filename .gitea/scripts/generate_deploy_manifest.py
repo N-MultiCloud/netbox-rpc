@@ -121,38 +121,57 @@ def _content_row(path: Path) -> dict[str, str]:
 
 
 def _validate_reviewed_migrations(
-    migrations: list[dict[str, Any]], policy: object
-) -> None:
+    source_migrations: list[dict[str, str]], policy: object
+) -> list[dict[str, Any]]:
     if not isinstance(policy, dict) or set(policy) != {
         "migration_count",
+        "reviewed_migrations",
         "reviewed_migrations_sha256",
         "schema",
     }:
         raise ManifestError("migration compatibility policy has invalid keys")
     count = policy["migration_count"]
+    reviewed_migrations = policy["reviewed_migrations"]
     digest = policy["reviewed_migrations_sha256"]
     if (
-        policy["schema"] != 1
+        policy["schema"] != 2
         or isinstance(policy["schema"], bool)
         or not isinstance(count, int)
         or isinstance(count, bool)
         or count < 0
+        or not isinstance(reviewed_migrations, dict)
         or not isinstance(digest, str)
         or len(digest) != 64
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise ManifestError("migration compatibility policy is invalid")
-    if any(row.get("rollback_compatible") is not True for row in migrations):
-        raise ManifestError("every reviewed migration must be rollback compatible")
+    source_paths = {row["path"] for row in source_migrations}
+    if set(reviewed_migrations) != source_paths or any(
+        type(value) is not bool for value in reviewed_migrations.values()
+    ):
+        raise ManifestError(
+            "every migration must have an explicit boolean rollback review"
+        )
+    migrations = [
+        {**row, "rollback_compatible": reviewed_migrations[row["path"]]}
+        for row in source_migrations
+    ]
+    if any(row["rollback_compatible"] is not True for row in migrations):
+        raise ManifestError(
+            "every migration must be explicitly reviewed as rollback compatible"
+        )
     actual_digest = hashlib.sha256(_canonical_json(migrations)).hexdigest()
-    if count != len(migrations) or digest != actual_digest:
+    if count != len(source_migrations) or digest != actual_digest:
         raise ManifestError(
             "migration compatibility policy is stale; review every migration and "
             "renew its count and canonical digest deliberately"
         )
+    return migrations
 
 
-def _validate_migration_policy(migrations: list[dict[str, Any]]) -> None:
+def _validate_migration_policy(
+    source_migrations: list[dict[str, str]],
+) -> list[dict[str, Any]]:
     if not MIGRATION_POLICY_PATH.is_file() or MIGRATION_POLICY_PATH.is_symlink():
         raise ManifestError(
             "migration compatibility policy must be a regular non-symlink file"
@@ -163,26 +182,36 @@ def _validate_migration_policy(migrations: list[dict[str, Any]]) -> None:
         raise ManifestError(
             "migration compatibility policy must be valid JSON"
         ) from exc
-    _validate_reviewed_migrations(migrations, policy)
+    return _validate_reviewed_migrations(source_migrations, policy)
 
 
-def _migration_rows() -> list[dict[str, Any]]:
-    migrations: list[dict[str, Any]] = []
+def _migration_source_rows() -> list[dict[str, str]]:
+    migrations: list[dict[str, str]] = []
     for path in _regular_files(MODULE_ROOT / "migrations", "*.py"):
         if path.name == "__init__.py":
             continue
-        migrations.append({**_content_row(path), "rollback_compatible": True})
+        migrations.append(_content_row(path))
     return migrations
 
 
+def _migration_rows() -> list[dict[str, Any]]:
+    return _validate_migration_policy(_migration_source_rows())
+
+
 def migration_policy_candidate() -> dict[str, Any]:
-    migrations = _migration_rows()
+    source_migrations = _migration_source_rows()
+    migrations = [
+        {**row, "rollback_compatible": False} for row in source_migrations
+    ]
     return {
         "migration_count": len(migrations),
+        "reviewed_migrations": {
+            row["path"]: row["rollback_compatible"] for row in migrations
+        },
         "reviewed_migrations_sha256": hashlib.sha256(
             _canonical_json(migrations)
         ).hexdigest(),
-        "schema": 1,
+        "schema": 2,
     }
 
 
@@ -244,7 +273,6 @@ def generate_build_lock() -> dict[str, Any]:
 def generate_manifest() -> dict[str, Any]:
     project = _project()
     migrations = _migration_rows()
-    _validate_migration_policy(migrations)
     static_files = [
         _content_row(path) for path in _regular_files(MODULE_ROOT / "static", "**/*")
     ]

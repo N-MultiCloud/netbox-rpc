@@ -1070,8 +1070,10 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     init = read("netbox_rpc/__init__.py")
     gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.7.99"' in init
-    assert "release_guard" not in init
+    assert 'max_version = "4.7.0"' in init
+    assert "from .release_guard import validate_netbox_release" in init
+    assert 'approved_netbox_version = "4.7.0"' in init
+    assert "approved_netbox_designation = None" in init
     assert "on:\n  workflow_dispatch:" in gitea_workflow
     assert "pull_request:" not in gitea_workflow
     assert "push:" not in gitea_workflow
@@ -1138,7 +1140,7 @@ def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> No
     # migrations unless the declared floor is raised intentionally.
     init = read("netbox_rpc/__init__.py")
     assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.7.99"' in init
+    assert 'max_version = "4.7.0"' in init
 
     migration_paths = (
         "netbox_rpc/migrations/0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",

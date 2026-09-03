@@ -29,7 +29,7 @@ not as a required plugin dependency.
 ## Compatibility
 
 Support NetBox 4.5.8 through 4.7.x (`min_version = "4.5.8"`,
-`max_version = "4.7.99"`), including Django 5.2, 6.0, and 6.1. The current
+`max_version = "4.7.0"`), including Django 5.2, 6.0, and 6.1. The current
 exact target is official `v4.7.0` GA. Keep external
 `extras` migration dependencies anchored to `extras.0134_owner`, the final
 NetBox 4.5.8 migration and an ancestor in 4.6.x. Any adoption of NetBox
@@ -231,21 +231,23 @@ Generate it — never hand-edit it:
 `[tool.setuptools.package-data]`, or the file exists in the repository and is
 silently absent from the wheel.
 
-**The migration attestation is a review gate, not a generated value.** Every
-migration row is declared `rollback_compatible: true`, and
-`DeploymentContent.from_mapping()` rejects any other value — so the manifest can
-only be built by attesting that the whole migration graph is expand-only.
-`.gitea/deploy/migration-compatibility.json` pins the count and a canonical
-digest of those rows; adding a migration makes the manifest generator fail
-with "migration compatibility policy is stale" until a human reviews the new
-migration and renews the file:
+**The migration attestation is a review gate, not a generated value.**
+`.gitea/deploy/migration-compatibility.json` contains an explicit boolean
+rollback review for every migration path. The generator joins those reviewed
+decisions to the current migration content, and `DeploymentContent.from_mapping()`
+rejects any decision other than `true`, so the manifest can only be built after
+the whole migration graph is attested as expand-only. The policy also pins the
+count and a canonical digest of the reviewed rows; adding or changing a
+migration makes the generator fail with "migration compatibility policy is
+stale" until a human reviews the migration and renews the file:
 
 ```bash
 .gitea/scripts/generate_deploy_manifest.py --show-migration-attestation > \
   .gitea/deploy/migration-compatibility.json
 ```
 
-Renew it only after confirming the new migration is additive: no `RemoveField`,
+The candidate intentionally marks every migration `false`; edit each reviewed
+decision to `true` only after confirming the new migration is additive: no `RemoveField`,
 `DeleteModel`, `RenameField`/`RenameModel`, no narrowing `AlterField`, and no
 data-destroying `RunPython`/`RunSQL`. Dropping a stale constraint (as `0034`
 does) and adding a nullable column with a backfill (as `0031` does) are both
