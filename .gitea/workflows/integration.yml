@@ -9,7 +9,7 @@ name: Integration tests (NetBox DB-backed)
 # Both jobs are operator-requested diagnostics restricted to the canonical main
 # ref. They are never required pull-request evidence or a branch-protection
 # gate. Trusted Gitea runner/ref eligibility remains the authority; these
-# candidate-visible checks are defense in depth only.
+# main-only checks are defense in depth only.
 
 on:
   workflow_dispatch:
@@ -83,7 +83,7 @@ jobs:
 
   compatibility:
     name: NetBox ${{ matrix.netbox-version }} compatibility
-    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && (github.ref == 'refs/heads/main' || github.actor == 'emersonfelipesp') }}
+    if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && github.ref == 'refs/heads/main' }}
     runs-on: trusted-exact
     timeout-minutes: 30
     strategy:
@@ -98,25 +98,28 @@ jobs:
             netbox-tag: v4.5.8
             netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
             compat-db: netbox_rpc_compat_n458
-            redis-tasks-db: '8'
-            redis-cache-db: '9'
+            redis-port: '16388'
+            redis-tasks-db: '0'
+            redis-cache-db: '1'
           - netbox-version: v4.6.5
             netbox-tag: v4.6.5
             netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
             compat-db: netbox_rpc_compat_n465
-            redis-tasks-db: '10'
-            redis-cache-db: '11'
+            redis-port: '16389'
+            redis-tasks-db: '0'
+            redis-cache-db: '1'
           - netbox-version: v4.7.0
             netbox-tag: v4.7.0
             netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d
             compat-db: netbox_rpc_compat_n470
-            redis-tasks-db: '12'
-            redis-cache-db: '13'
+            redis-port: '16390'
+            redis-tasks-db: '0'
+            redis-cache-db: '1'
     # mirror-host is a host-mode executor: it cannot provision Docker service
-    # containers, so this gate uses the host PostgreSQL/Redis directly — the
-    # same pattern as the /opt/netbox job above. Each matrix leg gets its own
-    # UTF8 database and dedicated Redis DB indexes that stay clear of the
-    # production (0/1) and staging (2/3) instances.
+    # containers, so this gate uses host PostgreSQL plus a dedicated
+    # authenticated Redis process per matrix leg. Each leg gets its own UTF8
+    # database and Redis port; no production or staging Redis database is
+    # reachable from the compatibility environment.
     env:
       HOME: ${{ github.workspace }}
       UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
@@ -131,7 +134,7 @@ jobs:
       NETBOX_DB_HOST: localhost
       NETBOX_DB_PORT: "5432"
       NETBOX_REDIS_HOST: localhost
-      NETBOX_REDIS_PORT: "6379"
+      NETBOX_REDIS_PORT: ${{ matrix.redis-port }}
       NETBOX_REDIS_DB_TASKS: ${{ matrix.redis-tasks-db }}
       NETBOX_REDIS_DB_CACHE: ${{ matrix.redis-cache-db }}
       NETBOX_SECRET_KEY: gitea-actions-integration-secret-key-0123456789-abcdef
@@ -153,6 +156,32 @@ jobs:
             sudo -n -u postgres psql -d postgres -c "DROP DATABASE IF EXISTS ${db}" || true
             sudo -n -u postgres psql -d postgres -c "CREATE DATABASE ${db} OWNER ${NETBOX_DB_USER} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
           done
+
+      - name: Start isolated authenticated Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v openssl >/dev/null 2>&1 || { echo "openssl unavailable" >&2; exit 1; }
+          command -v redis-server >/dev/null 2>&1 || { echo "redis-server unavailable" >&2; exit 1; }
+          command -v redis-cli >/dev/null 2>&1 || { echo "redis-cli unavailable" >&2; exit 1; }
+          redis_password="$(openssl rand -hex 32)"
+          redis_pidfile="${RUNNER_TEMP}/netbox-rpc-redis-${NETBOX_REDIS_PORT}.pid"
+          redis-server \
+            --bind 127.0.0.1 \
+            --port "${NETBOX_REDIS_PORT}" \
+            --requirepass "${redis_password}" \
+            --save "" \
+            --appendonly no \
+            --daemonize yes \
+            --pidfile "${redis_pidfile}"
+          for attempt in {1..20}; do
+            redis-cli -h 127.0.0.1 -p "${NETBOX_REDIS_PORT}" -a "${redis_password}" ping >/dev/null 2>&1 && break
+            sleep 1
+          done
+          redis-cli -h 127.0.0.1 -p "${NETBOX_REDIS_PORT}" -a "${redis_password}" ping | grep -Fx PONG
+          printf 'NETBOX_REDIS_PASSWORD=%s\n' "${redis_password}" >> "${GITHUB_ENV}"
+          printf 'NETBOX_REDIS_PIDFILE=%s\n' "${redis_pidfile}" >> "${GITHUB_ENV}"
+
       - name: Checkout plugin
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -164,13 +193,20 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          export HOME="${GITHUB_WORKSPACE:-$PWD}"
-          export PATH="$HOME/.local/bin:$PATH"
-          if ! command -v uv >/dev/null 2>&1; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          uv venv --python 3.12 .ci-venv
+          python_bin="/usr/local/bin/python3.12"
+          uv_bin="/usr/local/bin/uv"
+          test -x "${python_bin}"
+          test -x "${uv_bin}"
+          test "$("${python_bin}" --version)" = "Python 3.12.14"
+          test "$("${uv_bin}" --version)" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
+          "${uv_bin}" venv \
+            --python "${python_bin}" \
+            --no-managed-python \
+            --no-python-downloads \
+            --no-project \
+            --no-config \
+            --no-cache \
+            .ci-venv
 
       - name: Check out NetBox
         shell: bash
@@ -188,9 +224,25 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          export PATH="${GITHUB_WORKSPACE}/.local/bin:$PATH"
-          uv pip install --python .ci-venv -r netbox/requirements.txt
-          uv pip install --python .ci-venv -e "./plugin[test]"
+          /usr/local/bin/uv pip install \
+            --python .ci-venv \
+            --require-hashes \
+            --only-binary=:all: \
+            --no-sources \
+            --no-python-downloads \
+            --no-config \
+            --no-cache \
+            --keyring-provider disabled \
+            --index-strategy first-index \
+            --default-index https://pypi.org/simple \
+            --exact \
+            --strict \
+            --requirements "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"
+          /usr/local/bin/uv pip install \
+            --python .ci-venv \
+            --no-deps \
+            --no-build-isolation \
+            -e "./plugin"
 
       - name: Run compatibility checks (fresh database)
         shell: bash
@@ -208,3 +260,15 @@ jobs:
           python netbox/netbox/manage.py check
           python netbox/netbox/manage.py migrate --no-input
           python netbox/netbox/manage.py test netbox_rpc --no-input
+
+      - name: Stop isolated Redis
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${NETBOX_REDIS_PASSWORD:-}" ]; then
+            redis-cli -h 127.0.0.1 -p "${NETBOX_REDIS_PORT}" -a "${NETBOX_REDIS_PASSWORD}" shutdown nosave
+          fi
+          if [ -n "${NETBOX_REDIS_PIDFILE:-}" ] && [ -f "${NETBOX_REDIS_PIDFILE}" ]; then
+            kill "$(cat "${NETBOX_REDIS_PIDFILE}")" 2>/dev/null || true
+          fi

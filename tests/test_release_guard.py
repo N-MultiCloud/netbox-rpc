@@ -25,6 +25,12 @@ class ApprovedConfig:
     approved_netbox_designation = None
 
 
+class StaleBetaConfig(ApprovedConfig):
+    """Configuration double proving stale beta metadata fails closed."""
+
+    approved_netbox_designation = "beta2"
+
+
 def _load_guard(monkeypatch: pytest.MonkeyPatch, release_base: Path):
     core = types.ModuleType("core")
     core_exceptions = types.ModuleType("core.exceptions")
@@ -84,7 +90,15 @@ def test_ga_loader_versions_are_admitted(
 
 @pytest.mark.parametrize(
     "loader_version",
-    ["4.7.0-beta2", "4.7.1", "4.7.0.post1", "4.7-not-a-version"],
+    [
+        "4.7.0-beta1",
+        "4.7.0-beta2",
+        "4.7.0rc1",
+        "4.7.1",
+        "4.7.0.post1",
+        "4.7.dev1",
+        "4.7-not-a-version",
+    ],
 )
 def test_unreviewed_ga_loader_versions_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
@@ -109,6 +123,15 @@ def test_non_ga_canonical_designations_are_rejected(
         validate_release(ApprovedConfig, "4.7.0")
 
 
+def test_stale_configured_designation_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_release(tmp_path)
+    validate_release = _load_guard(monkeypatch, tmp_path)
+    with pytest.raises(IncompatiblePluginError, match="non-GA release designation"):
+        validate_release(StaleBetaConfig, "4.7.0")
+
+
 def test_canonical_ga_without_designation_is_admitted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -122,6 +145,49 @@ def test_local_release_identity_spoofing_is_rejected(
     _write_release(tmp_path, local={"build": "Docker-ci", "designation": "beta2"})
     validate_release = _load_guard(monkeypatch, tmp_path)
     with pytest.raises(IncompatiblePluginError, match="permits only the build key"):
+        validate_release(ApprovedConfig, "4.7.0")
+
+
+@pytest.mark.parametrize(
+    "release_contents",
+    ["version: [unterminated\n", "- not-a-mapping\n"],
+)
+def test_invalid_canonical_metadata_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    release_contents: str,
+) -> None:
+    tmp_path.joinpath("release.yaml").write_text(release_contents, encoding="utf-8")
+    validate_release = _load_guard(monkeypatch, tmp_path)
+    with pytest.raises(IncompatiblePluginError, match="release.yaml"):
+        validate_release(ApprovedConfig, "4.7.0")
+
+
+def test_canonical_version_mismatch_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_release(tmp_path, version="4.7.1")
+    validate_release = _load_guard(monkeypatch, tmp_path)
+    with pytest.raises(IncompatiblePluginError, match="approved only"):
+        validate_release(ApprovedConfig, "4.7.0")
+
+
+def test_unreadable_local_metadata_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_release(tmp_path)
+    validate_release = _load_guard(monkeypatch, tmp_path)
+    original_read_text = Path.read_text
+
+    def failing_read_text(path: Path, *args, **kwargs) -> str:
+        if path == tmp_path / "local/release.yaml":
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    with pytest.raises(
+        IncompatiblePluginError, match="could not verify local/release.yaml"
+    ):
         validate_release(ApprovedConfig, "4.7.0")
 
 

@@ -1094,12 +1094,11 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     assert "v4.7.0" in compatibility_job
     assert "5f06007e4c9bacc93ce17c1e645fc1143d60df3d" in compatibility_job
     assert "beta2" not in compatibility_job
-    # An owner dispatch on a candidate branch is also accepted, so a reviewed
-    # head can produce exact-source evidence before it merges.
+    # Compatibility evidence is restricted to canonical main because the job
+    # executes on a trusted host-mode runner.
     assert (
         "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
-        "(github.ref == 'refs/heads/main' || "
-        "github.actor == 'emersonfelipesp') }}"
+        "github.ref == 'refs/heads/main' }}"
     ) in compatibility_job
     assert "soft-skip" not in compatibility_job
 

@@ -61,6 +61,12 @@ def validate_netbox_release(
         _find_release_base_path,
     )
 
+    if config.approved_netbox_designation is not None:
+        raise IncompatiblePluginError(
+            f"Plugin {config.__module__} has a non-GA release designation "
+            "configured for the NetBox 4.7.0 GA guard."
+        )
+
     release_base_path = Path(_find_release_base_path())
 
     try:

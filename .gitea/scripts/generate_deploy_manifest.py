@@ -200,8 +200,27 @@ def _migration_rows() -> list[dict[str, Any]]:
 
 def migration_policy_candidate() -> dict[str, Any]:
     source_migrations = _migration_source_rows()
+    reviewed_migrations: dict[str, bool] = {}
+    try:
+        existing_policy = json.loads(
+            MIGRATION_POLICY_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        existing_policy = {}
+    if isinstance(existing_policy, dict) and isinstance(
+        existing_policy.get("reviewed_migrations"), dict
+    ):
+        reviewed_migrations = {
+            path: value
+            for path, value in existing_policy["reviewed_migrations"].items()
+            if isinstance(path, str) and type(value) is bool
+        }
     migrations = [
-        {**row, "rollback_compatible": False} for row in source_migrations
+        {
+            **row,
+            "rollback_compatible": reviewed_migrations.get(row["path"], False),
+        }
+        for row in source_migrations
     ]
     return {
         "migration_count": len(migrations),
