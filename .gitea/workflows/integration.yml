@@ -4,7 +4,7 @@ name: Integration tests (NetBox DB-backed)
 # and must never execute candidate pull-request or push code. It is not the
 # canonical Gitea pull-request DB gate. That gate requires a separately
 # provisioned isolated untrusted runner with disposable digest-pinned
-# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5/4.7.0-beta2 closure.
+# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5/4.7.0 GA closure.
 #
 # Both jobs are operator-requested diagnostics restricted to the canonical main
 # ref. They are never required pull-request evidence or a branch-protection
@@ -104,9 +104,9 @@ jobs:
             compat-db: netbox_rpc_compat_n465
             redis-tasks-db: '10'
             redis-cache-db: '11'
-          - netbox-version: v4.7.0-beta2
-            netbox-ref: aa1d49d0f5021a28e6efc2d0364b84c5bcec7137
-            compat-db: netbox_rpc_compat_n470b2
+          - netbox-version: v4.7.0
+            netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d
+            compat-db: netbox_rpc_compat_n470
             redis-tasks-db: '12'
             redis-cache-db: '13'
     # mirror-host is a host-mode executor: it cannot provision Docker service

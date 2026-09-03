@@ -1070,13 +1070,8 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     init = read("netbox_rpc/__init__.py")
     gitea_workflow = read(".gitea/workflows/integration.yml")
     assert 'min_version = "4.5.8"' in init
-    # The 4.7 line is release-held: NetBox reports the bare version "4.7.0" for
-    # beta2, so the ceiling stays at 4.7.0 and the release guard decides which
-    # 4.7 identity is actually admitted.
-    assert 'max_version = "4.7.0"' in init
-    assert 'approved_netbox_version = "4.7.0"' in init
-    assert 'approved_netbox_designation = "beta2"' in init
-    assert "validate_netbox_release(cls, netbox_version)" in init
+    assert 'max_version = "4.7.99"' in init
+    assert "release_guard" not in init
     assert "on:\n  workflow_dispatch:" in gitea_workflow
     assert "pull_request:" not in gitea_workflow
     assert "push:" not in gitea_workflow
@@ -1094,8 +1089,9 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     assert "v4.5.8" in compatibility_job
     assert "75e1b86613792458b4d4c8d0cbbfc94df16cfaaf" in compatibility_job
     assert "v4.6.5" in compatibility_job
-    assert "v4.7.0-beta2" in compatibility_job
-    assert "aa1d49d0f5021a28e6efc2d0364b84c5bcec7137" in compatibility_job
+    assert "v4.7.0" in compatibility_job
+    assert "5f06007e4c9bacc93ce17c1e645fc1143d60df3d" in compatibility_job
+    assert "beta2" not in compatibility_job
     # An owner dispatch on a candidate branch is also accepted, so a reviewed
     # head can produce exact-source evidence before it merges.
     assert (
@@ -1105,6 +1101,8 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     ) in compatibility_job
     assert "soft-skip" not in compatibility_job
 
+
+def test_plugin_migrations_remain_anchored_to_netbox_4_5_8() -> None:
     migrations_dir = ROOT / "netbox_rpc" / "migrations"
     migration_sources = {
         path.name: path.read_text(encoding="utf-8")
@@ -1140,7 +1138,7 @@ def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> No
     # migrations unless the declared floor is raised intentionally.
     init = read("netbox_rpc/__init__.py")
     assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.7.0"' in init
+    assert 'max_version = "4.7.99"' in init
 
     migration_paths = (
         "netbox_rpc/migrations/0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",

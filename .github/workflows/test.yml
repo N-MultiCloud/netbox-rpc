@@ -34,8 +34,8 @@ jobs:
             netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
           - netbox-version: v4.6.5
             netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
-          - netbox-version: v4.7.0-beta2
-            netbox-ref: aa1d49d0f5021a28e6efc2d0364b84c5bcec7137
+          - netbox-version: v4.7.0
+            netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d
     env:
       NETBOX_VERSION: ${{ matrix.netbox-version }}
       NETBOX_REF: ${{ matrix.netbox-ref }}
