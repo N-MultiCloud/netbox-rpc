@@ -28,12 +28,10 @@ not as a required plugin dependency.
 
 ## Compatibility
 
-Support NetBox 4.5.8 through 4.7.x (`min_version = "4.5.8"`,
-`max_version = "4.7.0"`), including Django 5.2, 6.0, and 6.1. The current
-exact target is official `v4.7.0` GA. Keep external
-`extras` migration dependencies anchored to `extras.0134_owner`, the final
-NetBox 4.5.8 migration and an ancestor in 4.6.x. Any adoption of NetBox
-4.6-only APIs must have a 4.5.8 guard or fallback.
+Support the NetBox 4.7.x GA line only (`min_version = "4.7.0"`,
+`max_version = "4.7.99"`). The current exact target is official `v4.7.0`
+GA. Keep historical external `extras` migration anchors so existing
+installations can upgrade onto the 4.7-only line.
 
 ## Transport-driver & output-parser selection
 

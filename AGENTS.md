@@ -392,19 +392,11 @@ done; the procedures (with their commands) declare *how*. See
   ordered `intent_procedures` and the form/serializer reconcile the through rows
   **before** the model save on the update path (Django never fires `m2m_changed`
   for a through-M2M with extra fields).
-- The supported NetBox range is **4.5.8 through 4.7.x**
-  (`min_version = "4.5.8"`, `max_version = "4.7.0"`), covering Django 5.2,
-  6.0, and 6.1. The current exact target is official `v4.7.0` GA. External `extras`
-  dependencies are intentionally anchored to
-  `extras.0134_owner`, the final NetBox 4.5.8 migration and an ancestor in
-  4.6.x. Do not regenerate them against a newer NetBox migration leaf without
-  preserving the 4.5.8 floor.
-- NetBox APIs used by the plugin must exist on 4.5.8. Guard or provide a
-  fallback before adopting a 4.6-only model action, declarative UI/layout, or
-  serializer resolver API.
-- The plugin's real floor is NetBox **4.5.8** (`min_version = "4.5.8"`): the
-  migration graph depends only on NetBox migration anchors present in both
-  NetBox 4.5.8 through 4.7.x.
+- The supported NetBox range is the **4.7.x GA line only**
+  (`min_version = "4.7.0"`, `max_version = "4.7.99"`). The current exact
+  target is official `v4.7.0` GA. Historical `extras` migration anchors are
+  retained for upgrades from existing installations; they do not expand the
+  supported runtime range.
 
 ## LLM Agent Safety Guardrails
 

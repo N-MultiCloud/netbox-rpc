@@ -30,12 +30,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - netbox-version: v4.5.8
-            netbox-tag: v4.5.8
-            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
-          - netbox-version: v4.6.5
-            netbox-tag: v4.6.5
-            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
           - netbox-version: v4.7.0
             netbox-tag: v4.7.0
             netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d

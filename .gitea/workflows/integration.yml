@@ -4,7 +4,7 @@ name: Integration tests (NetBox DB-backed)
 # and must never execute candidate pull-request or push code. It is not the
 # canonical Gitea pull-request DB gate. That gate requires a separately
 # provisioned isolated untrusted runner with disposable digest-pinned
-# PostgreSQL/Redis and an exact hash-locked NetBox 4.5.8/4.6.5/4.7.0 GA closure.
+# PostgreSQL/Redis and an exact hash-locked NetBox 4.7.0 GA closure.
 #
 # Both jobs are operator-requested diagnostics restricted to the canonical main
 # ref. They are never required pull-request evidence or a branch-protection
@@ -94,20 +94,6 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - netbox-version: v4.5.8
-            netbox-tag: v4.5.8
-            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
-            compat-db: netbox_rpc_compat_n458
-            redis-port: '16388'
-            redis-tasks-db: '0'
-            redis-cache-db: '1'
-          - netbox-version: v4.6.5
-            netbox-tag: v4.6.5
-            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
-            compat-db: netbox_rpc_compat_n465
-            redis-port: '16389'
-            redis-tasks-db: '0'
-            redis-cache-db: '1'
           - netbox-version: v4.7.0
             netbox-tag: v4.7.0
             netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d

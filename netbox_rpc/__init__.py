@@ -11,8 +11,8 @@ class NetBoxRPCConfig(PluginConfig):
     base_url = "rpc"
     author = "Emerson Felipe"
     author_email = "emerson.felipe@nmultifibra.com.br"
-    min_version = "4.5.8"
-    max_version = "4.7.0"
+    min_version = "4.7.0"
+    max_version = "4.7.99"
     approved_netbox_version = "4.7.0"
     approved_netbox_designation = None
     required_settings = []

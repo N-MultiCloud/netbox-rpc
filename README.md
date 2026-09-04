@@ -16,23 +16,19 @@ empty `{}` POST body.
 
 ## Compatibility
 
-`netbox-rpc` supports NetBox **4.5.8 through 4.7.x**. The plugin declares
-`min_version = "4.5.8"` and `max_version = "4.7.0"`, covering Django 5.2,
-6.0, and 6.1. The current target is verified against the exact NetBox
-`v4.7.0` GA source revision. Its external `extras` migration dependencies are anchored to
-`0134_owner`, the final `extras` migration in NetBox 4.5.8 and an ancestor of
-the 4.6.x migration graph.
+`netbox-rpc` supports the NetBox **4.7.x GA** line only. The plugin declares
+`min_version = "4.7.0"` and `max_version = "4.7.99"`; the current release is
+verified against the exact NetBox `v4.7.0` GA source revision. Older NetBox
+versions are outside the support contract.
 
 `RPCProcedureCommand` carries the complete inherited NetBox metadata schema:
 tags plus custom-field JSON encoding. Migration `0086` adds that missing state
-while retaining `extras.0134_owner` as its dependency, so the repair installs
-throughout the supported NetBox range instead of depending on a 4.7-only leaf.
+while retaining the historical migration anchor required to upgrade existing
+installations onto the 4.7-only support line.
 
 `netbox-nms` remains optional: fresh installs have no `netbox_nms` migration
 dependency, while deployments that install it retain the guarded runtime
-adapter. The `nms` extra installs `netbox-nms>=0.1.8,<0.2.0`; NMS integration
-on NetBox 4.5.x requires netbox-nms 0.1.8 or newer because that release
-retargeted its migration dependencies to the NetBox 4.5.8-safe migration graph.
+adapter. The `nms` extra installs `netbox-nms>=0.1.9,<0.2.0`.
 
 The procedure catalog is intentionally narrow:
 
@@ -326,9 +322,9 @@ Operators call named procedures, not arbitrary SSH commands.
 
 ## Compatibility
 
-This release supports NetBox 4.5.8 through 4.7.x, including official
-`v4.7.0` GA. The plugin pins `max_version = "4.7.0"` and its migration
-dependencies target NetBox migration anchors that exist throughout the range.
+This release supports the NetBox 4.7.x GA line only, including official
+`v4.7.0` GA. The plugin pins `min_version = "4.7.0"` and
+`max_version = "4.7.99"`.
 
 ## Procedure command source of truth
 
@@ -1541,7 +1537,7 @@ Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, th
 rebuild oracle, the append-only ledger, the command handlers, and the
 command-only REST API. The required canonical Gitea pull-request gate needs an
 externally provisioned isolated untrusted runner, disposable digest-pinned
-PostgreSQL/Redis, and an exact hash-locked NetBox 4.5.8/4.6.5 dependency closure;
+PostgreSQL/Redis, and an exact hash-locked NetBox 4.7.0 GA dependency closure;
 it remains blocked until that trusted platform contract exists. The GitHub
 `.github/workflows/test.yml` matrix is supplementary post-mirror evidence, not
 canonical pre-merge evidence. The privileged Gitea

@@ -1066,11 +1066,11 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
     assert '"sequence": ip.sequence' in models
 
 
-def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
+def test_plugin_and_migrations_support_only_netbox_4_7_ga() -> None:
     init = read("netbox_rpc/__init__.py")
     gitea_workflow = read(".gitea/workflows/integration.yml")
-    assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.7.0"' in init
+    assert 'min_version = "4.7.0"' in init
+    assert 'max_version = "4.7.99"' in init
     assert "from .release_guard import validate_netbox_release" in init
     assert 'approved_netbox_version = "4.7.0"' in init
     assert "approved_netbox_designation = None" in init
@@ -1088,9 +1088,6 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     # PR/push or branch-protection evidence.
     assert "Provision a UTF8 compatibility database" in compatibility_job
     assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
-    assert "v4.5.8" in compatibility_job
-    assert "75e1b86613792458b4d4c8d0cbbfc94df16cfaaf" in compatibility_job
-    assert "v4.6.5" in compatibility_job
     assert "v4.7.0" in compatibility_job
     assert "5f06007e4c9bacc93ce17c1e645fc1143d60df3d" in compatibility_job
     assert "beta2" not in compatibility_job
@@ -1103,7 +1100,7 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     assert "soft-skip" not in compatibility_job
 
 
-def test_plugin_migrations_remain_anchored_to_netbox_4_5_8() -> None:
+def test_plugin_migrations_retain_upgrade_anchors() -> None:
     migrations_dir = ROOT / "netbox_rpc" / "migrations"
     migration_sources = {
         path.name: path.read_text(encoding="utf-8")
@@ -1117,7 +1114,7 @@ def test_plugin_migrations_remain_anchored_to_netbox_4_5_8() -> None:
     ]
     # 8 after the RPCProcedureCommand metadata repair added 0086. Raising this number
     # is meant to be deliberate: the assertion below is what actually
-    # matters, and every entry must stay anchored to the 4.5.8 floor.
+    # matters, and every entry retains the historical upgrade anchor.
     assert len(extras_dependencies) == 8
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
@@ -1128,18 +1125,17 @@ def test_plugin_migrations_remain_anchored_to_netbox_4_5_8() -> None:
         "0044_rpcpluginsettings.py",
         "0082_rpcnetboxpluginallowlist.py",
     ):
-        # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
-        # remains an ancestor of the 4.6 migration graph.
+        # extras.0134_owner is the historical migration anchor retained for
+        # upgrades from installations that predate the 4.7-only support line.
         assert "0134_owner" in migration_sources[name]
 
 
-def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
-    # The migration graph uses extras.0134 because it is present in both
-    # NetBox 4.5.8 through 4.7.x. Do not move these anchors back to newer-only
-    # migrations unless the declared floor is raised intentionally.
+def test_plugin_min_version_matches_upgrade_migration_dependencies() -> None:
+    # The migration graph retains extras.0134 for upgrade continuity even though
+    # new installations are supported only on NetBox 4.7.x GA.
     init = read("netbox_rpc/__init__.py")
-    assert 'min_version = "4.5.8"' in init
-    assert 'max_version = "4.7.0"' in init
+    assert 'min_version = "4.7.0"' in init
+    assert 'max_version = "4.7.99"' in init
 
     migration_paths = (
         "netbox_rpc/migrations/0007_rename_netbox_rpc_assigned_idx_netbox_rpc__assigne_c5b587_idx_and_more.py",
