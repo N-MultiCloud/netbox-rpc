@@ -201,8 +201,6 @@ Seeded by `netbox_rpc/migrations/0039_rpcintent.py` — an additive migration
 DB `CheckConstraint` (normalizing any existing sub-1 rows first, so it is safe on
 populated databases).
 
-Supports NetBox **4.5.8 through 4.6.x**. The migration depends on
-`extras.0134_owner`, the final `extras` migration in NetBox 4.5.8 and an
-ancestor of the 4.6.x migration graph.
-Requires NetBox **4.5.8+** (`min_version = "4.5.8"`): the migration graph depends
-only on NetBox migration anchors present in both NetBox 4.5.8 and 4.6.x.
+Supports the NetBox **4.7.x GA** line only. The migration retains the
+historical `extras.0134_owner` anchor so existing installations can upgrade
+onto the 4.7-only support line.

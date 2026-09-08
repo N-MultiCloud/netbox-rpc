@@ -30,14 +30,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - netbox-version: v4.5.8
-            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
-          - netbox-version: v4.6.5
-            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
-          - netbox-version: v4.7.0-beta2
-            netbox-ref: aa1d49d0f5021a28e6efc2d0364b84c5bcec7137
+          - netbox-version: v4.7.0
+            netbox-tag: v4.7.0
+            netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d
     env:
       NETBOX_VERSION: ${{ matrix.netbox-version }}
+      NETBOX_TAG: ${{ matrix.netbox-tag }}
       NETBOX_REF: ${{ matrix.netbox-ref }}
       NETBOX_DB_NAME: netbox
       NETBOX_DB_USER: netbox
@@ -76,16 +74,22 @@ jobs:
         run: |
           git init netbox
           git -C netbox remote add origin https://github.com/netbox-community/netbox.git
+          git -C netbox fetch --depth 1 origin "refs/tags/${NETBOX_TAG}:refs/tags/${NETBOX_TAG}"
           git -C netbox fetch --depth 1 origin "${NETBOX_REF}"
           git -C netbox checkout --detach "${NETBOX_REF}"
           test "$(git -C netbox rev-parse HEAD)" = "${NETBOX_REF}"
+          test "$(git -C netbox rev-parse "${NETBOX_TAG}^{commit}")" = "${NETBOX_REF}"
 
       - name: Install NetBox + plugin
         run: |
           set -eo pipefail
-          python -m pip install --upgrade pip
-          pip install -r netbox/requirements.txt
-          pip install -e ./plugin
+          python -m pip install \
+            --require-hashes \
+            --only-binary=:all: \
+            --no-cache-dir \
+            --disable-pip-version-check \
+            -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"
+          python -m pip install --no-deps --no-build-isolation -e ./plugin
 
       - name: Run the integration suite
         run: |

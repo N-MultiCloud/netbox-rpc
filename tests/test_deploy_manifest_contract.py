@@ -119,6 +119,32 @@ def test_generated_deploy_contract_is_current() -> None:
     )
 
 
+def test_migration_attestation_candidate_preserves_reviewed_decisions() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(ROOT / ".gitea/scripts/generate_deploy_manifest.py"),
+            "--show-migration-attestation",
+        ],
+        cwd=ROOT,
+        env={
+            "PATH": os.defpath,
+            "PYTHONHASHSEED": "0",
+            "PYTHONNOUSERSITE": "1",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    policy = json.loads(
+        (ROOT / ".gitea/deploy/migration-compatibility.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert json.loads(result.stdout) == policy
+
+
 def test_built_wheel_manifest_covers_exact_migration_and_static_content(
     tmp_path: Path,
 ) -> None:

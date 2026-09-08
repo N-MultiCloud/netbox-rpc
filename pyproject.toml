@@ -17,7 +17,7 @@ dependencies = [
     # so standalone/CI installs have it.
     "PyYAML>=6.0",
     # The release guard compares NetBox versions from the plugin loader against
-    # the canonical release metadata. NetBox already ships it; declared
+    # canonical GA release metadata. NetBox already ships it; declared
     # explicitly so standalone/CI installs have it.
     "packaging",
 ]

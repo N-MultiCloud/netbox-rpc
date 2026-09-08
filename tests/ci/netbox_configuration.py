@@ -29,13 +29,28 @@ DATABASES = {
 
 _REDIS_HOST = os.environ.get("NETBOX_REDIS_HOST", "localhost")
 _REDIS_PORT = int(os.environ.get("NETBOX_REDIS_PORT", "6379"))
-# Matrix legs sharing the host Redis pass distinct DB indexes so parallel
-# runs (and the production/staging instances on 0-3) never collide.
+# Matrix legs use a dedicated authenticated Redis endpoint per run. The
+# database indexes remain distinct for tasks and caching within that endpoint.
 _REDIS_DB_TASKS = int(os.environ.get("NETBOX_REDIS_DB_TASKS", "10"))
 _REDIS_DB_CACHE = int(os.environ.get("NETBOX_REDIS_DB_CACHE", "11"))
+_REDIS_PASSWORD = os.environ.get("NETBOX_REDIS_PASSWORD", "")
 REDIS = {
-    "tasks": {"HOST": _REDIS_HOST, "PORT": _REDIS_PORT, "USERNAME": "", "PASSWORD": "", "DATABASE": _REDIS_DB_TASKS, "SSL": False},
-    "caching": {"HOST": _REDIS_HOST, "PORT": _REDIS_PORT, "USERNAME": "", "PASSWORD": "", "DATABASE": _REDIS_DB_CACHE, "SSL": False},
+    "tasks": {
+        "HOST": _REDIS_HOST,
+        "PORT": _REDIS_PORT,
+        "USERNAME": "",
+        "PASSWORD": _REDIS_PASSWORD,
+        "DATABASE": _REDIS_DB_TASKS,
+        "SSL": False,
+    },
+    "caching": {
+        "HOST": _REDIS_HOST,
+        "PORT": _REDIS_PORT,
+        "USERNAME": "",
+        "PASSWORD": _REDIS_PASSWORD,
+        "DATABASE": _REDIS_DB_CACHE,
+        "SSL": False,
+    },
 }
 
 SECRET_KEY = os.environ.get("NETBOX_SECRET_KEY", "ci-" + "x" * 50)

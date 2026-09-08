@@ -1,4 +1,4 @@
-"""Fail-closed NetBox 4.7 prerelease identity validation."""
+"""Fail-closed NetBox 4.7.0 GA release identity validation."""
 
 from __future__ import annotations
 
@@ -8,23 +8,20 @@ from typing import Protocol
 from packaging.version import InvalidVersion, Version
 
 
-class ReleaseHeldConfig(Protocol):
+class ReleaseApprovedConfig(Protocol):
     """Configuration attributes required by the release guard."""
 
     approved_netbox_version: str
-    approved_netbox_designation: str
+    approved_netbox_designation: str | None
 
 
 def _loader_requires_identity_check(
-    config: type[ReleaseHeldConfig], netbox_version: str
+    config: type[ReleaseApprovedConfig], netbox_version: str
 ) -> bool:
     """Return whether canonical metadata must be checked, failing closed."""
     try:
         candidate = Version(netbox_version)
-        approved_numeric = Version(config.approved_netbox_version)
-        approved_prerelease = Version(
-            f"{config.approved_netbox_version}-{config.approved_netbox_designation}"
-        )
+        approved = Version(config.approved_netbox_version)
     except InvalidVersion as error:
         if not netbox_version.startswith("4.7"):
             return False
@@ -35,28 +32,24 @@ def _loader_requires_identity_check(
             f"4.7 version {netbox_version!r}."
         ) from error
 
-    on_held_numeric_line = candidate.release[:2] == approved_numeric.release[
-        :2
-    ] and not any(candidate.release[2:])
-    if not on_held_numeric_line:
+    if candidate.release[:2] != approved.release[:2]:
         return False
-    if candidate in {approved_numeric, approved_prerelease}:
-        return True
+    if candidate != approved or candidate.is_prerelease or candidate.is_devrelease:
+        from core.exceptions import IncompatiblePluginError
 
-    from core.exceptions import IncompatiblePluginError
-
-    raise IncompatiblePluginError(
-        f"Plugin {config.__module__} is approved only for NetBox "
-        f"{config.approved_netbox_version}-{config.approved_netbox_designation} "
-        f"on the 4.7 line (loader: {netbox_version})."
-    )
+        raise IncompatiblePluginError(
+            f"Plugin {config.__module__} is approved only for NetBox "
+            f"{config.approved_netbox_version} GA on the 4.7 line "
+            f"(loader: {netbox_version})."
+        )
+    return True
 
 
 def validate_netbox_release(
-    config: type[ReleaseHeldConfig],
+    config: type[ReleaseApprovedConfig],
     netbox_version: str,
 ) -> None:
-    """Admit only the reviewed canonical identity on the 4.7.0 line."""
+    """Admit only the reviewed canonical identity for NetBox 4.7.0 GA."""
     if not _loader_requires_identity_check(config, netbox_version):
         return
 
@@ -67,6 +60,12 @@ def validate_netbox_release(
         RELEASE_PATH,
         _find_release_base_path,
     )
+
+    if config.approved_netbox_designation is not None:
+        raise IncompatiblePluginError(
+            f"Plugin {config.__module__} has a non-GA release designation "
+            "configured for the NetBox 4.7.0 GA guard."
+        )
 
     release_base_path = Path(_find_release_base_path())
 
@@ -82,7 +81,7 @@ def validate_netbox_release(
     if type(release_data) is not dict:
         raise IncompatiblePluginError(
             f"Plugin {config.__module__} requires a mapping in {RELEASE_PATH} "
-            "while NetBox 4.7 is release-held."
+            "while NetBox 4.7 is GA-certified."
         )
 
     local_release_path = release_base_path.joinpath(LOCAL_RELEASE_PATH)
@@ -113,22 +112,18 @@ def validate_netbox_release(
         unexpected_labels = ", ".join(sorted(map(str, unexpected_keys)))
         raise IncompatiblePluginError(
             f"Plugin {config.__module__} permits only the build key in "
-            f"{LOCAL_RELEASE_PATH} while NetBox 4.7 is release-held "
+            f"{LOCAL_RELEASE_PATH} while NetBox 4.7 is GA-certified "
             f"(unexpected: {unexpected_labels})."
         )
 
     version = release_data.get("version")
     designation = release_data.get("designation")
-    if (
-        version != config.approved_netbox_version
-        or designation != config.approved_netbox_designation
-    ):
+    if version != config.approved_netbox_version or designation is not None:
         current_release = str(version)
         if designation:
             current_release = f"{current_release}-{designation}"
         raise IncompatiblePluginError(
             f"Plugin {config.__module__} is approved only for NetBox "
-            f"{config.approved_netbox_version}-"
-            f"{config.approved_netbox_designation} on the 4.7 line "
+            f"{config.approved_netbox_version} GA on the 4.7 line "
             f"(canonical: {current_release})."
         )

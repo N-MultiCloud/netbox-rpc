@@ -404,7 +404,7 @@ The suite is two tiers:
    return 405; cancel is an action; the event log is read-only). The required
    canonical Gitea pull-request gate needs an externally provisioned isolated
    untrusted runner, disposable digest-pinned PostgreSQL/Redis, and an exact
-   hash-locked NetBox 4.5.8/4.6.5 dependency closure; it remains blocked until
+   hash-locked NetBox 4.7.0 GA dependency closure; it remains blocked until
    that trusted platform contract exists. The GitHub
    `.github/workflows/test.yml` matrix is supplementary post-mirror evidence,
    not canonical pre-merge evidence. Privileged Gitea `integration.yml` is a
