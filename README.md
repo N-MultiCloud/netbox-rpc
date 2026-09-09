@@ -8,6 +8,9 @@ events. The plugin does not open SSH sessions directly; execution is delegated
 to a backend target that exposes `backend_url`, `get_auth_headers()`, and
 `verify_ssl`.
 
+See [Cross-plugin integrations](docs/cross-plugin-integrations.md) for the
+dispatch, credential-reveal, companion-plugin, and operator-flow contracts.
+
 The in-repo N-MultiCloud procedure catalog remains available as an optional,
 guarded layer. `netbox-nms` is one supported integration: when installed,
 `netbox-rpc` auto-detects `netbox_nms.backend.get_backend()` and preserves the
