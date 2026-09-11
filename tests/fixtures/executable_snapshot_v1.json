@@ -1,0 +1,517 @@
+{
+  "definition_sha256": "bba2411b9728fcf09902f7dd835bf83cdeb46109a567f5305d0974f61bedcc19",
+  "contract_sha256": "cb847cb86efbbb4dc4667f4fe43d66cafa3aba98025069bccb10a2065d51f22f",
+  "snapshot_sha256": "bbef2f9d85dc9632a03459095006b684a25d707b999743a3cf1724a037a57be3",
+  "fingerprint_sha256": "180ab20ec794d36724debeb2dfef61935d6566e88ee9fc825ebc12d94ffd735c",
+  "claims": {
+    "envelope_version": 1,
+    "execution_id": 9001,
+    "stream_version": 3,
+    "nonce": "snapshot-fixture-nonce",
+    "audience": "netbox-rpc-backend",
+    "handler_id": "service.samba_1.config_test.snapshot_v1",
+    "handler_version": 1,
+    "effect": "read",
+    "contract_hash": "cb847cb86efbbb4dc4667f4fe43d66cafa3aba98025069bccb10a2065d51f22f",
+    "target_snapshot_hash": "604ce563e2c1022c42b2b57cf7c5413533fbd3adb2afb7f0baa923686731c896",
+    "params_fingerprint": "180ab20ec794d36724debeb2dfef61935d6566e88ee9fc825ebc12d94ffd735c",
+    "credential_policy": "target-owned-ssh:dcim.device:42",
+    "requested_by_id": 23,
+    "approved_by_id": null,
+    "issued_at": "2026-09-10T12:01:00Z",
+    "expires_at": "2026-09-10T12:01:45Z",
+    "trace_id": "executable-snapshot:9001",
+    "key_id": "snapshot-fixture",
+    "key_version": 1
+  },
+  "known_hosts_entry": "192.0.2.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f",
+  "projection": {
+    "id": 9001,
+    "status": "running",
+    "procedure": {
+      "id": 410,
+      "definition": {
+        "definition_schema_version": 1,
+        "catalog": {
+          "name": "service.samba.1.config_test_snapshot",
+          "handler_id": "service.samba_1.config_test.snapshot_v1",
+          "version": 1,
+          "effect": "read",
+          "approval_required": false,
+          "target_models": [
+            "dcim.device"
+          ],
+          "timeout_seconds": 30,
+          "params_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+          }
+        },
+        "runtime": {
+          "execution_mode": "shell_argv",
+          "runtime_version": 1,
+          "snapshot_schema_version": 1,
+          "transport_driver": "asyncssh",
+          "transport_driver_chain": [
+            "asyncssh"
+          ],
+          "transport_pinned": true,
+          "allow_fallback": false,
+          "strict_auth": true,
+          "credential_channel": "target-owned-local-ssh-v1",
+          "target_address_family": "ipv4",
+          "ssh_port": 22,
+          "ssh_host_key_algorithm": "ssh-ed25519",
+          "credential_reference_providers": [],
+          "output_parser": "none",
+          "output_schema": {},
+          "capture_kinds": [],
+          "stdin": "closed",
+          "output": "discard",
+          "request_timeout_seconds": 30,
+          "command_timeout_seconds": 20,
+          "cleanup_timeout_seconds": 3,
+          "max_output_bytes": 0,
+          "max_response_bytes": 4096,
+          "max_snapshot_bytes": 16384
+        },
+        "commands": [
+          {
+            "sequence": 1,
+            "step_type": "shell_argv",
+            "device_cli_mode": "",
+            "argv": [
+              "/usr/bin/testparm",
+              "-s"
+            ],
+            "render_mode": "literal",
+            "produces_var": "",
+            "capture_kind": "",
+            "capture_expression": "",
+            "condition_param": "",
+            "condition_negate": false,
+            "for_each_param": "",
+            "continue_on_error": false
+          }
+        ],
+        "result_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "procedure",
+            "target",
+            "valid",
+            "exit_code",
+            "stage"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "procedure": {
+              "const": "service.samba.1.config_test_snapshot"
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "valid": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 255
+            },
+            "stage": {
+              "enum": [
+                "complete",
+                "execute",
+                "indeterminate"
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "properties": {
+                "ok": {
+                  "const": true
+                },
+                "valid": {
+                  "const": true
+                },
+                "exit_code": {
+                  "const": 0
+                },
+                "stage": {
+                  "const": "complete"
+                }
+              }
+            },
+            {
+              "properties": {
+                "ok": {
+                  "const": false
+                },
+                "valid": {
+                  "const": false
+                },
+                "exit_code": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 255
+                },
+                "stage": {
+                  "const": "complete"
+                }
+              }
+            },
+            {
+              "properties": {
+                "ok": {
+                  "const": false
+                },
+                "valid": {
+                  "type": "null"
+                },
+                "exit_code": {
+                  "type": "null"
+                },
+                "stage": {
+                  "enum": [
+                    "execute",
+                    "indeterminate"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "enabled": true
+    },
+    "backend": {
+      "id": 7,
+      "audience": "netbox-rpc-backend"
+    },
+    "requested_by_id": 23,
+    "approved_by_id": null,
+    "target": {
+      "object_type": "dcim.device",
+      "object_id": 42,
+      "display": "snapshot-test-device"
+    },
+    "inputs": {},
+    "transport": {
+      "policy": {
+        "execution_mode": "shell_argv",
+        "runtime_version": 1,
+        "snapshot_schema_version": 1,
+        "transport_driver": "asyncssh",
+        "transport_driver_chain": [
+          "asyncssh"
+        ],
+        "transport_pinned": true,
+        "allow_fallback": false,
+        "strict_auth": true,
+        "credential_channel": "target-owned-local-ssh-v1",
+        "target_address_family": "ipv4",
+        "ssh_port": 22,
+        "ssh_host_key_algorithm": "ssh-ed25519",
+        "credential_reference_providers": [],
+        "output_parser": "none",
+        "output_schema": {},
+        "capture_kinds": [],
+        "stdin": "closed",
+        "output": "discard",
+        "request_timeout_seconds": 30,
+        "command_timeout_seconds": 20,
+        "cleanup_timeout_seconds": 3,
+        "max_output_bytes": 0,
+        "max_response_bytes": 4096,
+        "max_snapshot_bytes": 16384
+      },
+      "ssh": {
+        "ssh_service_id": 51,
+        "ssh_service_revision": "2026-09-10T12:00:00.000000Z",
+        "ssh_identity_id": 61,
+        "ssh_identity_revision": "2026-09-10T12:00:00.000000Z",
+        "ssh_storage_backend": "local",
+        "ssh_principal": "snapshot-reader",
+        "ssh_method": "password",
+        "ssh_host": "192.0.2.10",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": "84b1b72ee017d64fdc7bee212000ddf1043bce6778fffde66336d72ab83da811",
+        "ssh_policy_ref": "target-owned-ssh:dcim.device:42"
+      }
+    },
+    "command_snapshot": {
+      "schema_version": 1,
+      "runtime": "shell_argv",
+      "runtime_version": 1,
+      "procedure": {
+        "id": 410,
+        "definition": {
+          "definition_schema_version": 1,
+          "catalog": {
+            "name": "service.samba.1.config_test_snapshot",
+            "handler_id": "service.samba_1.config_test.snapshot_v1",
+            "version": 1,
+            "effect": "read",
+            "approval_required": false,
+            "target_models": [
+              "dcim.device"
+            ],
+            "timeout_seconds": 30,
+            "params_schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {}
+            }
+          },
+          "runtime": {
+            "execution_mode": "shell_argv",
+            "runtime_version": 1,
+            "snapshot_schema_version": 1,
+            "transport_driver": "asyncssh",
+            "transport_driver_chain": [
+              "asyncssh"
+            ],
+            "transport_pinned": true,
+            "allow_fallback": false,
+            "strict_auth": true,
+            "credential_channel": "target-owned-local-ssh-v1",
+            "target_address_family": "ipv4",
+            "ssh_port": 22,
+            "ssh_host_key_algorithm": "ssh-ed25519",
+            "credential_reference_providers": [],
+            "output_parser": "none",
+            "output_schema": {},
+            "capture_kinds": [],
+            "stdin": "closed",
+            "output": "discard",
+            "request_timeout_seconds": 30,
+            "command_timeout_seconds": 20,
+            "cleanup_timeout_seconds": 3,
+            "max_output_bytes": 0,
+            "max_response_bytes": 4096,
+            "max_snapshot_bytes": 16384
+          },
+          "commands": [
+            {
+              "sequence": 1,
+              "step_type": "shell_argv",
+              "device_cli_mode": "",
+              "argv": [
+                "/usr/bin/testparm",
+                "-s"
+              ],
+              "render_mode": "literal",
+              "produces_var": "",
+              "capture_kind": "",
+              "capture_expression": "",
+              "condition_param": "",
+              "condition_negate": false,
+              "for_each_param": "",
+              "continue_on_error": false
+            }
+          ],
+          "result_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "procedure",
+              "target",
+              "valid",
+              "exit_code",
+              "stage"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "procedure": {
+                "const": "service.samba.1.config_test_snapshot"
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "valid": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 255
+              },
+              "stage": {
+                "enum": [
+                  "complete",
+                  "execute",
+                  "indeterminate"
+                ]
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "ok": {
+                    "const": true
+                  },
+                  "valid": {
+                    "const": true
+                  },
+                  "exit_code": {
+                    "const": 0
+                  },
+                  "stage": {
+                    "const": "complete"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "ok": {
+                    "const": false
+                  },
+                  "valid": {
+                    "const": false
+                  },
+                  "exit_code": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 255
+                  },
+                  "stage": {
+                    "const": "complete"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "ok": {
+                    "const": false
+                  },
+                  "valid": {
+                    "type": "null"
+                  },
+                  "exit_code": {
+                    "type": "null"
+                  },
+                  "stage": {
+                    "enum": [
+                      "execute",
+                      "indeterminate"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "backend": {
+        "id": 7,
+        "audience": "netbox-rpc-backend"
+      },
+      "requested_by_id": 23,
+      "approved_by_id": null,
+      "target": {
+        "object_type": "dcim.device",
+        "object_id": 42,
+        "display": "snapshot-test-device"
+      },
+      "inputs": {},
+      "transport": {
+        "policy": {
+          "execution_mode": "shell_argv",
+          "runtime_version": 1,
+          "snapshot_schema_version": 1,
+          "transport_driver": "asyncssh",
+          "transport_driver_chain": [
+            "asyncssh"
+          ],
+          "transport_pinned": true,
+          "allow_fallback": false,
+          "strict_auth": true,
+          "credential_channel": "target-owned-local-ssh-v1",
+          "target_address_family": "ipv4",
+          "ssh_port": 22,
+          "ssh_host_key_algorithm": "ssh-ed25519",
+          "credential_reference_providers": [],
+          "output_parser": "none",
+          "output_schema": {},
+          "capture_kinds": [],
+          "stdin": "closed",
+          "output": "discard",
+          "request_timeout_seconds": 30,
+          "command_timeout_seconds": 20,
+          "cleanup_timeout_seconds": 3,
+          "max_output_bytes": 0,
+          "max_response_bytes": 4096,
+          "max_snapshot_bytes": 16384
+        },
+        "ssh": {
+          "ssh_service_id": 51,
+          "ssh_service_revision": "2026-09-10T12:00:00.000000Z",
+          "ssh_identity_id": 61,
+          "ssh_identity_revision": "2026-09-10T12:00:00.000000Z",
+          "ssh_storage_backend": "local",
+          "ssh_principal": "snapshot-reader",
+          "ssh_method": "password",
+          "ssh_host": "192.0.2.10",
+          "ssh_port": 22,
+          "ssh_known_hosts_sha256": "84b1b72ee017d64fdc7bee212000ddf1043bce6778fffde66336d72ab83da811",
+          "ssh_policy_ref": "target-owned-ssh:dcim.device:42"
+        }
+      },
+      "steps": [
+        {
+          "step_id": "command:520",
+          "command_id": 520,
+          "sequence": 1,
+          "argv": [
+            "/usr/bin/testparm",
+            "-s"
+          ],
+          "timeout_seconds": 20,
+          "max_output_bytes": 0,
+          "captures": []
+        }
+      ]
+    },
+    "command_snapshot_sha256": "bbef2f9d85dc9632a03459095006b684a25d707b999743a3cf1724a037a57be3",
+    "command_fingerprint": {
+      "executable_snapshot_schema_version": 1,
+      "executable_snapshot_sha256": "bbef2f9d85dc9632a03459095006b684a25d707b999743a3cf1724a037a57be3",
+      "executable_definition_sha256": "bba2411b9728fcf09902f7dd835bf83cdeb46109a567f5305d0974f61bedcc19",
+      "target_object_sha256": "604ce563e2c1022c42b2b57cf7c5413533fbd3adb2afb7f0baa923686731c896",
+      "inputs_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "transport_policy_sha256": "deee2d67a4ab93f1a2448a8adab558d62187c317dfef4e7bbd517108760cde13"
+    },
+    "resolved_command_hash": "180ab20ec794d36724debeb2dfef61935d6566e88ee9fc825ebc12d94ffd735c",
+    "stream_version": 4,
+    "dispatch_lease_binding": {
+      "claims_sha256": "498c520371e1e163a48a891a6b5f4e1d4728f004f001a12bd600831f29ea0e19",
+      "issued_stream_version": 4
+    }
+  }
+}
