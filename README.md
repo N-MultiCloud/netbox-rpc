@@ -1,5 +1,13 @@
 # netbox-rpc
 
+Optional providers can use [execution-bound credential references](docs/credential-authority.md)
+to authorize a just-in-time field bundle from an immutable RPC execution and its
+signed dispatch lease. Reference-bearing dispatch remains fail-closed until a
+compatible executor/provider and explicit executor identity are configured.
+Protected requests retain immutable two-person approval. Providers must recheck
+the verified lease expiry after their lock waits and immediately before reveal;
+the authority result is not a lifetime extension or a replay receipt.
+
 Licensed under Apache-2.0 (see `LICENSE`).
 
 `netbox-rpc` is an audited RPC procedure catalog and execution framework for

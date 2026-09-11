@@ -24,10 +24,10 @@ import hashlib
 import json
 import time
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
 # The envelope versions this consumer understands. A manifest advertising an
 # envelope outside this set is treated as an incompatibility (fail closed) when
@@ -69,10 +69,16 @@ class HandlerCapability(BaseModel):
     compatible_contract_hashes: list[str] = Field(default_factory=list, max_length=8)
 
 
+CredentialCapabilityVersions = Annotated[list[Annotated[StrictInt, Field(ge=1, le=255)]], Field(max_length=8)]
+
+
 class BackendCapabilityManifest(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     envelope_version: int = Field(ge=0)
+    credential_reference_versions: CredentialCapabilityVersions = Field(default_factory=list)
+    credential_provider_versions: dict[str, CredentialCapabilityVersions] = Field(default_factory=dict, max_length=8)
+    dispatch_lease_versions: CredentialCapabilityVersions = Field(default_factory=list)
     handlers: list[HandlerCapability] = Field(
         default_factory=list, max_length=_MAX_HANDLERS
     )

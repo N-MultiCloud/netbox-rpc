@@ -122,6 +122,11 @@ class RPCBackend(NetBoxModel):
     verify_ssl = models.BooleanField(default=True)
     auth_header_name = models.CharField(max_length=100, default="Authorization")
     auth_token = models.CharField(max_length=4096, blank=True)
+    executor_identity = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="rpc_executor_backends",
+        help_text="Authenticated service identity permitted to resolve execution credentials.",
+    )
     comments = models.TextField(blank=True)
 
     class Meta:
@@ -787,6 +792,8 @@ class RPCExecution(NetBoxModel):
         max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED
     )
     params = models.JSONField(default=dict, blank=True)
+    credential_references = models.JSONField(default=dict, db_default={}, blank=True)
+    credential_authority = models.JSONField(default=dict, db_default={}, blank=True, editable=False)
     normalized_params = models.JSONField(default=dict, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error_code = models.CharField(max_length=100, blank=True)
@@ -822,6 +829,9 @@ class RPCExecution(NetBoxModel):
         execution params after creation.
         """
 
+        from .credential_authority import validate_immutable_reference_fields
+
+        validate_immutable_reference_fields(self)
         update_fields = kwargs.get("update_fields")
         if self._state.adding or update_fields is None or "params" in update_fields:
             from .openbao_validation import (

@@ -146,6 +146,11 @@ def redact_event_value(
     path: StringLimitPath = (),
 ) -> object:
     if parent_key and _is_sensitive_key(parent_key):
+        from .credential_contract import public_credential_metadata
+
+        public_metadata = public_credential_metadata(value, parent_key)
+        if public_metadata is not None:
+            return public_metadata
         if _is_vaulted_secret_reference(value):
             return value
         return "[REDACTED]"

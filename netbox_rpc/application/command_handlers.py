@@ -84,7 +84,8 @@ _RPC_JOB_TIMEOUT_HEADROOM_SECONDS = 60
 _RPC_JOB_TIMEOUT_FLOOR_SECONDS = 600
 
 _STAGING_ROTATION_CREATE_FIELDS = frozenset(
-    {"procedure_id", "assigned_object_type", "assigned_object_id", "params"}
+    {"procedure_id", "assigned_object_type", "assigned_object_id", "params",
+     "credential_references"}
 )
 _STAGING_ROTATION_APPROVAL_REASON = "Approved audited staging backend token rotation."
 _STAGING_ROTATION_REJECTION_REASON = "Rejected audited staging backend token rotation."
@@ -477,6 +478,10 @@ def create_execution(
 
     timeout_seconds_snapshot = procedure.timeout_seconds
     params[RPCExecution.TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY] = timeout_seconds_snapshot
+    if serializer.validated_data.get("credential_references"):
+        from ..credential_authority import prepare_reference_execution
+
+        prepare_reference_execution(serializer, user, authoritative_backend_id)
 
     # Scan the COMPLETE final object immediately before the atomic insert,
     # after every platform-owned params mutation. RPCExecution.save() repeats
@@ -1018,16 +1023,32 @@ def _require_protected_creation_shape(
     supplied_fields = (
         set(initial_data.keys()) if hasattr(initial_data, "keys") else set()
     )
+    if "credential_references" in supplied_fields:
+        _require_validated_reference_creation_shape(serializer)
     unexpected = sorted(supplied_fields - _STAGING_ROTATION_CREATE_FIELDS)
     if unexpected:
         raise drf_serializers.ValidationError(
             {
                 "non_field_errors": (
                     f"{_protected_label(procedure_name)} accepts only procedure_id, assigned "
-                    "object, and its closed params object; request metadata is forbidden."
+                    "object, its closed params object and validated credential references; "
+                    "other request metadata is forbidden."
                 )
             }
         )
+
+
+def _require_validated_reference_creation_shape(serializer: object) -> None:
+    from ..credential_contract import CredentialContractError, validate_named_references
+
+    try:
+        references = validate_named_references(serializer.initial_data["credential_references"])
+        if references != serializer.validated_data.get("credential_references"):
+            raise CredentialContractError("References were not validated.")
+    except CredentialContractError:
+        raise drf_serializers.ValidationError(
+            {"credential_references": "Invalid named credential references."}
+        ) from None
 
 
 def _require_staging_rotation_procedure_scope(
@@ -1494,6 +1515,28 @@ def _record_gitea_runner_response(
         RPCExecutionAggregate(execution).record_backend_response(response)
 
 
+def _reference_execution_guard(
+    execution: object, stage: str, value: object, *, backend_target: object | None = None,
+) -> None:
+    """Load optional reference authority only for reference-bearing executions."""
+    if not getattr(execution, "credential_references", None):
+        return
+    from .. import credential_authority
+
+    guards = {
+        "backend": credential_authority.require_reference_backend,
+        "dispatch": credential_authority.require_reference_dispatch_ready,
+        "approval": credential_authority.require_reference_approval,
+    }
+    kwargs = {"backend_target": backend_target} if stage == "approval" else {}
+    guards[stage](execution, value, **kwargs)
+
+
+def _requires_signed_dispatch(execution: object) -> bool:
+    return (execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES
+            or bool(getattr(execution, "credential_references", None)))
+
+
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
     # #166: the opt-in is authoritative at the worker claim too — a claim on a
     # disabled integration must fail closed rather than dispatch.
@@ -1545,6 +1588,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
 
     try:
         from .. import jobs
+        _reference_execution_guard(execution, "backend", backend_selector)
 
         try:
             target = resolve_backend(backend_selector)
@@ -1586,7 +1630,9 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                 backend_target=target,
                 use_cache=False,
             )
+        _reference_execution_guard(execution, "dispatch", target)
         normalized = normalize_execution_params(execution)
+        _reference_execution_guard(execution, "approval", normalized, backend_target=target)
         if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
             _require_current_protected_approval(
                 execution,
@@ -1603,7 +1649,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         # key is configured, so dispatch stays ID-only (byte-for-byte as before).
         lease = _issue_dispatch_lease(execution, aggregate, normalized)
         if (
-            execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES
+            _requires_signed_dispatch(execution)
             and lease is None
         ):
             raise RPCExecutionError(
@@ -1711,6 +1757,14 @@ def _current_stream_version(execution: object) -> int:
 def _credential_policy_reference(normalized: dict, execution: object) -> str:
     """A bounded, non-secret reference describing the credential policy in force
     (a DeviceCredential PK reference or the procedure effect) — never a secret."""
+    authority_policy = (normalized or {}).get("credential_policy_ref")
+    if getattr(execution, "credential_references", None):
+        from ..credential_contract import canonical_hash
+
+        expected = "credential-authority:" + canonical_hash(execution.credential_authority)
+        if authority_policy != expected:
+            raise ValueError("Credential policy does not match execution authority.")
+        return expected
     explicit_policy = (normalized or {}).get("ssh_policy_ref")
     if isinstance(explicit_policy, str):
         explicit_policy = explicit_policy.strip()
@@ -1751,6 +1805,7 @@ def _issue_dispatch_lease(
         normalized_params=normalized,
         now=timezone.now(),
         credential_policy=_credential_policy_reference(normalized, execution),
+        trace_id=(getattr(execution, "credential_authority", {}) or {}).get("correlation_id", ""),
     )
     if lease is None:
         return None

@@ -74,6 +74,7 @@ class RPCBackendSerializer(NetBoxModelSerializer):
             "verify_ssl",
             "auth_header_name",
             "auth_token",
+            "executor_identity",
             "comments",
             "tags",
             "custom_fields",
@@ -405,6 +406,8 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "backend_id",
             "status",
             "params",
+            "credential_references",
+            "credential_authority",
             "normalized_params",
             "result",
             "error_code",
@@ -422,6 +425,7 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "last_updated",
         )
         read_only_fields = (
+            "credential_authority",
             "source_intent",
             "requested_by",
             "requested_by_id",
@@ -438,6 +442,14 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
             "finished_at",
         )
         brief_fields = ("id", "url", "display", "procedure", "status")
+
+    def validate_credential_references(self, value: object) -> dict:
+        from ..credential_contract import CredentialContractError, validate_named_references
+
+        try:
+            return validate_named_references(value)
+        except CredentialContractError:
+            raise serializers.ValidationError("Invalid named credential references.") from None
 
     def validate(self, data: dict) -> dict:
         data = super().validate(data)

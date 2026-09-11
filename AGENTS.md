@@ -1,5 +1,37 @@
 # netbox-rpc Agent Notes
 
+## Execution-bound credential authority
+
+Named metadata-only `RPCExecution.credential_references` and the read-only
+`credential_authority` snapshot are immutable after the original insert, with
+ORM and PostgreSQL update guards. Configure an explicit active
+`RPCBackend.executor_identity` before using references. Optional providers must
+call `netbox_rpc.credential_authority.validate_secret_resolution_dispatch` with
+the authenticated executor; initiating actors, target objects and references are
+reloaded from authoritative execution state, never caller user IDs. The shared
+frozen reference types live in `netbox_rpc.credential_contract`. Reference-bearing
+dispatch requires explicit compatible provider capabilities, a signed lease and
+applicable immutable current approval; no legacy credential fallback is allowed.
+Recheck `approve` permission for the exact procedure at reveal, not merely
+global permission plus view access. Reference leases have a shared issuance and
+verification ceiling of 300 seconds; shorter configured lifetimes and ordinary
+non-reference lifetime behavior remain unchanged.
+Protected creation admits only schema-validated references and retains all other
+metadata restrictions. Reuse the worker's validated backend during approval;
+resolver failures must never enter public diagnostics. Only actor rows use
+`FOR NO KEY UPDATE` so audit foreign keys do not deadlock material writers;
+catalog, target, backend and command locks retain full strength. Providers must
+call `check_authorization_permissions` and the query-free
+`check_authorization_lifetime` on the verified result after their lock waits,
+immediately before reading material and after a blocking read before delivery.
+The permission check reloads uncached requester/approver exact procedure scopes
+using ordinary queries only; it must never reverse authority/provider row locks.
+The helper does not consume dispatch nonces or reveal secrets. Providers own
+separate durable reveal receipts and one-version field bundles. Nonempty intent
+step IDs remain unavailable pending the durable intent-run contract. See
+[`docs/credential-authority.md`](docs/credential-authority.md) for the exact API,
+permission, lifetime, recovery, migration and testing requirements.
+
 `netbox-rpc` owns procedure policy and audit state. It must never store or
 accept arbitrary SSH command text from API clients. It can boot and migrate
 without `netbox-nms`; NMS support is an optional auto-detected adapter.

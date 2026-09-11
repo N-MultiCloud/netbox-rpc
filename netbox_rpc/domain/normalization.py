@@ -699,6 +699,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     normalized = _dispatch_normalize_execution_params(execution)
     _apply_driver_pipeline_overrides(execution, normalized)
     _apply_target_object_context(execution, normalized)
+    from ..credential_contract import apply_credential_fingerprint
+
+    apply_credential_fingerprint(execution, normalized)
     return normalized
 
 

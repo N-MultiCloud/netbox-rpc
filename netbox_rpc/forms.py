@@ -111,6 +111,7 @@ class RPCBackendForm(NetBoxModelForm):
             "verify_ssl",
             "auth_header_name",
             "auth_token",
+            "executor_identity",
             "tags",
             "comments",
         )

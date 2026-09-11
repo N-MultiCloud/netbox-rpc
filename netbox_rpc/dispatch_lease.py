@@ -540,6 +540,10 @@ def issue_dispatch_lease(
     except (TypeError, ValueError):
         ttl = DEFAULT_TTL_SECONDS
     ttl = max(1, min(ttl, _MAX_TTL_SECONDS))
+    if getattr(execution, "credential_references", None):
+        from .credential_contract import MAX_REFERENCE_LEASE_SECONDS
+
+        ttl = min(ttl, MAX_REFERENCE_LEASE_SECONDS)
 
     fingerprint_source = (normalized_params or {}).get("command_fingerprint")
     target_hash = ""

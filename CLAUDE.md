@@ -1,5 +1,22 @@
 # netbox-rpc Agent Notes
 
+Named execution credential references and their immutable authority snapshot are
+documented in [docs/credential-authority.md](docs/credential-authority.md).
+`AGENTS.md` is authoritative for the shared reference types, explicit executor
+identity, provider validation helper and fail-closed rollout. This interface
+does not itself reveal material or complete durable intent chaining.
+Reference-bearing leases preserve shorter configured lifetimes and are capped
+at 300 seconds. Protected resolution rechecks the distinct approver's current
+approval permission for the exact procedure.
+Protected public admission accepts validated references without relaxing other
+metadata restrictions. The worker reuses its validated backend, and independent
+resolver failures are value-free. Actor-only non-key row locks allow provider
+audit foreign keys while retaining update/deletion exclusion. Providers recheck
+the result's verified expiry with `check_authorization_lifetime` and uncached
+exact requester/approver scopes with `check_authorization_permissions` after
+lock waits, before material reads and after blocking reads before delivery.
+The permission refresh deliberately acquires no new authority row locks.
+
 `AGENTS.md` is the agent-facing source for this repository. Keep this file in
 sync when architecture, commands, or workflows change.
 
