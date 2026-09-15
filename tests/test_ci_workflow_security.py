@@ -1,5 +1,6 @@
 import hashlib
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -31,7 +32,7 @@ PYTEST_CONFIG_SHA256 = (
     "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
 )
 INTEGRATION_WORKFLOW_SHA256 = (
-    "b5463291f73bf9c811c1ef817488a08052afaf3018d6d0d7bbf7280b5449ffea"
+    "14cdfbc41973cab182bb2cc565c9521eec99c20a54997d697f5e88a42bfc692d"
 )
 EXPECTED_COMPATIBILITY_MATRIX = [
     {
@@ -191,6 +192,82 @@ def _load_unique_yaml(workflow: str) -> dict:
     return loaded
 
 
+def _assert_optional_integration_preflight(job: dict) -> None:
+    steps = job["steps"]
+    assert [step["name"] for step in steps[:2]] == [
+        "Preflight (soft-skip if unconfigured)",
+        "Checkout",
+    ]
+    preflight, checkout = steps[:2]
+    venv_check = preflight["run"].index('if [ ! -x "${NETBOX_ROOT}/venv/bin/python" ]')
+    secret_check = preflight["run"].index('if [ -z "${NETBOX_DB_PASSWORD}" ]')
+    node_check = preflight["run"].index("if ! command -v node")
+    assert venv_check < secret_check < node_check
+    assert "if ! command -v node" in preflight["run"]
+    assert (
+        "::error::Node is required for checkout on configured mirror-host."
+        in preflight["run"]
+    )
+    assert preflight["run"].count('echo "run=true" >> "$GITHUB_OUTPUT"') == 1
+    assert "actions/" not in preflight["run"]
+    assert "github.sha" not in preflight["run"]
+    assert checkout["if"] == "steps.preflight.outputs.run == 'true'"
+
+
+def _assert_exact_toolchain_observability(job: dict) -> None:
+    setup = _named_step_run(job, "Set up uv and Python 3.12")
+    assert setup.count('"${python_bin}" --version') == 1
+    assert setup.count('"${uv_bin}" --version') == 1
+    python_error = setup.index("Missing exact Python executable")
+    python_probe_error = setup.index("Exact Python version probe failed")
+    python_print = setup.index("Python identity: %s")
+    python_test = setup.index('test "${python_identity}" = "Python 3.12.14"')
+    uv_error = setup.index("Missing exact uv executable")
+    uv_probe_error = setup.index("Exact uv version probe failed")
+    uv_print = setup.index("uv identity: %s")
+    uv_test = setup.index(
+        'test "${uv_identity}" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"'
+    )
+    assert python_error < python_probe_error < python_print < python_test
+    assert uv_error < uv_probe_error < uv_print < uv_test
+
+
+def _run_bash(script: str, environment: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _write_fake_executable(path: Path, identity: str, status: int = 0) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then\n'
+        "  printf '%s\\n' 'unexpected version-probe arguments' >&2\n"
+        "  exit 64\n"
+        "fi\n"
+        f"printf '%s\\n' '{identity}'\n"
+        f"exit {status}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _toolchain_identity_script(job: dict) -> str:
+    setup = _named_step_run(job, "Set up uv and Python 3.12")
+    identity_script = setup.split('\n"${uv_bin}" venv', 1)[0]
+    return identity_script.replace(
+        'python_bin="/usr/local/bin/python3.12"',
+        'python_bin="${TEST_PYTHON_BIN}"',
+    ).replace(
+        'uv_bin="/usr/local/bin/uv"',
+        'uv_bin="${TEST_UV_BIN}"',
+    )
+
+
 def _assert_ci_contract(workflow: str) -> None:
     loaded = _load_ci_workflow(workflow)
     assert set(loaded) == {"name", "on", "permissions", "concurrency", "jobs"}
@@ -346,11 +423,15 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
         "${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
         "github.ref == 'refs/heads/main' }}"
     )
-    assert loaded["jobs"]["integration"]["if"] == integration_guard
-    assert loaded["jobs"]["integration"]["runs-on"] == "mirror-host"
-    assert loaded["jobs"]["integration"]["timeout-minutes"] == "30"
-    assert loaded["jobs"]["compatibility"]["if"] == compatibility_guard
-    assert loaded["jobs"]["compatibility"]["runs-on"] == "trusted-exact"
+    integration = loaded["jobs"]["integration"]
+    compatibility = loaded["jobs"]["compatibility"]
+    assert integration["if"] == integration_guard
+    assert integration["runs-on"] == "mirror-host"
+    assert integration["timeout-minutes"] == "30"
+    _assert_optional_integration_preflight(integration)
+    assert compatibility["if"] == compatibility_guard
+    assert compatibility["runs-on"] == "trusted-exact"
+    _assert_exact_toolchain_observability(compatibility)
     assert workflow.count(CHECKOUT_ACTION) == 2
     assert workflow.count("ref: ${{ github.sha }}") == 2
     assert workflow.count("persist-credentials: false") == 2
@@ -602,6 +683,318 @@ def test_manual_privileged_integration_rejects_trigger_or_ref_drift(
     mutated = workflow.replace(needle, replacement, 1)
     with pytest.raises((AssertionError, yaml.YAMLError)):
         _assert_manual_privileged_integration_contract(mutated)
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
+        ("if ! command -v node", "if command -v node"),
+        (
+            "if: steps.preflight.outputs.run == 'true'\n        uses: actions/checkout",
+            "if: always()\n        uses: actions/checkout",
+        ),
+        (
+            "- name: Preflight (soft-skip if unconfigured)",
+            "- name: Late preflight (soft-skip if unconfigured)",
+        ),
+        (
+            'echo "run=true" >> "$GITHUB_OUTPUT"',
+            'echo "run=false" >> "$GITHUB_OUTPUT"',
+        ),
+    ),
+)
+def test_optional_integration_rejects_preflight_bypass(
+    needle: str,
+    replacement: str,
+) -> None:
+    workflow = _read(INTEGRATION_WORKFLOW_PATH)
+    assert needle in workflow
+    mutated = workflow.replace(needle, replacement, 1)
+    job = _load_ci_workflow(mutated)["jobs"]["integration"]
+    with pytest.raises((AssertionError, KeyError, ValueError)):
+        _assert_optional_integration_preflight(job)
+
+
+@pytest.mark.parametrize(
+    ("has_venv", "db_password", "expected_notice"),
+    (
+        (False, "configured", "NetBox venv not found"),
+        (True, "", "NETBOX_DB_PASSWORD secret is not configured"),
+    ),
+)
+def test_optional_integration_soft_skips_only_when_unconfigured(
+    tmp_path: Path,
+    has_venv: bool,
+    db_password: str,
+    expected_notice: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["integration"]
+    preflight = _named_step_run(job, "Preflight (soft-skip if unconfigured)")
+    netbox_root = tmp_path / "netbox"
+    if has_venv:
+        python_bin = netbox_root / "venv" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        _write_fake_executable(python_bin, "unused")
+    github_output = tmp_path / "github-output"
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+
+    result = _run_bash(
+        preflight,
+        {
+            "PATH": str(empty_path),
+            "GITHUB_OUTPUT": str(github_output),
+            "NETBOX_ROOT": str(netbox_root),
+            "NETBOX_DB_PASSWORD": db_password,
+        },
+    )
+
+    assert result.returncode == 0
+    assert expected_notice in result.stdout
+    assert result.stderr == ""
+    assert github_output.read_text(encoding="utf-8") == "run=false\n"
+
+
+def test_optional_integration_configured_host_requires_node(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["integration"]
+    preflight = _named_step_run(job, "Preflight (soft-skip if unconfigured)")
+    netbox_root = tmp_path / "netbox"
+    python_bin = netbox_root / "venv" / "bin" / "python"
+    python_bin.parent.mkdir(parents=True)
+    _write_fake_executable(python_bin, "unused")
+    github_output = tmp_path / "github-output"
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+
+    result = _run_bash(
+        preflight,
+        {
+            "PATH": str(empty_path),
+            "GITHUB_OUTPUT": str(github_output),
+            "NETBOX_ROOT": str(netbox_root),
+            "NETBOX_DB_PASSWORD": "configured",
+        },
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "::error::Node is required for checkout on configured mirror-host.\n"
+    )
+    assert not github_output.exists()
+
+
+def test_optional_integration_configured_host_enables_checkout(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["integration"]
+    preflight = _named_step_run(job, "Preflight (soft-skip if unconfigured)")
+    netbox_root = tmp_path / "netbox"
+    python_bin = netbox_root / "venv" / "bin" / "python"
+    python_bin.parent.mkdir(parents=True)
+    _write_fake_executable(python_bin, "unused")
+    executable_path = tmp_path / "bin"
+    executable_path.mkdir()
+    _write_fake_executable(executable_path / "node", "unused")
+    github_output = tmp_path / "github-output"
+
+    result = _run_bash(
+        preflight,
+        {
+            "PATH": str(executable_path),
+            "GITHUB_OUTPUT": str(github_output),
+            "NETBOX_ROOT": str(netbox_root),
+            "NETBOX_DB_PASSWORD": "configured",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert github_output.read_text(encoding="utf-8") == "run=true\n"
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
+        ("Python identity: %s", "Observed Python: %s"),
+        ("uv identity: %s", "Observed uv: %s"),
+        ("Python 3.12.14", "Python 3.12.15"),
+        (
+            "uv 0.12.5 (x86_64-unknown-linux-gnu)",
+            "uv 0.12.4 (x86_64-unknown-linux-gnu)",
+        ),
+    ),
+)
+def test_exact_toolchain_rejects_silent_or_relaxed_identity_checks(
+    needle: str,
+    replacement: str,
+) -> None:
+    workflow = _read(INTEGRATION_WORKFLOW_PATH)
+    assert needle in workflow
+    mutated = workflow.replace(needle, replacement, 1)
+    job = _load_ci_workflow(mutated)["jobs"]["compatibility"]
+    with pytest.raises((AssertionError, ValueError)):
+        _assert_exact_toolchain_observability(job)
+
+
+@pytest.mark.parametrize("probe_name", ("python", "uv"))
+@pytest.mark.parametrize("replacement_argument", ("--help", ""))
+def test_exact_toolchain_rejects_version_probe_argument_mutation(
+    tmp_path: Path,
+    probe_name: str,
+    replacement_argument: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    script = _toolchain_identity_script(job)
+    probe_variable = "python_bin" if probe_name == "python" else "uv_bin"
+    exact_probe = f'"${{{probe_variable}}}" --version'
+    mutated_probe = f'"${{{probe_variable}}}" {replacement_argument}'.rstrip()
+    assert script.count(exact_probe) == 1
+    script = script.replace(exact_probe, mutated_probe, 1)
+    python_bin = tmp_path / "python3.12"
+    uv_bin = tmp_path / "uv"
+    _write_fake_executable(python_bin, "Python 3.12.14")
+    _write_fake_executable(uv_bin, "uv 0.12.5 (x86_64-unknown-linux-gnu)")
+
+    result = _run_bash(
+        script,
+        {
+            "TEST_PYTHON_BIN": str(python_bin),
+            "TEST_UV_BIN": str(uv_bin),
+        },
+    )
+
+    expected_path = python_bin if probe_name == "python" else uv_bin
+    expected_name = "Python" if probe_name == "python" else "uv"
+    assert result.returncode == 64
+    assert "unexpected version-probe arguments" in result.stderr
+    assert (
+        f"::error::Exact {expected_name} version probe failed for {expected_path} "
+        "with status 64."
+    ) in result.stderr
+
+
+@pytest.mark.parametrize("missing_probe", ("python", "uv"))
+def test_exact_toolchain_reports_missing_executable(
+    tmp_path: Path,
+    missing_probe: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    script = _toolchain_identity_script(job)
+    python_bin = tmp_path / "python3.12"
+    uv_bin = tmp_path / "uv"
+    if missing_probe != "python":
+        _write_fake_executable(python_bin, "Python 3.12.14")
+    if missing_probe != "uv":
+        _write_fake_executable(uv_bin, "uv 0.12.5 (x86_64-unknown-linux-gnu)")
+
+    result = _run_bash(
+        script,
+        {
+            "TEST_PYTHON_BIN": str(python_bin),
+            "TEST_UV_BIN": str(uv_bin),
+        },
+    )
+
+    missing_path = python_bin if missing_probe == "python" else uv_bin
+    missing_name = "Python" if missing_probe == "python" else "uv"
+    assert result.returncode == 1
+    assert f"Missing exact {missing_name} executable: {missing_path}" in result.stderr
+
+
+@pytest.mark.parametrize(("failing_probe", "status"), (("python", 7), ("uv", 9)))
+def test_exact_toolchain_reports_failed_version_probe(
+    tmp_path: Path,
+    failing_probe: str,
+    status: int,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    script = _toolchain_identity_script(job)
+    python_bin = tmp_path / "python3.12"
+    uv_bin = tmp_path / "uv"
+    _write_fake_executable(
+        python_bin,
+        "Python 3.12.14",
+        status if failing_probe == "python" else 0,
+    )
+    _write_fake_executable(
+        uv_bin,
+        "uv 0.12.5 (x86_64-unknown-linux-gnu)",
+        status if failing_probe == "uv" else 0,
+    )
+
+    result = _run_bash(
+        script,
+        {
+            "TEST_PYTHON_BIN": str(python_bin),
+            "TEST_UV_BIN": str(uv_bin),
+        },
+    )
+
+    failed_path = python_bin if failing_probe == "python" else uv_bin
+    failed_name = "Python" if failing_probe == "python" else "uv"
+    assert result.returncode == status
+    assert result.stderr == (
+        f"::error::Exact {failed_name} version probe failed for {failed_path} "
+        f"with status {status}.\n"
+    )
+
+
+@pytest.mark.parametrize("mismatched_probe", ("python", "uv"))
+def test_exact_toolchain_rejects_successful_identity_mismatch(
+    tmp_path: Path,
+    mismatched_probe: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    script = _toolchain_identity_script(job)
+    python_identity = (
+        "Python 3.12.13" if mismatched_probe == "python" else "Python 3.12.14"
+    )
+    uv_identity = (
+        "uv 0.12.4 (x86_64-unknown-linux-gnu)"
+        if mismatched_probe == "uv"
+        else "uv 0.12.5 (x86_64-unknown-linux-gnu)"
+    )
+    python_bin = tmp_path / "python3.12"
+    uv_bin = tmp_path / "uv"
+    _write_fake_executable(python_bin, python_identity)
+    _write_fake_executable(uv_bin, uv_identity)
+
+    result = _run_bash(
+        script,
+        {
+            "TEST_PYTHON_BIN": str(python_bin),
+            "TEST_UV_BIN": str(uv_bin),
+        },
+    )
+
+    assert result.returncode != 0
+    expected_identity = python_identity if mismatched_probe == "python" else uv_identity
+    assert expected_identity in result.stdout
+    assert result.stderr == ""
+
+
+def test_exact_toolchain_accepts_and_prints_exact_identities(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    script = _toolchain_identity_script(job)
+    python_bin = tmp_path / "python3.12"
+    uv_bin = tmp_path / "uv"
+    _write_fake_executable(python_bin, "Python 3.12.14")
+    _write_fake_executable(uv_bin, "uv 0.12.5 (x86_64-unknown-linux-gnu)")
+
+    result = _run_bash(
+        script,
+        {
+            "TEST_PYTHON_BIN": str(python_bin),
+            "TEST_UV_BIN": str(uv_bin),
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == (
+        "Python identity: Python 3.12.14\n"
+        "uv identity: uv 0.12.5 (x86_64-unknown-linux-gnu)\n"
+    )
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize(

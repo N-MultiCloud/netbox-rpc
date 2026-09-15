@@ -37,12 +37,6 @@ jobs:
       NETBOX_DB_HOST: localhost
       NETBOX_SECRET_KEY: ci-integration-secret-key-0123456789abcdefghij-abcdef
     steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
       - name: Preflight (soft-skip if unconfigured)
         id: preflight
         shell: bash
@@ -58,7 +52,18 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node is required for checkout on configured mirror-host." >&2
+            exit 1
+          fi
           echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.preflight.outputs.run == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Provision a UTF8 test database
         if: steps.preflight.outputs.run == 'true'
@@ -198,10 +203,32 @@ jobs:
           set -eo pipefail
           python_bin="/usr/local/bin/python3.12"
           uv_bin="/usr/local/bin/uv"
-          test -x "${python_bin}"
-          test -x "${uv_bin}"
-          test "$("${python_bin}" --version)" = "Python 3.12.14"
-          test "$("${uv_bin}" --version)" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
+          if [ ! -x "${python_bin}" ]; then
+            echo "::error::Missing exact Python executable: ${python_bin}" >&2
+            exit 1
+          fi
+          if [ ! -x "${uv_bin}" ]; then
+            echo "::error::Missing exact uv executable: ${uv_bin}" >&2
+            exit 1
+          fi
+          if python_identity="$("${python_bin}" --version)"; then
+            :
+          else
+            python_probe_status=$?
+            printf '::error::Exact Python version probe failed for %s with status %s.\n' "${python_bin}" "${python_probe_status}" >&2
+            exit "${python_probe_status}"
+          fi
+          printf 'Python identity: %s\n' "${python_identity}"
+          if uv_identity="$("${uv_bin}" --version)"; then
+            :
+          else
+            uv_probe_status=$?
+            printf '::error::Exact uv version probe failed for %s with status %s.\n' "${uv_bin}" "${uv_probe_status}" >&2
+            exit "${uv_probe_status}"
+          fi
+          printf 'uv identity: %s\n' "${uv_identity}"
+          test "${python_identity}" = "Python 3.12.14"
+          test "${uv_identity}" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
           "${uv_bin}" venv \
             --python "${python_bin}" \
             --no-managed-python \
