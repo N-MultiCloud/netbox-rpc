@@ -4,7 +4,9 @@ name: Integration tests (NetBox DB-backed)
 # and must never execute candidate pull-request or push code. It is not the
 # canonical Gitea pull-request DB gate. That gate requires a separately
 # provisioned isolated untrusted runner with disposable digest-pinned
-# PostgreSQL/Redis and an exact hash-locked NetBox 4.7.0 GA closure.
+# PostgreSQL/Redis and exact hash-locked NetBox 4.5.8, 4.6.5, and 4.7.0
+# dependency closures. Older lines contain source-only dependencies, which are
+# built without isolation only after installing the hash-pinned build backend.
 #
 # Both jobs are operator-requested diagnostics restricted to the canonical main
 # ref. They are never required pull-request evidence or a branch-protection
@@ -18,14 +20,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: integration-${{ github.ref }}
-  cancel-in-progress: true
+  group: netbox-rpc-integration
+  cancel-in-progress: false
 
 jobs:
   integration:
     name: manage.py test netbox_rpc
     if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && github.ref == 'refs/heads/main' }}
     runs-on: mirror-host
+    timeout-minutes: 30
     env:
       NETBOX_ROOT: /opt/netbox
       NETBOX_DB_NAME: netbox_rpc_citest
@@ -94,6 +97,20 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          - netbox-version: v4.5.8
+            netbox-tag: v4.5.8
+            netbox-ref: 75e1b86613792458b4d4c8d0cbbfc94df16cfaaf
+            compat-db: netbox_rpc_compat_n458
+            redis-port: '16388'
+            redis-tasks-db: '0'
+            redis-cache-db: '1'
+          - netbox-version: v4.6.5
+            netbox-tag: v4.6.5
+            netbox-ref: ebee3578b90901ba69ea646815f9b0662f627726
+            compat-db: netbox_rpc_compat_n465
+            redis-port: '16389'
+            redis-tasks-db: '0'
+            redis-cache-db: '1'
           - netbox-version: v4.7.0
             netbox-tag: v4.7.0
             netbox-ref: 5f06007e4c9bacc93ce17c1e645fc1143d60df3d
@@ -160,13 +177,13 @@ jobs:
             --appendonly no \
             --daemonize yes \
             --pidfile "${redis_pidfile}"
+          printf 'NETBOX_REDIS_PASSWORD=%s\n' "${redis_password}" >> "${GITHUB_ENV}"
+          printf 'NETBOX_REDIS_PIDFILE=%s\n' "${redis_pidfile}" >> "${GITHUB_ENV}"
           for attempt in {1..20}; do
             redis-cli -h 127.0.0.1 -p "${NETBOX_REDIS_PORT}" -a "${redis_password}" ping >/dev/null 2>&1 && break
             sleep 1
           done
           redis-cli -h 127.0.0.1 -p "${NETBOX_REDIS_PORT}" -a "${redis_password}" ping | grep -Fx PONG
-          printf 'NETBOX_REDIS_PASSWORD=%s\n' "${redis_password}" >> "${GITHUB_ENV}"
-          printf 'NETBOX_REDIS_PIDFILE=%s\n' "${redis_pidfile}" >> "${GITHUB_ENV}"
 
       - name: Checkout plugin
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -214,6 +231,18 @@ jobs:
             --python .ci-venv \
             --require-hashes \
             --only-binary=:all: \
+            --no-sources \
+            --no-python-downloads \
+            --no-config \
+            --no-cache \
+            --keyring-provider disabled \
+            --index-strategy first-index \
+            --default-index https://pypi.org/simple \
+            --requirements plugin/.gitea/deploy/netbox-source-build.lock
+          /usr/local/bin/uv pip install \
+            --python .ci-venv \
+            --require-hashes \
+            --no-build-isolation \
             --no-sources \
             --no-python-downloads \
             --no-config \

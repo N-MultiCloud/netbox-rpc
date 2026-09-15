@@ -45,10 +45,11 @@ not as a required plugin dependency.
 
 ## Compatibility
 
-Support the NetBox 4.7.x GA line only (`min_version = "4.7.0"`,
-`max_version = "4.7.99"`). The current exact target is official `v4.7.0`
-GA. Keep historical external `extras` migration anchors so existing
-installations can upgrade onto the 4.7-only line.
+Support NetBox 4.5.8 through 4.7.x (`min_version = "4.5.8"`,
+`max_version = "4.7.99"`). Compatibility evidence uses exact official
+`v4.5.8`, `v4.6.5`, and `v4.7.0` source revisions. Keep external `extras`
+migration anchors on the shared `extras.0134_owner` ancestor so the complete
+declared range can build the migration graph.
 
 ## Transport-driver & output-parser selection
 

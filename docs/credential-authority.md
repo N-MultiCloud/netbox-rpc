@@ -216,5 +216,5 @@ serializer, admission, normalizer, worker, signed issuance ledger and resolution
 path; default, shorter and capped lifetimes; exact non-superuser approval-scope
 revocation; missing capabilities or signing keys; and a concurrent command-row
 update blocked until the reveal transaction ends. Run
-these against an isolated NetBox 4.7.x and PostgreSQL environment; no test may
-connect to a managed endpoint.
+these against isolated NetBox 4.5.8, 4.6.5, and 4.7.0 PostgreSQL environments;
+no test may connect to a managed endpoint.

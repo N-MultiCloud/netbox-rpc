@@ -22,6 +22,7 @@ from yaml.tokens import (
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "ci.yml"
 INTEGRATION_WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "integration.yml"
+GITHUB_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "test.yml"
 LOCK_PATH = ROOT / ".gitea" / "ci-requirements.lock"
 PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
 CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
@@ -30,7 +31,63 @@ PYTEST_CONFIG_SHA256 = (
     "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
 )
 INTEGRATION_WORKFLOW_SHA256 = (
-    "91306f7bf096aa9c98c1499e053fa3e567a7111456531ab0ee2a8390a48677b0"
+    "b5463291f73bf9c811c1ef817488a08052afaf3018d6d0d7bbf7280b5449ffea"
+)
+EXPECTED_COMPATIBILITY_MATRIX = [
+    {
+        "netbox-version": "v4.5.8",
+        "netbox-tag": "v4.5.8",
+        "netbox-ref": "75e1b86613792458b4d4c8d0cbbfc94df16cfaaf",
+        "compat-db": "netbox_rpc_compat_n458",
+        "redis-port": "16388",
+        "redis-tasks-db": "0",
+        "redis-cache-db": "1",
+    },
+    {
+        "netbox-version": "v4.6.5",
+        "netbox-tag": "v4.6.5",
+        "netbox-ref": "ebee3578b90901ba69ea646815f9b0662f627726",
+        "compat-db": "netbox_rpc_compat_n465",
+        "redis-port": "16389",
+        "redis-tasks-db": "0",
+        "redis-cache-db": "1",
+    },
+    {
+        "netbox-version": "v4.7.0",
+        "netbox-tag": "v4.7.0",
+        "netbox-ref": "5f06007e4c9bacc93ce17c1e645fc1143d60df3d",
+        "compat-db": "netbox_rpc_compat_n470",
+        "redis-port": "16390",
+        "redis-tasks-db": "0",
+        "redis-cache-db": "1",
+    },
+]
+EXPECTED_GITHUB_MATRIX = [
+    {key: entry[key] for key in ("netbox-version", "netbox-tag", "netbox-ref")}
+    for entry in EXPECTED_COMPATIBILITY_MATRIX
+]
+EXPECTED_SOURCE_BUILD_LOCK = (
+    "# Hash-pinned build backend for source-only dependencies in older NetBox locks.\n"
+    "# Install this wheel before the NetBox closure, then build dependency source\n"
+    "# archives with --no-build-isolation so no undeclared build requirement can be\n"
+    "# resolved or downloaded.\n"
+    "setuptools==83.0.0 \\\n"
+    "    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3\n"
+)
+EXPECTED_GITHUB_INSTALL_COMMANDS = (
+    "python -m pip install \\\n"
+    "  --require-hashes \\\n"
+    "  --only-binary=:all: \\\n"
+    "  --no-cache-dir \\\n"
+    "  --disable-pip-version-check \\\n"
+    "  -r plugin/.gitea/deploy/netbox-source-build.lock",
+    "python -m pip install \\\n"
+    "  --require-hashes \\\n"
+    "  --no-build-isolation \\\n"
+    "  --no-cache-dir \\\n"
+    "  --disable-pip-version-check \\\n"
+    '  -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"',
+    "python -m pip install --no-deps --no-build-isolation -e ./plugin",
 )
 STEP_RUN_SHA256 = {
     "Verify preprovisioned toolchain": (
@@ -104,6 +161,18 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _named_step_run(job: dict, name: str) -> str:
+    matches = tuple(step["run"] for step in job["steps"] if step.get("name") == name)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _pip_install_commands(script: str) -> tuple[str, ...]:
+    return tuple(
+        re.findall(r"^python -m pip install(?:.*(?:\n  .*)*)$", script, re.MULTILINE)
+    )
+
+
 def _load_ci_workflow(workflow: str) -> dict:
     forbidden_tokens = (
         AliasToken,
@@ -113,6 +182,10 @@ def _load_ci_workflow(workflow: str) -> dict:
         TagToken,
     )
     assert not any(isinstance(token, forbidden_tokens) for token in yaml.scan(workflow))
+    return _load_unique_yaml(workflow)
+
+
+def _load_unique_yaml(workflow: str) -> dict:
     loaded = yaml.load(workflow, Loader=_UniqueNoAliasLoader)
     assert isinstance(loaded, dict)
     return loaded
@@ -256,6 +329,10 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
     }
     assert loaded["on"] == {"workflow_dispatch": ""}
     assert loaded["permissions"] == {"contents": "read"}
+    assert loaded["concurrency"] == {
+        "group": "netbox-rpc-integration",
+        "cancel-in-progress": "false",
+    }
     assert set(loaded["jobs"]) == {"integration", "compatibility"}
     integration_guard = (
         "${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
@@ -271,6 +348,7 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
     )
     assert loaded["jobs"]["integration"]["if"] == integration_guard
     assert loaded["jobs"]["integration"]["runs-on"] == "mirror-host"
+    assert loaded["jobs"]["integration"]["timeout-minutes"] == "30"
     assert loaded["jobs"]["compatibility"]["if"] == compatibility_guard
     assert loaded["jobs"]["compatibility"]["runs-on"] == "trusted-exact"
     assert workflow.count(CHECKOUT_ACTION) == 2
@@ -279,20 +357,57 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
 
 
 def _assert_compatibility_job_is_pinned(workflow: str) -> None:
+    loaded = _load_ci_workflow(workflow)
+    matrix = loaded["jobs"]["compatibility"]["strategy"]["matrix"]["include"]
+    assert matrix == EXPECTED_COMPATIBILITY_MATRIX
+    _assert_compatibility_source_identity(workflow)
+    _assert_compatibility_install_lockdown(workflow)
+    _assert_compatibility_cleanup_order(workflow)
+
+
+def _assert_compatibility_source_identity(workflow: str) -> None:
     assert workflow.count("NETBOX_TAG: ${{ matrix.netbox-tag }}") == 1
     assert workflow.count("refs/tags/${NETBOX_TAG}:refs/tags/${NETBOX_TAG}") == 1
     assert workflow.count("${NETBOX_TAG}^{commit}") == 1
     assert "github.actor" not in workflow
     assert "curl " not in workflow
     assert "requirements.txt" not in workflow
+
+
+def _assert_compatibility_install_lockdown(workflow: str) -> None:
     assert "--require-hashes" in workflow
     assert "--only-binary=:all:" in workflow
+    assert "--no-build-isolation" in workflow
     assert "--no-sources" in workflow
+    assert "netbox-source-build.lock" in workflow
     assert "netbox-${NETBOX_VERSION}-ci.lock" in workflow
     assert "pull_request:" not in workflow
     assert "push:" not in workflow
     assert "fail-closed Gitea gate" not in workflow
     assert not re.search(r"(?:issue|PR|#)\s*#?\d+", workflow, re.IGNORECASE)
+
+
+def _assert_compatibility_cleanup_order(workflow: str) -> None:
+    redis_password_export = workflow.index("printf 'NETBOX_REDIS_PASSWORD=%s\\n'")
+    redis_pidfile_export = workflow.index("printf 'NETBOX_REDIS_PIDFILE=%s\\n'")
+    readiness_loop = workflow.index("for attempt in {1..20}")
+    assert redis_password_export < readiness_loop
+    assert redis_pidfile_export < readiness_loop
+    build_backend_install = workflow.index("netbox-source-build.lock")
+    netbox_closure_install = workflow.index("netbox-${NETBOX_VERSION}-ci.lock")
+    assert build_backend_install < netbox_closure_install
+
+
+def _assert_github_compatibility_contract(workflow: str) -> None:
+    loaded = _load_unique_yaml(workflow)
+    job = loaded["jobs"]["integration"]
+    assert job["strategy"]["matrix"]["include"] == EXPECTED_GITHUB_MATRIX
+    install = _named_step_run(job, "Install NetBox + plugin")
+    assert _pip_install_commands(install) == EXPECTED_GITHUB_INSTALL_COMMANDS
+
+
+def _assert_source_build_lock(lock: str) -> None:
+    assert lock == EXPECTED_SOURCE_BUILD_LOCK
 
 
 def _parse_lock(lock: str) -> dict[str, tuple[str, str, str]]:
@@ -383,6 +498,34 @@ def test_privileged_integration_is_manual_main_only_and_non_gating() -> None:
     assert "never required pull-request evidence" in workflow
 
 
+def test_github_compatibility_matrix_and_install_are_pinned() -> None:
+    _assert_github_compatibility_contract(_read(GITHUB_WORKFLOW_PATH))
+
+
+def test_github_compatibility_install_rejects_flags_moved_between_stages() -> None:
+    workflow = _read(GITHUB_WORKFLOW_PATH)
+    swapped_stage_flags = (
+        workflow.replace("--only-binary=:all:", "INSTALL_FLAG_PLACEHOLDER", 1)
+        .replace("--no-build-isolation", "--only-binary=:all:", 1)
+        .replace("INSTALL_FLAG_PLACEHOLDER", "--no-build-isolation", 1)
+    )
+    moved_hash_flag = workflow.replace(
+        "            --require-hashes \\\n            --only-binary=:all:",
+        "            --only-binary=:all:",
+        1,
+    ).replace(
+        "            --require-hashes \\\n            --no-build-isolation",
+        "            --require-hashes \\\n"
+        "            --require-hashes \\\n"
+        "            --no-build-isolation",
+        1,
+    )
+
+    for mutation in (swapped_stage_flags, moved_hash_flag):
+        with pytest.raises(AssertionError):
+            _assert_github_compatibility_contract(mutation)
+
+
 def test_ci_lock_is_canonical_wheel_only_closure() -> None:
     lock_bytes = LOCK_PATH.read_bytes()
     assert hashlib.sha256(lock_bytes).hexdigest() == LOCK_SHA256
@@ -393,19 +536,31 @@ def test_ci_lock_is_canonical_wheel_only_closure() -> None:
     )
 
 
-def test_netbox_compatibility_locks_are_hash_pinned_binary_closures() -> None:
-    for version in ("v4.7.0",):
+def test_netbox_compatibility_locks_are_hash_pinned_closures() -> None:
+    for version in ("v4.5.8", "v4.6.5", "v4.7.0"):
         lock = _read(ROOT / f".gitea/deploy/netbox-{version}-ci.lock")
         assert lock.startswith("# This file was autogenerated by uv")
         assert "--hash=sha256:" in lock
-        assert ".tar.gz" not in lock
         assert "--no-binary" not in lock
+
+
+def test_netbox_source_build_backend_is_exact_and_hash_pinned() -> None:
+    lock = _read(ROOT / ".gitea/deploy/netbox-source-build.lock")
+    _assert_source_build_lock(lock)
+
+
+def test_netbox_source_build_backend_rejects_additional_packages() -> None:
+    lock = _read(ROOT / ".gitea/deploy/netbox-source-build.lock")
+    extra_requirement = "wheel==1.0.0 \\\n    --hash=sha256:" + "0" * 64 + "\n"
+    with pytest.raises(AssertionError):
+        _assert_source_build_lock(lock + extra_requirement)
 
 
 def test_public_ci_contract_docs_do_not_leak_private_tracker_ids() -> None:
     for path in (
         WORKFLOW_PATH,
         INTEGRATION_WORKFLOW_PATH,
+        GITHUB_WORKFLOW_PATH,
         ROOT / "README.md",
         ROOT / "AGENTS.md",
         ROOT / "docs" / "architecture.md",

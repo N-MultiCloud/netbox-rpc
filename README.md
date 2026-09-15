@@ -27,15 +27,14 @@ empty `{}` POST body.
 
 ## Compatibility
 
-`netbox-rpc` supports the NetBox **4.7.x GA** line only. The plugin declares
-`min_version = "4.7.0"` and `max_version = "4.7.99"`; the current release is
-verified against the exact NetBox `v4.7.0` GA source revision. Older NetBox
-versions are outside the support contract.
+`netbox-rpc` supports NetBox **4.5.8 through 4.7.x**. The plugin declares
+`min_version = "4.5.8"` and `max_version = "4.7.99"`; compatibility evidence
+uses the exact NetBox `v4.5.8`, `v4.6.5`, and `v4.7.0` source revisions.
+Versions outside that declared band are not supported.
 
 `RPCProcedureCommand` carries the complete inherited NetBox metadata schema:
 tags plus custom-field JSON encoding. Migration `0086` adds that missing state
-while retaining the historical migration anchor required to upgrade existing
-installations onto the 4.7-only support line.
+while retaining the migration anchor shared by every supported NetBox line.
 
 `netbox-nms` remains optional: fresh installs have no `netbox_nms` migration
 dependency, while deployments that install it retain the guarded runtime
@@ -333,9 +332,9 @@ Operators call named procedures, not arbitrary SSH commands.
 
 ## Compatibility
 
-This release supports the NetBox 4.7.x GA line only, including official
-`v4.7.0` GA. The plugin pins `min_version = "4.7.0"` and
-`max_version = "4.7.99"`.
+This release supports NetBox 4.5.8 through 4.7.x, including exact integration
+targets `v4.5.8`, `v4.6.5`, and `v4.7.0`. The plugin pins
+`min_version = "4.5.8"` and `max_version = "4.7.99"`.
 
 ## Procedure command source of truth
 
@@ -1548,8 +1547,12 @@ Tier 2 (`netbox_rpc/tests/`) covers the ORM-bound behavior — `event_store`, th
 rebuild oracle, the append-only ledger, the command handlers, and the
 command-only REST API. The required canonical Gitea pull-request gate needs an
 externally provisioned isolated untrusted runner, disposable digest-pinned
-PostgreSQL/Redis, and an exact hash-locked NetBox 4.7.0 GA dependency closure;
-it remains blocked until that trusted platform contract exists. The GitHub
+PostgreSQL/Redis, and exact hash-locked NetBox 4.5.8, 4.6.5, and 4.7.0
+dependency closures. Source-only dependencies in the older NetBox lines are
+built with `--no-build-isolation` only after the exact hash-pinned setuptools
+wheel in `.gitea/deploy/netbox-source-build.lock` is installed, so their build
+cannot resolve an undeclared backend. The gate remains blocked until that
+trusted platform contract exists. The GitHub
 `.github/workflows/test.yml` matrix is supplementary post-mirror evidence, not
 canonical pre-merge evidence. The privileged Gitea
 `.gitea/workflows/integration.yml` is manual, canonical-`main`-only diagnostic

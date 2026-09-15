@@ -3,6 +3,15 @@ import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+STABLE_NETBOX_IDENTITIES = (
+    ("v4.5.8", "75e1b86613792458b4d4c8d0cbbfc94df16cfaaf"),
+    ("v4.6.5", "ebee3578b90901ba69ea646815f9b0662f627726"),
+    ("v4.7.0", "5f06007e4c9bacc93ce17c1e645fc1143d60df3d"),
+)
+STABLE_NETBOX_TOKENS = tuple(
+    token for identity in STABLE_NETBOX_IDENTITIES for token in identity
+)
+HELD_NETBOX_DESIGNATION = "beta" + str(2)
 
 
 def read(path: str) -> str:
@@ -11,6 +20,16 @@ def read(path: str) -> str:
 
 def load_constants() -> dict:
     return runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
+
+
+def assert_contains(source: str, expected: tuple[str, ...]) -> None:
+    missing = tuple(fragment for fragment in expected if fragment not in source)
+    assert not missing, f"missing expected fragments: {missing}"
+
+
+def assert_excludes(source: str, forbidden: tuple[str, ...]) -> None:
+    present = tuple(fragment for fragment in forbidden if fragment in source)
+    assert not present, f"found forbidden fragments: {present}"
 
 
 def test_execution_params_have_no_post_creation_mutation_path() -> None:
@@ -1066,38 +1085,45 @@ def test_intent_serialize_object_includes_ordered_membership() -> None:
     assert '"sequence": ip.sequence' in models
 
 
-def test_plugin_and_migrations_support_only_netbox_4_7_ga() -> None:
+def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
     init = read("netbox_rpc/__init__.py")
     gitea_workflow = read(".gitea/workflows/integration.yml")
-    assert 'min_version = "4.7.0"' in init
-    assert 'max_version = "4.7.99"' in init
-    assert "from .release_guard import validate_netbox_release" in init
-    assert 'approved_netbox_version = "4.7.0"' in init
-    assert "approved_netbox_designation = None" in init
-    assert "on:\n  workflow_dispatch:" in gitea_workflow
-    assert "pull_request:" not in gitea_workflow
-    assert "push:" not in gitea_workflow
-    assert "Manual, non-gating diagnostics only" in gitea_workflow
-    assert "\n  compatibility:\n" in gitea_workflow
+    github_workflow = read(".github/workflows/test.yml")
+    assert_contains(init, ('min_version = "4.5.8"', 'max_version = "4.7.99"'))
+    assert_excludes(
+        init,
+        ("validate_netbox_release", "approved_netbox", "def validate("),
+    )
+    assert_contains(
+        gitea_workflow,
+        (
+            "on:\n  workflow_dispatch:",
+            "Manual, non-gating diagnostics only",
+            "\n  compatibility:\n",
+        ),
+    )
+    assert_excludes(gitea_workflow, ("pull_request:", "push:"))
     compatibility_job = gitea_workflow.split("\n  compatibility:\n", maxsplit=1)[1]
-    assert "runs-on: trusted-exact" in compatibility_job
-    assert "fail-fast: false" in compatibility_job
-    assert "NETBOX_VERSION: ${{ matrix.netbox-version }}" in compatibility_job
     # Host-mode manual diagnostic: it provisions per-leg UTF8 databases on host
     # PostgreSQL only for a trusted canonical-main operator dispatch. It is not
     # PR/push or branch-protection evidence.
-    assert "Provision a UTF8 compatibility database" in compatibility_job
-    assert "NETBOX_REDIS_DB_TASKS" in compatibility_job
-    assert "v4.7.0" in compatibility_job
-    assert "5f06007e4c9bacc93ce17c1e645fc1143d60df3d" in compatibility_job
-    assert "beta2" not in compatibility_job
-    # Compatibility evidence is restricted to canonical main because the job
-    # executes on a trusted host-mode runner.
-    assert (
-        "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
-        "github.ref == 'refs/heads/main' }}"
-    ) in compatibility_job
-    assert "soft-skip" not in compatibility_job
+    assert_contains(
+        compatibility_job,
+        (
+            "runs-on: trusted-exact",
+            "fail-fast: false",
+            "NETBOX_VERSION: ${{ matrix.netbox-version }}",
+            "Provision a UTF8 compatibility database",
+            "NETBOX_REDIS_DB_TASKS",
+            *STABLE_NETBOX_TOKENS,
+            "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
+            "github.ref == 'refs/heads/main' }}",
+        ),
+    )
+    assert_excludes(compatibility_job, (HELD_NETBOX_DESIGNATION, "soft-skip"))
+    for workflow in (gitea_workflow, github_workflow):
+        assert_contains(workflow, STABLE_NETBOX_TOKENS)
+        assert_excludes(workflow, (HELD_NETBOX_DESIGNATION,))
 
 
 def test_plugin_migrations_retain_upgrade_anchors() -> None:
@@ -1125,16 +1151,16 @@ def test_plugin_migrations_retain_upgrade_anchors() -> None:
         "0044_rpcpluginsettings.py",
         "0082_rpcnetboxpluginallowlist.py",
     ):
-        # extras.0134_owner is the historical migration anchor retained for
-        # upgrades from installations that predate the 4.7-only support line.
+        # extras.0134_owner is the final extras migration in NetBox 4.5.8 and
+        # remains an ancestor of the 4.6 and 4.7 migration graphs.
         assert "0134_owner" in migration_sources[name]
 
 
-def test_plugin_min_version_matches_upgrade_migration_dependencies() -> None:
-    # The migration graph retains extras.0134 for upgrade continuity even though
-    # new installations are supported only on NetBox 4.7.x GA.
+def test_plugin_min_version_matches_common_netbox_migration_dependencies() -> None:
+    # The migration graph uses extras.0134 because it is present throughout the
+    # declared NetBox 4.5.8 through 4.7.x support band.
     init = read("netbox_rpc/__init__.py")
-    assert 'min_version = "4.7.0"' in init
+    assert 'min_version = "4.5.8"' in init
     assert 'max_version = "4.7.99"' in init
 
     migration_paths = (

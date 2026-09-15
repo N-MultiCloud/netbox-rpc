@@ -1,0 +1,6 @@
+# Hash-pinned build backend for source-only dependencies in older NetBox locks.
+# Install this wheel before the NetBox closure, then build dependency source
+# archives with --no-build-isolation so no undeclared build requirement can be
+# resolved or downloaded.
+setuptools==83.0.0 \
+    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3

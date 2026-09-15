@@ -403,9 +403,12 @@ The suite is two tiers:
    row-locked race), and the REST API (command-only write model: PUT/PATCH/DELETE
    return 405; cancel is an action; the event log is read-only). The required
    canonical Gitea pull-request gate needs an externally provisioned isolated
-   untrusted runner, disposable digest-pinned PostgreSQL/Redis, and an exact
-   hash-locked NetBox 4.7.0 GA dependency closure; it remains blocked until
-   that trusted platform contract exists. The GitHub
+   untrusted runner, disposable digest-pinned PostgreSQL/Redis, and exact
+   hash-locked NetBox 4.5.8, 4.6.5, and 4.7.0 dependency closures. Source-only
+   dependencies in the older lines are built without isolation only after an
+   exact hash-pinned setuptools wheel is installed, so no undeclared build
+   backend can be resolved or downloaded. The gate remains blocked until that
+   trusted platform contract exists. The GitHub
    `.github/workflows/test.yml` matrix is supplementary post-mirror evidence,
    not canonical pre-merge evidence. Privileged Gitea `integration.yml` is a
    manual, canonical-`main`-only, non-gating operator diagnostic and never PR or
