@@ -143,6 +143,21 @@ bounded end-to-end route deadlines.
 
 ## Package Publishing (Gitea Package Registry)
 
+The manual `.gitea/workflows/integration.yml` compatibility diagnostic runs
+only for canonical `main` on `trusted-exact`. It provisions exact uv 0.12.5
+through a full-commit-pinned setup action and exact archive SHA-256, then uses
+that uv release's frozen managed-Python catalog to install exact CPython
+3.12.14 inside a unique mode-0700 task-private `$RUNNER_TEMP` directory. Both
+resolved executables and all setup/provisioning temporary paths must remain
+inside that private root; all later uv calls disable Python downloads and pass
+the resolved uv path explicitly. The validated `always()` cleanup runs after
+Redis cleanup and must never target the workspace, `$RUNNER_TEMP` itself,
+`/usr/local`, or another shared directory. Shell traps remove a partially
+prepared unpublished root, but runner death or `SIGKILL` can still require
+operator cleanup of an abandoned task-private directory.
+This exception is limited to the manual diagnostic; ordinary CI retains its
+preprovisioned, offline toolchain boundary.
+
 `.gitea/workflows/publish-pypi.yml` builds sdist+wheel and publishes to the
 internal registry (`git.nmulti.cloud/api/packages/N-MultiCloud/pypi`) on
 `v*` tag push, or via `workflow_dispatch` with a `version` input (used when a

@@ -1559,6 +1559,18 @@ canonical pre-merge evidence. The privileged Gitea
 evidence and is never a PR/push trigger, branch-protection requirement, or
 substitute for the isolated runner policy. Candidate-side ref checks remain
 defense in depth; trusted Gitea runner/ref eligibility is authoritative.
+Its compatibility job installs exact uv 0.12.5 through a full-commit-pinned
+setup action with the exact release-archive SHA-256, then uses that frozen uv
+release's embedded managed-Python catalog to install exact CPython 3.12.14.
+Both tools live under a unique mode-0700 task-private directory in
+`$RUNNER_TEMP`; action downloads, extraction, uv staging, and the resolved
+executables are confined to that root. Realpath containment is checked before
+execution, all later uv consumers disable Python downloads, and an `always()`
+cleanup removes only the validated private root after Redis cleanup. A shell
+trap removes a partially prepared unpublished root; runner death or `SIGKILL`
+can still leave an abandoned task-private directory for operator cleanup. This
+narrowly repairs the manual diagnostic runner contract and does not relax
+ordinary CI's preprovisioned, offline toolchain boundary.
 
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is

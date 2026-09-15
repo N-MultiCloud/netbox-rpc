@@ -154,6 +154,174 @@ jobs:
           command -v sudo >/dev/null 2>&1 || { echo "sudo unavailable" >&2; exit 1; }
           id postgres >/dev/null 2>&1 || { echo "host postgres unavailable" >&2; exit 1; }
 
+      - name: Prepare private toolchain root
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP:-}"
+          test -n "${GITHUB_WORKSPACE:-}"
+          runner_temp="$(/usr/bin/realpath -e "$RUNNER_TEMP")"
+          workspace="$(/usr/bin/realpath -e "$GITHUB_WORKSPACE")"
+          case "$runner_temp" in
+            "$workspace"|"$workspace"/*)
+              echo "::error::RUNNER_TEMP must be outside GITHUB_WORKSPACE." >&2
+              exit 1
+              ;;
+          esac
+          created_root=""
+          toolchain_root=""
+          cleanup_failed_prepare() {
+            prepare_status=$?
+            trap - ERR INT TERM
+            if [ "$prepare_status" -eq 0 ]; then
+              prepare_status=1
+            fi
+            if [ -n "${created_root:-}" ] && [ -e "$created_root" ] && [ ! -L "$created_root" ]; then
+              if cleanup_root="$(/usr/bin/realpath -e "$created_root")"; then
+                case "$(/usr/bin/basename "$cleanup_root")" in
+                  netbox-rpc-toolchain.??????)
+                    if [ "$(/usr/bin/dirname "$cleanup_root")" = "$runner_temp" ] && [ "$cleanup_root" != "$workspace" ]; then
+                      /usr/bin/rm -rf -- "$cleanup_root" || true
+                    fi
+                    ;;
+                esac
+              fi
+            fi
+            exit "$prepare_status"
+          }
+          created_root="$(/usr/bin/mktemp -d "${runner_temp}/netbox-rpc-toolchain.XXXXXX")"
+          trap cleanup_failed_prepare ERR INT TERM
+          toolchain_root="$(/usr/bin/realpath -e "$created_root")"
+          test ! -L "$toolchain_root"
+          test "$(/usr/bin/dirname "$toolchain_root")" = "$runner_temp"
+          case "$(/usr/bin/basename "$toolchain_root")" in
+            netbox-rpc-toolchain.??????) ;;
+            *) echo "::error::Unexpected private toolchain path." >&2; exit 1 ;;
+          esac
+          /usr/bin/chmod 0700 "$toolchain_root"
+          for directory in tmp tool-cache uv-cache uv-python uv-tools uv-tool-bin; do
+            /usr/bin/install -d -m 0700 "$toolchain_root/$directory"
+          done
+          printf 'root=%s\n' "$toolchain_root" >> "$GITHUB_OUTPUT"
+          printf 'tool_cache=%s\n' "$toolchain_root/tool-cache" >> "$GITHUB_OUTPUT"
+          printf 'uv_cache=%s\n' "$toolchain_root/uv-cache" >> "$GITHUB_OUTPUT"
+          printf 'uv_python=%s\n' "$toolchain_root/uv-python" >> "$GITHUB_OUTPUT"
+          printf 'uv_tools=%s\n' "$toolchain_root/uv-tools" >> "$GITHUB_OUTPUT"
+          printf 'uv_tool_bin=%s\n' "$toolchain_root/uv-tool-bin" >> "$GITHUB_OUTPUT"
+          printf 'temp=%s\n' "$toolchain_root/tmp" >> "$GITHUB_OUTPUT"
+          trap - ERR INT TERM
+
+      - name: Install pinned uv
+        id: uv
+        uses: https://github.com/astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        env:
+          RUNNER_TEMP: ${{ steps.toolchain.outputs.temp }}
+          TMPDIR: ${{ steps.toolchain.outputs.temp }}
+          RUNNER_TOOL_CACHE: ${{ steps.toolchain.outputs.tool_cache }}
+          UV_CACHE_DIR: ${{ steps.toolchain.outputs.uv_cache }}
+          UV_PYTHON_INSTALL_DIR: ${{ steps.toolchain.outputs.uv_python }}
+          UV_TOOL_DIR: ${{ steps.toolchain.outputs.uv_tools }}
+          UV_TOOL_BIN_DIR: ${{ steps.toolchain.outputs.uv_tool_bin }}
+          UV_NO_MODIFY_PATH: "1"
+        with:
+          version: "0.12.5"
+          python-version: "3.12.14"
+          checksum: "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2"
+          github-token: ""
+          download-from-astral-mirror: false
+          enable-cache: false
+          add-problem-matchers: false
+
+      - name: Provision exact task-private Python 3.12
+        id: interpreter
+        shell: bash
+        env:
+          TOOLCHAIN_ROOT: ${{ steps.toolchain.outputs.root }}
+          UV_BIN: ${{ steps.uv.outputs.uv-path }}
+          UV_CACHE_DIR: ${{ steps.toolchain.outputs.uv_cache }}
+          UV_PYTHON_INSTALL_DIR: ${{ steps.toolchain.outputs.uv_python }}
+          UV_TOOL_DIR: ${{ steps.toolchain.outputs.uv_tools }}
+          UV_TOOL_BIN_DIR: ${{ steps.toolchain.outputs.uv_tool_bin }}
+          TMPDIR: ${{ steps.toolchain.outputs.temp }}
+          UV_NO_CONFIG: "1"
+          UV_NO_SOURCES: "1"
+          UV_PYTHON_INSTALL_BIN: "0"
+          UV_PYTHON_DOWNLOADS: manual
+        run: |
+          set -euo pipefail
+          toolchain_root="$(/usr/bin/realpath -e "$TOOLCHAIN_ROOT")"
+          uv_bin="$(/usr/bin/realpath -e "$UV_BIN")"
+          case "$uv_bin" in
+            "$toolchain_root"/*) ;;
+            *) echo "::error::uv executable escaped private toolchain root." >&2; exit 1 ;;
+          esac
+          # Verify the contained setup action output before provisioning Python.
+          if [ ! -x "$uv_bin" ]; then
+            echo "::error::Missing exact uv executable: $uv_bin" >&2
+            exit 1
+          fi
+          if uv_identity="$("$uv_bin" --version)"; then
+            :
+          else
+            uv_probe_status=$?
+            printf '::error::Exact uv version probe failed for %s with status %s.\n' "$uv_bin" "$uv_probe_status" >&2
+            exit "$uv_probe_status"
+          fi
+          printf 'uv identity: %s\n' "$uv_identity"
+          test "$uv_identity" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
+          "$uv_bin" python install 3.12.14 \
+            --no-bin \
+            --no-config \
+            --no-cache \
+            --no-progress
+          python_bin="$(UV_PYTHON_DOWNLOADS=never "$uv_bin" python find --managed-python 3.12.14)"
+          python_bin="$(/usr/bin/realpath -e "$python_bin")"
+          case "$python_bin" in
+            "$toolchain_root"/*) ;;
+            *) echo "::error::Python executable escaped private toolchain root." >&2; exit 1 ;;
+          esac
+          # Verify the contained managed-interpreter output before creating the venv.
+          if [ ! -x "$python_bin" ]; then
+            echo "::error::Missing exact Python executable: $python_bin" >&2
+            exit 1
+          fi
+          if python_identity="$("$python_bin" --version)"; then
+            :
+          else
+            python_probe_status=$?
+            printf '::error::Exact Python version probe failed for %s with status %s.\n' "$python_bin" "$python_probe_status" >&2
+            exit "$python_probe_status"
+          fi
+          printf 'Python identity: %s\n' "$python_identity"
+          test "$python_identity" = "Python 3.12.14"
+          "$python_bin" -I -S - <<'PY'
+          import platform
+          import sys
+
+          if platform.python_implementation() != "CPython":
+              raise SystemExit("CI requires CPython")
+          if sys.version_info[:3] != (3, 12, 14):
+              raise SystemExit("CI requires CPython 3.12.14")
+          if platform.machine() != "x86_64":
+              raise SystemExit("CI requires x86_64")
+          libc_name, libc_version = platform.libc_ver()
+          if libc_name != "glibc":
+              raise SystemExit("CI requires glibc")
+          if tuple(map(int, libc_version.split("."))) < (2, 34):
+              raise SystemExit("CI requires glibc 2.34 or newer")
+          PY
+          UV_PYTHON_DOWNLOADS=never "$uv_bin" venv \
+            --python "$python_bin" \
+            --no-managed-python \
+            --no-python-downloads \
+            --no-project \
+            --no-config \
+            --no-cache \
+            .ci-venv
+          printf 'python_bin=%s\n' "$python_bin" >> "$GITHUB_OUTPUT"
+          printf 'uv_bin=%s\n' "$uv_bin" >> "$GITHUB_OUTPUT"
+
       - name: Provision a UTF8 compatibility database
         shell: bash
         run: |
@@ -197,47 +365,6 @@ jobs:
           persist-credentials: false
           path: plugin
 
-      - name: Set up uv and Python 3.12
-        shell: bash
-        run: |
-          set -eo pipefail
-          python_bin="/usr/local/bin/python3.12"
-          uv_bin="/usr/local/bin/uv"
-          if [ ! -x "${python_bin}" ]; then
-            echo "::error::Missing exact Python executable: ${python_bin}" >&2
-            exit 1
-          fi
-          if [ ! -x "${uv_bin}" ]; then
-            echo "::error::Missing exact uv executable: ${uv_bin}" >&2
-            exit 1
-          fi
-          if python_identity="$("${python_bin}" --version)"; then
-            :
-          else
-            python_probe_status=$?
-            printf '::error::Exact Python version probe failed for %s with status %s.\n' "${python_bin}" "${python_probe_status}" >&2
-            exit "${python_probe_status}"
-          fi
-          printf 'Python identity: %s\n' "${python_identity}"
-          if uv_identity="$("${uv_bin}" --version)"; then
-            :
-          else
-            uv_probe_status=$?
-            printf '::error::Exact uv version probe failed for %s with status %s.\n' "${uv_bin}" "${uv_probe_status}" >&2
-            exit "${uv_probe_status}"
-          fi
-          printf 'uv identity: %s\n' "${uv_identity}"
-          test "${python_identity}" = "Python 3.12.14"
-          test "${uv_identity}" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"
-          "${uv_bin}" venv \
-            --python "${python_bin}" \
-            --no-managed-python \
-            --no-python-downloads \
-            --no-project \
-            --no-config \
-            --no-cache \
-            .ci-venv
-
       - name: Check out NetBox
         shell: bash
         run: |
@@ -252,9 +379,13 @@ jobs:
 
       - name: Install NetBox and plugin
         shell: bash
+        env:
+          UV_BIN: ${{ steps.interpreter.outputs.uv_bin }}
+          TMPDIR: ${{ steps.toolchain.outputs.temp }}
         run: |
-          set -eo pipefail
-          /usr/local/bin/uv pip install \
+          set -euo pipefail
+          test -x "$UV_BIN"
+          UV_PYTHON_DOWNLOADS=never "$UV_BIN" pip install \
             --python .ci-venv \
             --require-hashes \
             --only-binary=:all: \
@@ -266,7 +397,7 @@ jobs:
             --index-strategy first-index \
             --default-index https://pypi.org/simple \
             --requirements plugin/.gitea/deploy/netbox-source-build.lock
-          /usr/local/bin/uv pip install \
+          UV_PYTHON_DOWNLOADS=never "$UV_BIN" pip install \
             --python .ci-venv \
             --require-hashes \
             --no-build-isolation \
@@ -280,7 +411,7 @@ jobs:
             --exact \
             --strict \
             --requirements "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"
-          /usr/local/bin/uv pip install \
+          UV_PYTHON_DOWNLOADS=never "$UV_BIN" pip install \
             --python .ci-venv \
             --no-deps \
             --no-build-isolation \
@@ -314,3 +445,25 @@ jobs:
           if [ -n "${NETBOX_REDIS_PIDFILE:-}" ] && [ -f "${NETBOX_REDIS_PIDFILE}" ]; then
             kill "$(cat "${NETBOX_REDIS_PIDFILE}")" 2>/dev/null || true
           fi
+
+      - name: Remove private toolchain
+        if: always()
+        shell: bash
+        env:
+          TOOLCHAIN_ROOT: ${{ steps.toolchain.outputs.root }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOOLCHAIN_ROOT:-}" ] || [ ! -e "$TOOLCHAIN_ROOT" ]; then
+            exit 0
+          fi
+          runner_temp="$(/usr/bin/realpath -e "$RUNNER_TEMP")"
+          workspace="$(/usr/bin/realpath -e "$GITHUB_WORKSPACE")"
+          toolchain_root="$(/usr/bin/realpath -e "$TOOLCHAIN_ROOT")"
+          test ! -L "$TOOLCHAIN_ROOT"
+          test "$toolchain_root" != "$workspace"
+          test "$(/usr/bin/dirname "$toolchain_root")" = "$runner_temp"
+          case "$(/usr/bin/basename "$toolchain_root")" in
+            netbox-rpc-toolchain.??????) ;;
+            *) echo "::error::Refusing unsafe private toolchain cleanup path." >&2; exit 1 ;;
+          esac
+          /usr/bin/rm -rf -- "$toolchain_root"

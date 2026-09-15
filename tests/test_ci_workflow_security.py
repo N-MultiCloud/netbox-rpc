@@ -27,12 +27,17 @@ GITHUB_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "test.yml"
 LOCK_PATH = ROOT / ".gitea" / "ci-requirements.lock"
 PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
 CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+SETUP_UV_ACTION = (
+    "https://github.com/astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990"
+)
+SETUP_UV_VERSION = "0.12.5"
+SETUP_UV_CHECKSUM = "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2"
 LOCK_SHA256 = "e26ad1915e48f6a20916ddb2c72ad3bda27b4c36266d7ec6249939a2fda97842"
 PYTEST_CONFIG_SHA256 = (
     "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
 )
 INTEGRATION_WORKFLOW_SHA256 = (
-    "14cdfbc41973cab182bb2cc565c9521eec99c20a54997d697f5e88a42bfc692d"
+    "0bab9f5902d0c6e99f9ffabdd831e88f519467951bdcba273754c6a156a354da"
 )
 EXPECTED_COMPATIBILITY_MATRIX = [
     {
@@ -163,7 +168,11 @@ def _read(path: Path) -> str:
 
 
 def _named_step_run(job: dict, name: str) -> str:
-    matches = tuple(step["run"] for step in job["steps"] if step.get("name") == name)
+    return _named_step(job, name)["run"]
+
+
+def _named_step(job: dict, name: str) -> dict:
+    matches = tuple(step for step in job["steps"] if step.get("name") == name)
     assert len(matches) == 1
     return matches[0]
 
@@ -215,21 +224,184 @@ def _assert_optional_integration_preflight(job: dict) -> None:
 
 
 def _assert_exact_toolchain_observability(job: dict) -> None:
-    setup = _named_step_run(job, "Set up uv and Python 3.12")
-    assert setup.count('"${python_bin}" --version') == 1
-    assert setup.count('"${uv_bin}" --version') == 1
-    python_error = setup.index("Missing exact Python executable")
-    python_probe_error = setup.index("Exact Python version probe failed")
-    python_print = setup.index("Python identity: %s")
-    python_test = setup.index('test "${python_identity}" = "Python 3.12.14"')
-    uv_error = setup.index("Missing exact uv executable")
-    uv_probe_error = setup.index("Exact uv version probe failed")
-    uv_print = setup.index("uv identity: %s")
-    uv_test = setup.index(
-        'test "${uv_identity}" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"'
+    _assert_private_toolchain_step_order(job)
+    _assert_private_toolchain_prepare_step(job)
+    _assert_pinned_uv_setup_step(job)
+    provision = _assert_python_provision_step(job)
+    _assert_python_provision_source(provision["run"])
+    _assert_platform_probe_source(provision["run"])
+    _assert_exact_identity_probe_order(provision["run"])
+    _assert_private_toolchain_consumers_and_cleanup(job)
+
+
+def _assert_private_toolchain_step_order(job: dict) -> None:
+    steps = job["steps"]
+    names = [step["name"] for step in steps]
+    expected_order = (
+        "Preflight (fail if host services are unavailable)",
+        "Prepare private toolchain root",
+        "Install pinned uv",
+        "Provision exact task-private Python 3.12",
+        "Provision a UTF8 compatibility database",
+        "Start isolated authenticated Redis",
+        "Checkout plugin",
+        "Check out NetBox",
+        "Install NetBox and plugin",
+        "Run compatibility checks (fresh database)",
+        "Stop isolated Redis",
+        "Remove private toolchain",
+    )
+    assert tuple(names) == expected_order
+
+
+def _assert_private_toolchain_prepare_step(job: dict) -> None:
+    prepare = _named_step(job, "Prepare private toolchain root")
+    assert set(prepare) == {"name", "id", "shell", "run"}
+    assert prepare["id"] == "toolchain"
+    assert prepare["shell"] == "bash"
+    assert (
+        'created_root="$(/usr/bin/mktemp -d '
+        '"${runner_temp}/netbox-rpc-toolchain.XXXXXX")"' in prepare["run"]
+    )
+    assert 'toolchain_root="$(/usr/bin/realpath -e "$created_root")"' in prepare["run"]
+    assert (
+        'test "$(/usr/bin/dirname "$toolchain_root")" = "$runner_temp"'
+        in prepare["run"]
+    )
+    assert "netbox-rpc-toolchain.??????" in prepare["run"]
+    assert prepare["run"].count("-m 0700") == 1
+    assert prepare["run"].count("chmod 0700") == 1
+    assert "trap cleanup_failed_prepare ERR INT TERM" in prepare["run"]
+    assert "trap - ERR INT TERM" in prepare["run"]
+    assert "printf 'temp=%s\\n' \"$toolchain_root/tmp\"" in prepare["run"]
+    _assert_prepare_trap_order(prepare["run"])
+
+
+def _assert_prepare_trap_order(script: str) -> None:
+    mktemp = script.index('created_root="$(/usr/bin/mktemp -d ')
+    install_trap = script.index("trap cleanup_failed_prepare ERR INT TERM")
+    canonicalize = script.index(
+        'toolchain_root="$(/usr/bin/realpath -e "$created_root")"'
+    )
+    first_output = script.index("printf 'root=%s\\n'")
+    last_output = script.index("printf 'temp=%s\\n'")
+    disarm = script.rindex("trap - ERR INT TERM")
+    assert mktemp < install_trap < canonicalize < first_output < last_output < disarm
+
+
+def _assert_pinned_uv_setup_step(job: dict) -> None:
+    setup = _named_step(job, "Install pinned uv")
+    assert set(setup) == {"name", "id", "uses", "env", "with"}
+    assert setup["id"] == "uv"
+    assert setup["uses"] == SETUP_UV_ACTION
+    assert setup["env"] == {
+        "RUNNER_TEMP": "${{ steps.toolchain.outputs.temp }}",
+        "TMPDIR": "${{ steps.toolchain.outputs.temp }}",
+        "RUNNER_TOOL_CACHE": "${{ steps.toolchain.outputs.tool_cache }}",
+        "UV_CACHE_DIR": "${{ steps.toolchain.outputs.uv_cache }}",
+        "UV_PYTHON_INSTALL_DIR": "${{ steps.toolchain.outputs.uv_python }}",
+        "UV_TOOL_DIR": "${{ steps.toolchain.outputs.uv_tools }}",
+        "UV_TOOL_BIN_DIR": "${{ steps.toolchain.outputs.uv_tool_bin }}",
+        "UV_NO_MODIFY_PATH": "1",
+    }
+    assert setup["with"] == {
+        "version": SETUP_UV_VERSION,
+        "python-version": "3.12.14",
+        "checksum": SETUP_UV_CHECKSUM,
+        "github-token": "",
+        "download-from-astral-mirror": "false",
+        "enable-cache": "false",
+        "add-problem-matchers": "false",
+    }
+
+
+def _assert_python_provision_step(job: dict) -> dict:
+    provision = _named_step(job, "Provision exact task-private Python 3.12")
+    assert set(provision) == {"name", "id", "shell", "env", "run"}
+    assert provision["id"] == "interpreter"
+    assert provision["shell"] == "bash"
+    assert provision["env"] == {
+        "TOOLCHAIN_ROOT": "${{ steps.toolchain.outputs.root }}",
+        "UV_BIN": "${{ steps.uv.outputs.uv-path }}",
+        "UV_CACHE_DIR": "${{ steps.toolchain.outputs.uv_cache }}",
+        "UV_PYTHON_INSTALL_DIR": "${{ steps.toolchain.outputs.uv_python }}",
+        "UV_TOOL_DIR": "${{ steps.toolchain.outputs.uv_tools }}",
+        "UV_TOOL_BIN_DIR": "${{ steps.toolchain.outputs.uv_tool_bin }}",
+        "TMPDIR": "${{ steps.toolchain.outputs.temp }}",
+        "UV_NO_CONFIG": "1",
+        "UV_NO_SOURCES": "1",
+        "UV_PYTHON_INSTALL_BIN": "0",
+        "UV_PYTHON_DOWNLOADS": "manual",
+    }
+    return provision
+
+
+def _assert_python_provision_source(script: str) -> None:
+    assert script.count('"$python_bin" --version') == 1
+    assert script.count('"$uv_bin" --version') == 1
+    assert script.count('"$toolchain_root"/*') == 2
+    assert '"$uv_bin" python install 3.12.14' in script
+    assert "--no-bin" in script
+    assert "--no-config" in script
+    assert "--no-cache" in script
+    assert "--no-progress" in script
+    assert (
+        'python_bin="$(UV_PYTHON_DOWNLOADS=never "$uv_bin" python find '
+        '--managed-python 3.12.14)"' in script
+    )
+    assert 'UV_PYTHON_DOWNLOADS=never "$uv_bin" venv' in script
+    assert "printf 'python_bin=%s\\n'" in script
+    assert "printf 'uv_bin=%s\\n'" in script
+
+
+def _assert_platform_probe_source(script: str) -> None:
+    assert "\"$python_bin\" -I -S - <<'PY'" in script
+    assert 'platform.python_implementation() != "CPython"' in script
+    assert "sys.version_info[:3] != (3, 12, 14)" in script
+    assert 'platform.machine() != "x86_64"' in script
+    assert 'libc_name != "glibc"' in script
+    assert 'tuple(map(int, libc_version.split("."))) < (2, 34)' in script
+
+
+def _assert_exact_identity_probe_order(script: str) -> None:
+    python_error = script.index("Missing exact Python executable")
+    python_probe_error = script.index("Exact Python version probe failed")
+    python_print = script.index("Python identity: %s")
+    python_test = script.index('test "$python_identity" = "Python 3.12.14"')
+    uv_error = script.index("Missing exact uv executable")
+    uv_probe_error = script.index("Exact uv version probe failed")
+    uv_print = script.index("uv identity: %s")
+    uv_test = script.index(
+        'test "$uv_identity" = "uv 0.12.5 (x86_64-unknown-linux-gnu)"'
     )
     assert python_error < python_probe_error < python_print < python_test
     assert uv_error < uv_probe_error < uv_print < uv_test
+
+
+def _assert_private_toolchain_consumers_and_cleanup(job: dict) -> None:
+    install = _named_step(job, "Install NetBox and plugin")
+    assert install["env"] == {
+        "UV_BIN": "${{ steps.interpreter.outputs.uv_bin }}",
+        "TMPDIR": "${{ steps.toolchain.outputs.temp }}",
+    }
+    assert install["run"].count('UV_PYTHON_DOWNLOADS=never "$UV_BIN" pip install') == 3
+
+    cleanup = _named_step(job, "Remove private toolchain")
+    assert cleanup["if"] == "always()"
+    assert cleanup["env"] == {"TOOLCHAIN_ROOT": "${{ steps.toolchain.outputs.root }}"}
+    assert 'runner_temp="$(/usr/bin/realpath -e "$RUNNER_TEMP")"' in cleanup["run"]
+    assert 'workspace="$(/usr/bin/realpath -e "$GITHUB_WORKSPACE")"' in cleanup["run"]
+    assert (
+        'toolchain_root="$(/usr/bin/realpath -e "$TOOLCHAIN_ROOT")"' in cleanup["run"]
+    )
+    assert 'test ! -L "$TOOLCHAIN_ROOT"' in cleanup["run"]
+    assert 'test "$toolchain_root" != "$workspace"' in cleanup["run"]
+    assert (
+        'test "$(/usr/bin/dirname "$toolchain_root")" = "$runner_temp"'
+        in cleanup["run"]
+    )
+    assert "netbox-rpc-toolchain.??????" in cleanup["run"]
+    assert '/usr/bin/rm -rf -- "$toolchain_root"' in cleanup["run"]
 
 
 def _run_bash(script: str, environment: dict[str, str]) -> subprocess.CompletedProcess:
@@ -256,15 +428,74 @@ def _write_fake_executable(path: Path, identity: str, status: int = 0) -> None:
     path.chmod(0o755)
 
 
+def _write_fake_uv_provisioner(path: Path, python_bin: Path) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
+        "  printf '%s\\n' 'uv 0.12.5 (x86_64-unknown-linux-gnu)'\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$#" -eq 7 ] && [ "$1" = "python" ] && [ "$2" = "install" ] '
+        '&& [ "$3" = "3.12.14" ] && [ "$4" = "--no-bin" ] '
+        '&& [ "$5" = "--no-config" ] && [ "$6" = "--no-cache" ] '
+        '&& [ "$7" = "--no-progress" ]; then\n'
+        '  test -n "${TMPDIR:-}" && test -d "$TMPDIR" || exit 65\n'
+        '  temp_probe="$(/usr/bin/mktemp "$TMPDIR/uv-python-stage.XXXXXX")" || exit 66\n'
+        '  case "$temp_probe" in "$TMPDIR"/*) ;; *) exit 67 ;; esac\n'
+        '  /usr/bin/rm -f -- "$temp_probe"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$#" -eq 4 ] && [ "$1" = "python" ] && [ "$2" = "find" ] '
+        '&& [ "$3" = "--managed-python" ] && [ "$4" = "3.12.14" ]; then\n'
+        f"  printf '%s\\n' '{python_bin}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "venv" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' 'unexpected uv arguments' >&2\n"
+        "exit 64\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_fake_python_runtime(path: Path) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
+        "  printf '%s\\n' 'Python 3.12.14'\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$#" -eq 3 ] && [ "$1" = "-I" ] && [ "$2" = "-S" ] '
+        '&& [ "$3" = "-" ]; then\n'
+        '  probe="$(/usr/bin/cat)"\n'
+        "  case \"$probe\" in *'platform.python_implementation() != \"CPython\"'*) ;; *) printf '%s\\n' 'invalid platform probe' >&2; exit 68 ;; esac\n"
+        "  case \"$probe\" in *'sys.version_info[:3] != (3, 12, 14)'*) ;; *) printf '%s\\n' 'invalid platform probe' >&2; exit 68 ;; esac\n"
+        "  case \"$probe\" in *'platform.machine() != \"x86_64\"'*) ;; *) printf '%s\\n' 'invalid platform probe' >&2; exit 68 ;; esac\n"
+        "  case \"$probe\" in *'libc_name != \"glibc\"'*) ;; *) printf '%s\\n' 'invalid platform probe' >&2; exit 68 ;; esac\n"
+        "  case \"$probe\" in *'tuple(map(int, libc_version.split(\".\"))) < (2, 34)'*) ;; *) printf '%s\\n' 'invalid platform probe' >&2; exit 68 ;; esac\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' 'unexpected Python arguments' >&2\n"
+        "exit 64\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _toolchain_identity_script(job: dict) -> str:
-    setup = _named_step_run(job, "Set up uv and Python 3.12")
-    identity_script = setup.split('\n"${uv_bin}" venv', 1)[0]
-    return identity_script.replace(
-        'python_bin="/usr/local/bin/python3.12"',
-        'python_bin="${TEST_PYTHON_BIN}"',
-    ).replace(
-        'uv_bin="/usr/local/bin/uv"',
-        'uv_bin="${TEST_UV_BIN}"',
+    provision = _named_step_run(job, "Provision exact task-private Python 3.12")
+    uv_start = provision.index("# Verify the contained setup action output")
+    uv_end = provision.index('"$uv_bin" python install')
+    python_start = provision.index("# Verify the contained managed-interpreter output")
+    python_end = provision.index('"$python_bin" -I -S -')
+    identity_script = provision[uv_start:uv_end] + provision[python_start:python_end]
+    return (
+        "set -euo pipefail\n"
+        'python_bin="${TEST_PYTHON_BIN}"\n'
+        'uv_bin="${TEST_UV_BIN}"\n'
+        f"{identity_script}"
     )
 
 
@@ -477,6 +708,16 @@ def _assert_compatibility_cleanup_order(workflow: str) -> None:
     build_backend_install = workflow.index("netbox-source-build.lock")
     netbox_closure_install = workflow.index("netbox-${NETBOX_VERSION}-ci.lock")
     assert build_backend_install < netbox_closure_install
+    loaded = _load_ci_workflow(workflow)
+    steps = loaded["jobs"]["compatibility"]["steps"]
+    names = [step["name"] for step in steps]
+    redis_cleanup = _named_step(loaded["jobs"]["compatibility"], "Stop isolated Redis")
+    toolchain_cleanup = _named_step(
+        loaded["jobs"]["compatibility"], "Remove private toolchain"
+    )
+    assert redis_cleanup["if"] == "always()"
+    assert toolchain_cleanup["if"] == "always()"
+    assert names.index("Stop isolated Redis") < names.index("Remove private toolchain")
 
 
 def _assert_github_compatibility_contract(workflow: str) -> None:
@@ -648,6 +889,7 @@ def test_public_ci_contract_docs_do_not_leak_private_tracker_ids() -> None:
     ):
         assert not re.search(r"\bnmulticloud-context#\d+\b", _read(path))
     agents = _read(ROOT / "AGENTS.md")
+    claude = _read(ROOT / "CLAUDE.md")
     architecture = _read(ROOT / "docs" / "architecture.md")
     readme = _read(ROOT / "README.md")
     for source in (agents, architecture, readme):
@@ -657,6 +899,12 @@ def test_public_ci_contract_docs_do_not_leak_private_tracker_ids() -> None:
         assert "blocked/queued" in normalized
         assert "supplementary post-mirror evidence" in normalized
         assert "not canonical pre-merge evidence" in normalized
+    for source in (agents, claude, architecture, readme):
+        normalized = " ".join(source.split())
+        assert "mode-0700 task-private" in normalized
+        assert "exact uv 0.12.5" in normalized
+        assert "exact CPython 3.12.14" in normalized
+        assert "managed-Python catalog" in normalized
 
 
 @pytest.mark.parametrize(
@@ -815,6 +1063,479 @@ def test_optional_integration_configured_host_enables_checkout(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("needle", "replacement"),
     (
+        (
+            SETUP_UV_ACTION,
+            "https://github.com/astral-sh/setup-uv@v8",
+        ),
+        (SETUP_UV_CHECKSUM, "0" * 64),
+        ('version: "0.12.5"', 'version: "latest"'),
+        ('python-version: "3.12.14"', 'python-version: "3.12"'),
+        ('github-token: ""', "github-token: ${{ github.token }}"),
+        ("enable-cache: false", "enable-cache: true"),
+        ("UV_PYTHON_DOWNLOADS: manual", "UV_PYTHON_DOWNLOADS: automatic"),
+        ('UV_PYTHON_INSTALL_BIN: "0"', 'UV_PYTHON_INSTALL_BIN: "1"'),
+        ('UV_NO_MODIFY_PATH: "1"', 'UV_NO_MODIFY_PATH: "0"'),
+        ("--no-bin", "--default"),
+        ("netbox-rpc-toolchain.XXXXXX", "toolchain.XXXXXX"),
+        ("/usr/bin/chmod 0700", "/usr/bin/chmod 0755"),
+        (
+            "- name: Remove private toolchain\n        if: always()",
+            "- name: Remove private toolchain\n        if: success()",
+        ),
+    ),
+)
+def test_task_private_toolchain_rejects_pin_or_isolation_drift(
+    needle: str,
+    replacement: str,
+) -> None:
+    workflow = _read(INTEGRATION_WORKFLOW_PATH)
+    assert needle in workflow
+    mutated = workflow.replace(needle, replacement, 1)
+    job = _load_ci_workflow(mutated)["jobs"]["compatibility"]
+    with pytest.raises((AssertionError, KeyError, ValueError)):
+        _assert_exact_toolchain_observability(job)
+
+
+def test_prepare_and_cleanup_private_toolchain_behavior(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    github_output = tmp_path / "github-output"
+    prepare = _named_step_run(job, "Prepare private toolchain root")
+
+    result = _run_bash(
+        prepare,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_OUTPUT": str(github_output),
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    outputs = dict(
+        line.split("=", 1)
+        for line in github_output.read_text(encoding="utf-8").splitlines()
+    )
+    toolchain_root = Path(outputs["root"])
+    assert toolchain_root.parent == runner_temp.resolve()
+    assert re.fullmatch(r"netbox-rpc-toolchain\.[A-Za-z0-9]{6}", toolchain_root.name)
+    assert toolchain_root.stat().st_mode & 0o777 == 0o700
+    for key in (
+        "temp",
+        "tool_cache",
+        "uv_cache",
+        "uv_python",
+        "uv_tools",
+        "uv_tool_bin",
+    ):
+        private_directory = Path(outputs[key])
+        assert private_directory.parent == toolchain_root
+        assert private_directory.stat().st_mode & 0o777 == 0o700
+
+    marker = toolchain_root / "marker"
+    marker.write_text("private", encoding="utf-8")
+    cleanup = _named_step_run(job, "Remove private toolchain")
+    cleanup_result = _run_bash(
+        cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(toolchain_root),
+        },
+    )
+
+    assert cleanup_result.returncode == 0
+    assert cleanup_result.stdout == ""
+    assert cleanup_result.stderr == ""
+    assert not toolchain_root.exists()
+
+
+def test_private_toolchain_cleanup_refuses_workspace(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    workspace = runner_temp / "netbox-rpc-toolchain.ABC123"
+    workspace.mkdir()
+    cleanup = _named_step_run(job, "Remove private toolchain")
+
+    result = _run_bash(
+        cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(workspace),
+        },
+    )
+
+    assert result.returncode != 0
+    assert workspace.is_dir()
+
+    workspace_guard = 'test "$toolchain_root" != "$workspace"'
+    assert cleanup.count(workspace_guard) == 1
+    mutated_cleanup = cleanup.replace(workspace_guard, ":", 1)
+    mutation_result = _run_bash(
+        mutated_cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(workspace),
+        },
+    )
+
+    assert mutation_result.returncode == 0
+    assert mutation_result.stdout == ""
+    assert mutation_result.stderr == ""
+    assert not workspace.exists()
+
+
+def test_prepare_private_toolchain_failure_removes_unpublished_root(
+    tmp_path: Path,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    missing_output = tmp_path / "missing-parent" / "github-output"
+    prepare = _named_step_run(job, "Prepare private toolchain root")
+
+    result = _run_bash(
+        prepare,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_OUTPUT": str(missing_output),
+        },
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert not tuple(runner_temp.glob("netbox-rpc-toolchain.??????"))
+
+
+def test_prepare_failed_realpath_uses_raw_created_root(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    prepare = _named_step_run(job, "Prepare private toolchain root")
+    realpath_assignment = 'toolchain_root="$(/usr/bin/realpath -e "$created_root")"'
+    assert prepare.count(realpath_assignment) == 1
+    forced_failure = prepare.replace(realpath_assignment, 'toolchain_root=""\nfalse', 1)
+
+    runner_temp = tmp_path / "current-runner-temp"
+    workspace = tmp_path / "current-workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    result = _run_bash(
+        forced_failure,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_OUTPUT": str(tmp_path / "current-output"),
+        },
+    )
+    assert result.returncode != 0
+    assert not tuple(runner_temp.glob("netbox-rpc-toolchain.??????"))
+
+    regressed = forced_failure.replace("${created_root:-}", "${toolchain_root:-}", 1)
+    regressed = regressed.replace('"$created_root"', '"$toolchain_root"', 2)
+    regressed_runner_temp = tmp_path / "regressed-runner-temp"
+    regressed_workspace = tmp_path / "regressed-workspace"
+    regressed_runner_temp.mkdir()
+    regressed_workspace.mkdir()
+    regressed_result = _run_bash(
+        regressed,
+        {
+            "RUNNER_TEMP": str(regressed_runner_temp),
+            "GITHUB_WORKSPACE": str(regressed_workspace),
+            "GITHUB_OUTPUT": str(tmp_path / "regressed-output"),
+        },
+    )
+    assert regressed_result.returncode != 0
+    assert len(tuple(regressed_runner_temp.glob("netbox-rpc-toolchain.??????"))) == 1
+
+
+@pytest.mark.parametrize("unsafe_target", ("runner_temp", "unexpected_name"))
+def test_private_toolchain_cleanup_refuses_unsafe_targets(
+    tmp_path: Path,
+    unsafe_target: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    target = runner_temp
+    if unsafe_target == "unexpected_name":
+        target = runner_temp / "unexpected-toolchain"
+        target.mkdir()
+    cleanup = _named_step_run(job, "Remove private toolchain")
+
+    result = _run_bash(
+        cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(target),
+        },
+    )
+
+    assert result.returncode != 0
+    assert target.is_dir()
+
+
+def test_private_toolchain_cleanup_refuses_symlink_substitution(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    victim = runner_temp / "netbox-rpc-toolchain.VICTIM"
+    victim.mkdir()
+    target = runner_temp / "netbox-rpc-toolchain.ABC123"
+    target.symlink_to(victim, target_is_directory=True)
+    cleanup = _named_step_run(job, "Remove private toolchain")
+
+    result = _run_bash(
+        cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(target),
+        },
+    )
+
+    assert result.returncode != 0
+    assert target.is_symlink()
+    assert victim.is_dir()
+
+
+def test_private_toolchain_cleanup_refuses_replaced_path(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    victim = runner_temp / "netbox-rpc-toolchain.VICTIM"
+    victim.mkdir()
+    target = runner_temp / "netbox-rpc-toolchain.ABC123"
+    target.mkdir()
+    cleanup = _named_step_run(job, "Remove private toolchain")
+    substitution = f'/usr/bin/rmdir "{target}"\n/usr/bin/ln -s "{victim}" "{target}"\n'
+    realpath_line = 'toolchain_root="$(/usr/bin/realpath -e "$TOOLCHAIN_ROOT")"'
+    assert cleanup.count(realpath_line) == 1
+    replaced_cleanup = cleanup.replace(realpath_line, substitution + realpath_line, 1)
+
+    result = _run_bash(
+        replaced_cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(target),
+        },
+    )
+
+    assert result.returncode != 0
+    assert target.is_symlink()
+    assert victim.is_dir()
+
+
+def test_private_toolchain_cleanup_direct_parent_guard_isolated(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    runner_temp = tmp_path / "runner-temp"
+    workspace = tmp_path / "workspace"
+    outside_parent = tmp_path / "outside"
+    runner_temp.mkdir()
+    workspace.mkdir()
+    outside_parent.mkdir()
+    target = outside_parent / "netbox-rpc-toolchain.ABC123"
+    target.mkdir()
+    cleanup = _named_step_run(job, "Remove private toolchain")
+    parent_guard = 'test "$(/usr/bin/dirname "$toolchain_root")" = "$runner_temp"'
+    assert cleanup.count(parent_guard) == 1
+
+    result = _run_bash(
+        cleanup,
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(target),
+        },
+    )
+    assert result.returncode != 0
+    assert target.is_dir()
+
+    mutation_result = _run_bash(
+        cleanup.replace(parent_guard, ":", 1),
+        {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TOOLCHAIN_ROOT": str(target),
+        },
+    )
+    assert mutation_result.returncode == 0
+    assert not target.exists()
+
+
+def test_exact_toolchain_provisioning_accepts_contained_outputs(tmp_path: Path) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    toolchain_root = tmp_path / "netbox-rpc-toolchain.ABC123"
+    uv_bin = toolchain_root / "tool-cache" / "uv"
+    python_bin = toolchain_root / "uv-python" / "cpython" / "bin" / "python3.12"
+    uv_bin.parent.mkdir(parents=True)
+    python_bin.parent.mkdir(parents=True)
+    (toolchain_root / "tmp").mkdir()
+    _write_fake_python_runtime(python_bin)
+    _write_fake_uv_provisioner(uv_bin, python_bin)
+    github_output = tmp_path / "github-output"
+    provision = _named_step_run(job, "Provision exact task-private Python 3.12")
+
+    result = _run_bash(
+        provision,
+        {
+            "GITHUB_OUTPUT": str(github_output),
+            "TOOLCHAIN_ROOT": str(toolchain_root),
+            "UV_BIN": str(uv_bin),
+            "UV_CACHE_DIR": str(toolchain_root / "uv-cache"),
+            "UV_PYTHON_INSTALL_DIR": str(toolchain_root / "uv-python"),
+            "UV_TOOL_DIR": str(toolchain_root / "uv-tools"),
+            "UV_TOOL_BIN_DIR": str(toolchain_root / "uv-tool-bin"),
+            "TMPDIR": str(toolchain_root / "tmp"),
+            "UV_NO_CONFIG": "1",
+            "UV_NO_SOURCES": "1",
+            "UV_PYTHON_INSTALL_BIN": "0",
+            "UV_PYTHON_DOWNLOADS": "manual",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == (
+        "uv identity: uv 0.12.5 (x86_64-unknown-linux-gnu)\n"
+        "Python identity: Python 3.12.14\n"
+    )
+    assert result.stderr == ""
+    assert github_output.read_text(encoding="utf-8") == (
+        f"python_bin={python_bin.resolve()}\nuv_bin={uv_bin.resolve()}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
+        (
+            'platform.python_implementation() != "CPython"',
+            'platform.python_implementation() != "PyPy"',
+        ),
+        (
+            "sys.version_info[:3] != (3, 12, 14)",
+            "sys.version_info[:3] != (3, 12, 15)",
+        ),
+        ('platform.machine() != "x86_64"', 'platform.machine() != "aarch64"'),
+        ('libc_name != "glibc"', 'libc_name != "musl"'),
+        (
+            'tuple(map(int, libc_version.split("."))) < (2, 34)',
+            'tuple(map(int, libc_version.split("."))) < (2, 33)',
+        ),
+    ),
+)
+def test_exact_toolchain_rejects_platform_probe_mutation(
+    tmp_path: Path,
+    needle: str,
+    replacement: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    provision = _named_step_run(job, "Provision exact task-private Python 3.12")
+    assert provision.count(needle) == 1
+    provision = provision.replace(needle, replacement, 1)
+    toolchain_root = tmp_path / "netbox-rpc-toolchain.ABC123"
+    uv_bin = toolchain_root / "tool-cache" / "uv"
+    python_bin = toolchain_root / "uv-python" / "cpython" / "bin" / "python3.12"
+    uv_bin.parent.mkdir(parents=True)
+    python_bin.parent.mkdir(parents=True)
+    (toolchain_root / "tmp").mkdir()
+    _write_fake_python_runtime(python_bin)
+    _write_fake_uv_provisioner(uv_bin, python_bin)
+
+    result = _run_bash(
+        provision,
+        {
+            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+            "TOOLCHAIN_ROOT": str(toolchain_root),
+            "UV_BIN": str(uv_bin),
+            "UV_CACHE_DIR": str(toolchain_root / "uv-cache"),
+            "UV_PYTHON_INSTALL_DIR": str(toolchain_root / "uv-python"),
+            "UV_TOOL_DIR": str(toolchain_root / "uv-tools"),
+            "UV_TOOL_BIN_DIR": str(toolchain_root / "uv-tool-bin"),
+            "TMPDIR": str(toolchain_root / "tmp"),
+            "UV_NO_CONFIG": "1",
+            "UV_NO_SOURCES": "1",
+            "UV_PYTHON_INSTALL_BIN": "0",
+            "UV_PYTHON_DOWNLOADS": "manual",
+        },
+    )
+
+    assert result.returncode == 68
+    assert result.stderr == "invalid platform probe\n"
+
+
+@pytest.mark.parametrize("external_tool", ("uv", "python"))
+def test_exact_toolchain_provisioning_rejects_external_executable(
+    tmp_path: Path,
+    external_tool: str,
+) -> None:
+    job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
+    toolchain_root = tmp_path / "netbox-rpc-toolchain.ABC123"
+    toolchain_root.mkdir()
+    uv_bin = toolchain_root / "tool-cache" / "uv"
+    python_bin = toolchain_root / "uv-python" / "python3.12"
+    if external_tool == "uv":
+        uv_bin = tmp_path / "external-uv" / "uv"
+    else:
+        python_bin = tmp_path / "external-python" / "python3.12"
+    uv_bin.parent.mkdir(parents=True)
+    python_bin.parent.mkdir(parents=True)
+    (toolchain_root / "tmp").mkdir()
+    _write_fake_python_runtime(python_bin)
+    _write_fake_uv_provisioner(uv_bin, python_bin)
+    provision = _named_step_run(job, "Provision exact task-private Python 3.12")
+
+    result = _run_bash(
+        provision,
+        {
+            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+            "TOOLCHAIN_ROOT": str(toolchain_root),
+            "UV_BIN": str(uv_bin),
+            "UV_CACHE_DIR": str(toolchain_root / "uv-cache"),
+            "UV_PYTHON_INSTALL_DIR": str(toolchain_root / "uv-python"),
+            "UV_TOOL_DIR": str(toolchain_root / "uv-tools"),
+            "UV_TOOL_BIN_DIR": str(toolchain_root / "uv-tool-bin"),
+            "TMPDIR": str(toolchain_root / "tmp"),
+            "UV_NO_CONFIG": "1",
+            "UV_NO_SOURCES": "1",
+            "UV_PYTHON_INSTALL_BIN": "0",
+            "UV_PYTHON_DOWNLOADS": "manual",
+        },
+    )
+
+    assert result.returncode == 1
+    expected_name = "uv" if external_tool == "uv" else "Python"
+    expected_stdout = (
+        ""
+        if external_tool == "uv"
+        else "uv identity: uv 0.12.5 (x86_64-unknown-linux-gnu)\n"
+    )
+    assert result.stdout == expected_stdout
+    assert result.stderr == (
+        f"::error::{expected_name} executable escaped private toolchain root.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
         ("Python identity: %s", "Observed Python: %s"),
         ("uv identity: %s", "Observed uv: %s"),
         ("Python 3.12.14", "Python 3.12.15"),
@@ -846,8 +1567,8 @@ def test_exact_toolchain_rejects_version_probe_argument_mutation(
     job = _load_ci_workflow(_read(INTEGRATION_WORKFLOW_PATH))["jobs"]["compatibility"]
     script = _toolchain_identity_script(job)
     probe_variable = "python_bin" if probe_name == "python" else "uv_bin"
-    exact_probe = f'"${{{probe_variable}}}" --version'
-    mutated_probe = f'"${{{probe_variable}}}" {replacement_argument}'.rstrip()
+    exact_probe = f'"${probe_variable}" --version'
+    mutated_probe = f'"${probe_variable}" {replacement_argument}'.rstrip()
     assert script.count(exact_probe) == 1
     script = script.replace(exact_probe, mutated_probe, 1)
     python_bin = tmp_path / "python3.12"
@@ -991,8 +1712,8 @@ def test_exact_toolchain_accepts_and_prints_exact_identities(tmp_path: Path) -> 
 
     assert result.returncode == 0
     assert result.stdout == (
-        "Python identity: Python 3.12.14\n"
         "uv identity: uv 0.12.5 (x86_64-unknown-linux-gnu)\n"
+        "Python identity: Python 3.12.14\n"
     )
     assert result.stderr == ""
 

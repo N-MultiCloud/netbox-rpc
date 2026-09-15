@@ -413,7 +413,17 @@ The suite is two tiers:
    not canonical pre-merge evidence. Privileged Gitea `integration.yml` is a
    manual, canonical-`main`-only, non-gating operator diagnostic and never PR or
    push evidence. Platform runner/ref policy, not its candidate-visible guard,
-   is authoritative.
+   is authoritative. The compatibility job creates a unique mode-0700
+   task-private toolchain root under `$RUNNER_TEMP`, installs exact uv 0.12.5
+   through a full-commit-pinned setup action and release checksum, and uses the
+   uv release's frozen managed-Python catalog for exact CPython 3.12.14. It
+   confines action download/extraction, uv staging, and both resolved
+   executables to that root, disables further Python downloads for every
+   consumer, and removes only the validated root in an `always()` cleanup after
+   Redis cleanup. A preparation trap removes a partially built root before its
+   output is published. Runner death or `SIGKILL` can still leave an abandoned
+   task-private directory for operator cleanup. Ordinary CI retains its
+   separate preprovisioned, offline toolchain boundary.
 
 Run them locally with:
 

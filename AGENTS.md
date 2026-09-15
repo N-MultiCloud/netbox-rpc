@@ -2028,6 +2028,21 @@ Two tiers (see `docs/architecture.md` → Testing):
    authoritative.
    Config: `tests/ci/netbox_configuration.py`.
 
+   The compatibility job must provision exact uv 0.12.5 and CPython 3.12.14
+   only inside a unique mode-0700 task-private `$RUNNER_TEMP` directory. Keep
+   the setup action at its full commit SHA and the uv release archive at its
+   exact SHA-256. uv's release-frozen managed-Python catalog is the interpreter
+   source of truth. Resolve both executable paths with `realpath -e`, require
+   containment inside the private root before execution, and bind action
+   download/extraction plus uv temporary staging to its mode-0700 `tmp` child.
+   Disable all further Python downloads, pass the resolved uv path explicitly
+   to every install, and retain the validated `always()` cleanup after Redis
+   cleanup. A preparation trap must remove a partially built root before output
+   publication. Runner death or `SIGKILL` can still leave an abandoned private
+   directory that requires operator cleanup. Never reuse this exception to
+   weaken ordinary CI's preprovisioned, offline toolchain contract or to write
+   `/usr/local`.
+
    **The manual Gitea integration workflow must stay serialised on a repo-wide
    concurrency group.** An operator may dispatch it only for canonical `main`;
    it has no push or pull-request trigger and is not a merge gate. Its
