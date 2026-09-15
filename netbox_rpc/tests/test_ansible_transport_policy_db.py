@@ -18,6 +18,33 @@ PINNED_HANDLER_IDS = (
     "os.linux.ubuntu.24.upgrade_26.run_upgrade",
 )
 
+CURRENT_PINNED_PROCEDURES = (
+    (
+        "os.linux.debian.13.install_akvorado",
+        "os.linux_debian_13.install_akvorado",
+    ),
+    (
+        "os.linux.debian.13.preflight_akvorado",
+        "os.linux_debian_13.preflight_akvorado",
+    ),
+    (
+        "os.linux.ubuntu.24.upgrade_26.run_upgrade",
+        "os.linux.ubuntu.24.upgrade_26.run_upgrade",
+    ),
+    (
+        "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.gitea.actions_runner.provision_org_ci_runner",
+    ),
+    (
+        "service.netbox.staging.deploy_dns_pair",
+        "service.netbox.staging.deploy_dns_pair",
+    ),
+    (
+        "service.netbox.staging.rotate_backend_token",
+        "service.netbox.staging.rotate_backend_token",
+    ),
+)
+
 
 class AnsibleFirstPolicySeedTests(TestCase):
     """Migration 0075 applied to a real database."""
@@ -50,19 +77,21 @@ class AnsibleFirstPolicySeedTests(TestCase):
         for procedure in pinned:
             assert procedure.transport_pinned is True, procedure.handler_id
 
-    def test_no_other_procedure_was_pinned_by_the_migration(self):
+    def test_only_declared_procedures_are_pinned_in_the_current_catalog(self):
         """Mutation guard: pinning everything would silently disable the policy.
 
-        A migration that set the flag broadly would satisfy the test above while
-        making the whole feature a no-op.
+        Migration 0075 introduced the first two pins. Later reviewed migrations
+        added four procedures whose transport is also contractually fixed. The
+        fresh database must contain exactly that complete declared set.
         """
 
-        pinned = set(
-            RPCProcedure.objects.filter(transport_pinned=True).values_list(
-                "handler_id", flat=True
-            )
+        pinned = list(
+            RPCProcedure.objects.filter(transport_pinned=True)
+            .order_by("name")
+            .values_list("name", "handler_id")
         )
-        assert pinned == set(PINNED_HANDLER_IDS), pinned
+        assert len(pinned) == len(CURRENT_PINNED_PROCEDURES), pinned
+        assert pinned == list(CURRENT_PINNED_PROCEDURES), pinned
 
     def test_the_migration_rewrote_no_procedure_driver(self):
         """The policy is a setting, not a per-row rewrite.

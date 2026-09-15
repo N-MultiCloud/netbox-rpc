@@ -2373,10 +2373,17 @@ from `approval_required=True` to `False` unless the user has
   the migration is recorded unapplied. Use a reviewed forward repair migration
   when catalog ownership cannot be proven durably.
 - To test the reverse callable of an older migration below an irreversible
-  migration, obtain that migration's historical project state and invoke its
-  actual `RunPython.reverse_code` directly inside an isolated database test.
-  Do not downgrade the complete graph through the later irreversible boundary;
-  that tests the boundary instead of the older reverse behavior.
+  migration, invoke its actual `RunPython.reverse_code` directly inside an
+  isolated database test. Do not downgrade the complete graph through the later
+  irreversible boundary; that tests the boundary instead of the older reverse
+  behavior. Use the current Django app registry when the test also creates or
+  restores rows in the current physical schema. A historical project-state
+  model omits columns added later, and PostgreSQL has no persistent database
+  default for many Django `AddField(default=...)` operations, so inserting that
+  model into the current table can write NULL into a later non-null column.
+  Historical models are appropriate only when the physical database has also
+  been migrated to the same historical state in an isolated graph that can be
+  restored without crossing an irreversible migration.
 
 ## Event Sequence Integrity
 

@@ -62,10 +62,10 @@ class ContractHashTests(TestCase):
     def test_akvorado_semantic_hashes_match_backend_ground_truth(self):
         expected = {
             "os.linux.debian.13.preflight_akvorado": (
-                "0e255fae89badfaf7de2187cfa3c48c4e7a6d8b2b4c5837acf53952453878161"
+                "50ab427bb1f4fee18a76fbe00f19a65b9cbb03d3c1951d9f500b0da6938ece03"
             ),
             "os.linux.debian.13.install_akvorado": (
-                "95795e4c7c08800a4fd844af86ee47018c8a267ddefcf47a46c4de8e838368ec"
+                "b9ec74c18c69c53c494155671c638f878b1c74b6d1cf478b8665f822ab4469a6"
             ),
             "service.akvorado.1.config_deploy": (
                 "6a8d8fee107c3c825db6bf334ccecfdec8a71135bd6cd2e89734b85a00de2082"

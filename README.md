@@ -1559,6 +1559,18 @@ canonical pre-merge evidence. The privileged Gitea
 evidence and is never a PR/push trigger, branch-protection requirement, or
 substitute for the isolated runner policy. Candidate-side ref checks remain
 defense in depth; trusted Gitea runner/ref eligibility is authoritative.
+
+Migration behavior tests that execute an older `RunPython` callable against the
+current physical database use the current Django app registry for row creation
+and restoration. Historical project-state models omit fields added by later
+migrations; using one to insert into the current table can violate a later
+non-null column because Django normally removes the database-level default after
+an `AddField` migration. A test may use historical models only when it also owns
+an isolated physical database at that exact migration state and can restore the
+graph without crossing a deliberately irreversible migration. Tests for an
+older reverse callable invoke that callable directly rather than migrating the
+whole graph backward through unrelated irreversible boundaries.
+
 Its compatibility job installs exact uv 0.12.5 through a full-commit-pinned
 setup action with the exact release-archive SHA-256, then uses that frozen uv
 release's embedded managed-Python catalog to install exact CPython 3.12.14.

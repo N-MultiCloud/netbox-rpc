@@ -1,9 +1,10 @@
-"""Historical-app irreversibility coverage for migration 0073."""
+"""Current-schema irreversibility coverage for migration 0073."""
 
 from __future__ import annotations
 
 import importlib
 
+from django.apps import apps as django_apps
 from django.db import connection
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
@@ -13,10 +14,6 @@ from django.test import TransactionTestCase
 
 class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
     migration = ("netbox_rpc", "0073_seed_gitea_production_upgrade_1271")
-    previous_migration = (
-        "netbox_rpc",
-        "0072_seed_influxdb3_debian13_install_procedures",
-    )
     procedure_name = "service.gitea.production.upgrade_1_27_1"
 
     @classmethod
@@ -24,11 +21,12 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
         """Restore the migration's data seed after TransactionTestCase flushes."""
 
         try:
-            executor = MigrationExecutor(connection)
-            apps = executor.loader.project_state([cls.migration]).apps
-            RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
+            RPCProcedure = django_apps.get_model("netbox_rpc", "RPCProcedure")
             if not RPCProcedure.objects.filter(name=cls.procedure_name).exists():
-                cls._migration_module().seed_gitea_production_upgrade(apps, None)
+                cls._migration_module().seed_gitea_production_upgrade(
+                    django_apps,
+                    None,
+                )
         finally:
             super().tearDownClass()
 
@@ -38,16 +36,38 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
             "netbox_rpc.migrations.0073_seed_gitea_production_upgrade_1271"
         )
 
-    def _historical_apps(self):
-        executor = MigrationExecutor(connection)
-        return executor.loader.project_state([self.migration]).apps
+    @staticmethod
+    def _apps():
+        return django_apps
 
     def _seed(self):
-        apps = self._historical_apps()
+        apps = self._apps()
         RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
         if not RPCProcedure.objects.filter(name=self.procedure_name).exists():
             self._migration_module().seed_gitea_production_upgrade(apps, None)
         return apps
+
+    def test_seed_uses_current_schema_defaults_for_later_fields(self) -> None:
+        apps = self._apps()
+        RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
+        RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
+        existing = RPCProcedure.objects.filter(name=self.procedure_name).first()
+        if existing is not None:
+            self._delete_procedure_without_current_model_collection(
+                RPCProcedure,
+                RPCProcedureCommand,
+                existing.pk,
+            )
+
+        self._migration_module().seed_gitea_production_upgrade(apps, None)
+        procedure = RPCProcedure.objects.get(name=self.procedure_name)
+        command = RPCProcedureCommand.objects.get(
+            procedure_id=procedure.pk,
+            sequence=1,
+        )
+
+        assert procedure.transport_pinned is False
+        assert command.custom_field_data == {}
 
     @staticmethod
     def _delete_procedure_without_current_model_collection(
@@ -75,8 +95,11 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
         ).exists()
 
     def _assert_reverse_aborts(self) -> None:
+        executor = MigrationExecutor(connection)
+        migration = executor.loader.get_migration(*self.migration)
+        operation = migration.operations[0]
         with self.assertRaisesRegex(IrreversibleError, "intentionally irreversible"):
-            MigrationExecutor(connection).migrate([self.previous_migration])
+            operation.reverse_code(self._apps(), None)
         self._assert_migration_still_applied()
 
     def test_unreferenced_seed_reverse_aborts_before_any_mutation(self) -> None:
@@ -103,7 +126,7 @@ class GiteaUpgradeMigrationIrreversibilityTests(TransactionTestCase):
         ) == before_commands
 
     def test_forward_rejects_and_preserves_preexisting_operator_procedure(self) -> None:
-        apps = self._historical_apps()
+        apps = self._apps()
         RPCProcedure = apps.get_model("netbox_rpc", "RPCProcedure")
         RPCProcedureCommand = apps.get_model("netbox_rpc", "RPCProcedureCommand")
         existing = RPCProcedure.objects.filter(name=self.procedure_name).first()
