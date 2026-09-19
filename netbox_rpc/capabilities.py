@@ -48,6 +48,8 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.production.upgrade_1_27_1",
         "service.gitea.runner.register",
         "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.gitea.actions_runner.diagnose_user_ci_runner",
+        "service.gitea.actions_runner.recover_user_ci_runner",
         "service.netbox.staging.deploy_dns_pair",
     }
 )
@@ -132,6 +134,12 @@ def derive_command_contract_hash(procedure: Any) -> str:
     payload = _base_command_contract_payload(procedure)
     handler_id = payload["handler_id"]
     if handler_id in _SEMANTIC_CAPABILITY_HANDLER_IDS:
+        from .dns_staging_deploy_contract import (
+            SEMANTIC_CAPABILITY_EXTENSION as dns_staging_contract,
+        )
+        from .gitea_docker_runner_contract import (
+            SEMANTIC_CONTRACTS as docker_runner_contracts,
+        )
         from .gitea_org_ci_runner_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as org_ci_runner_contract,
         )
@@ -141,15 +149,22 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_upgrade_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as upgrade_contract,
         )
-        from .dns_staging_deploy_contract import (
-            SEMANTIC_CAPABILITY_EXTENSION as dns_staging_contract,
-        )
 
         payload["semantic_contract"] = {
             "service.gitea.production.upgrade_1_27_1": upgrade_contract,
             "service.gitea.runner.register": runner_contract,
             "service.gitea.actions_runner.provision_org_ci_runner": (
                 org_ci_runner_contract
+            ),
+            "service.gitea.actions_runner.diagnose_user_ci_runner": (
+                docker_runner_contracts[
+                    "service.gitea.actions_runner.diagnose_user_ci_runner"
+                ]
+            ),
+            "service.gitea.actions_runner.recover_user_ci_runner": (
+                docker_runner_contracts[
+                    "service.gitea.actions_runner.recover_user_ci_runner"
+                ]
             ),
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
         }[handler_id]

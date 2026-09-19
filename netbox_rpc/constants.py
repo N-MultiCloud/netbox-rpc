@@ -140,6 +140,14 @@ GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_PROVISION,
     }
 )
+
+# Fixed-contract diagnosis and approval-gated recovery for the user-scoped
+# Docker runner lane. Both accept an exact empty object and are pinned to VM 604.
+GITEA_USER_CI_RUNNER_DIAGNOSE = "service.gitea.actions_runner.diagnose_user_ci_runner"
+GITEA_USER_CI_RUNNER_RECOVER = "service.gitea.actions_runner.recover_user_ci_runner"
+GITEA_USER_CI_RUNNER_PROCEDURE_NAMES = frozenset(
+    {GITEA_USER_CI_RUNNER_DIAGNOSE, GITEA_USER_CI_RUNNER_RECOVER}
+)
 # A vaulted secret REFERENCE, never secret material: "nms-secret:<uuid>" is an
 # opaque pointer that the execution backend redeems against the netbox-nms secret
 # bridge. Resolving it still requires the backend's own credentials, so persisting
@@ -350,6 +358,8 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        GITEA_USER_CI_RUNNER_DIAGNOSE,
+        GITEA_USER_CI_RUNNER_RECOVER,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
     }
 )
@@ -360,6 +370,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        GITEA_USER_CI_RUNNER_RECOVER,
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
     }

@@ -782,6 +782,27 @@ pending approval or distinct-actor check.
     non-daemon unit fails the test and forces a deliberate decision rather than
     silently widening it. Adding a maintenance unit under this prefix therefore
     requires updating that set, not the seed migration.
+- **Gitea user CI Docker runner recovery** is the narrower fixed-contract
+  workflow seeded disabled by migration `0091`. Diagnosis is read-only;
+  recovery is a protected write with two-person approval and a signed lease.
+  Both accept only `{}`, target exact `Gitea-Runner` VM PK 604, resolve the
+  target-owned credential server-side, bind its complete non-secret
+  service/credential/host-key snapshot into normalization, approval,
+  fingerprint, and lease, and require exact backend capability compatibility.
+  Backend point-of-use resolution must reject any snapshot drift. Recovery
+  also requires an authenticated Gitea current-held-task check to agree with
+  Docker before every mutation; no approved client/credential provider exists
+  yet, so keep it disabled and return indeterminate without mutation until that
+  fixed dependency lands. The backend advertises diagnosis but omits recovery
+  until the fixed client and a whole-transaction host lock exist; treat omission
+  as incompatible at advertisement, admission, and worker claim. Recovery
+  refuses active jobs, deletes only proven stale
+  unattached `GITEA-ACTIONS-TASK-` networks, reconciles only ordered DNS
+  `168.0.96.26`, `168.0.96.27`, treats address pools as evidence only, and
+  restarts only `gitea-runner-ubuntu-user-241.service`. Never read or persist
+  target comments/descriptions. Cancellation cleanup is bounded and awaited;
+  post-pause/mutation route deadlines are closed indeterminate results. See
+  `docs/gitea-user-ci-runner-recovery.md` for activation and rollback rules.
 - **Gitea Actions org CI runner provisioning** was seeded disabled by migration
   `0084`; forward migration `0087` extends the same disabled row as
   `service.gitea.actions_runner.provision_org_ci_runner`. It is a distinct

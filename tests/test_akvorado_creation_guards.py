@@ -129,6 +129,16 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.GITEA_ORG_CI_RUNNER_PROVISION = (
         "service.gitea.actions_runner.provision_org_ci_runner"
     )
+    constants.GITEA_USER_CI_RUNNER_DIAGNOSE = (
+        "service.gitea.actions_runner.diagnose_user_ci_runner"
+    )
+    constants.GITEA_USER_CI_RUNNER_RECOVER = (
+        "service.gitea.actions_runner.recover_user_ci_runner"
+    )
+    constants.GITEA_USER_CI_RUNNER_PROCEDURE_NAMES = {
+        constants.GITEA_USER_CI_RUNNER_DIAGNOSE,
+        constants.GITEA_USER_CI_RUNNER_RECOVER,
+    }
     constants.EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = (
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
         | {
@@ -136,6 +146,8 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
             constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
             constants.GITEA_RUNNER_REGISTER,
             constants.GITEA_ORG_CI_RUNNER_PROVISION,
+            constants.GITEA_USER_CI_RUNNER_DIAGNOSE,
+            constants.GITEA_USER_CI_RUNNER_RECOVER,
         }
     )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
@@ -144,6 +156,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
         constants.GITEA_RUNNER_REGISTER,
         constants.GITEA_ORG_CI_RUNNER_PROVISION,
+        constants.GITEA_USER_CI_RUNNER_RECOVER,
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
@@ -164,6 +177,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.RPCExecutionError = RPCExecutionError
     normalization.normalize_execution_params = lambda execution: {}
     normalization.validate_gitea_org_ci_runner_target = lambda *args, **kwargs: {}
+    normalization.validate_gitea_docker_runner_target = lambda *args, **kwargs: None
     normalization.validate_gitea_runner_target = lambda *args, **kwargs: {}
     normalization.validate_gitea_upgrade_target = lambda *args, **kwargs: {}
     normalization.validate_akvorado_content_params = lambda name, params: None

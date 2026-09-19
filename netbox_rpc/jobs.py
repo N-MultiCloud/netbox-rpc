@@ -313,6 +313,7 @@ class _BackendTransportKind(Enum):
     GITEA_UPGRADE = "gitea-upgrade"
     GITEA_RUNNER = "gitea-runner"
     GITEA_ORG_CI_RUNNER = "gitea-org-ci-runner"
+    GITEA_DOCKER_RUNNER = "gitea-docker-runner"
     DNS_STAGING_DEPLOY = "dns-staging-deploy"
     AKVORADO_INSTALL = "akvorado-install"
 
@@ -322,6 +323,12 @@ _PROCEDURE_TRANSPORT_KINDS = {
     "service.gitea.runner.register": _BackendTransportKind.GITEA_RUNNER,
     "service.gitea.actions_runner.provision_org_ci_runner": (
         _BackendTransportKind.GITEA_ORG_CI_RUNNER
+    ),
+    "service.gitea.actions_runner.diagnose_user_ci_runner": (
+        _BackendTransportKind.GITEA_DOCKER_RUNNER
+    ),
+    "service.gitea.actions_runner.recover_user_ci_runner": (
+        _BackendTransportKind.GITEA_DOCKER_RUNNER
     ),
     "service.netbox.staging.deploy_dns_pair": (
         _BackendTransportKind.DNS_STAGING_DEPLOY
@@ -333,6 +340,7 @@ _SECRET_PROTECTED_TRANSPORTS = frozenset(
         _BackendTransportKind.GITEA_UPGRADE,
         _BackendTransportKind.GITEA_RUNNER,
         _BackendTransportKind.GITEA_ORG_CI_RUNNER,
+        _BackendTransportKind.GITEA_DOCKER_RUNNER,
         _BackendTransportKind.DNS_STAGING_DEPLOY,
     }
 )
@@ -340,6 +348,7 @@ _STREAMED_TRANSPORTS = frozenset(
     {
         _BackendTransportKind.GITEA_RUNNER,
         _BackendTransportKind.GITEA_ORG_CI_RUNNER,
+        _BackendTransportKind.GITEA_DOCKER_RUNNER,
         _BackendTransportKind.DNS_STAGING_DEPLOY,
         _BackendTransportKind.AKVORADO_INSTALL,
     }
@@ -469,6 +478,13 @@ def _protected_response_limits(
             max(float(policy.timeout_seconds) + 10, 30),
             contract.BACKEND_RESPONSE_MAX_BYTES,
         )
+    elif policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
+        from . import gitea_docker_runner_contract as contract
+
+        return (
+            max(float(policy.timeout_seconds) + 10, 30),
+            contract.BACKEND_RESPONSE_MAX_BYTES,
+        )
     else:
         return None
     return contract.ROUTE_BUDGET_SECONDS, contract.BACKEND_RESPONSE_MAX_BYTES
@@ -553,6 +569,8 @@ def _closed_backend_transport_failure(
         )
     if policy.kind is _BackendTransportKind.GITEA_UPGRADE:
         return _gitea_transport_failure_response(stage=stage)
+    if policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
+        return _gitea_docker_runner_transport_failure_response(policy)
     raise RuntimeError("generic backend transport has no closed failure envelope")
 
 
@@ -563,6 +581,8 @@ def _classify_backend_request_failure(
     if isinstance(exc, _ProtectedBackendWallClockError):
         return _closed_backend_transport_failure(policy, stage="indeterminate")
     if policy.kind is _BackendTransportKind.AKVORADO_INSTALL:
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    if policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
         return _closed_backend_transport_failure(policy, stage="indeterminate")
     if policy.secret_protected:
         connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
@@ -613,7 +633,10 @@ def _classify_backend_http_response(
             "nms-backend returned 401 Unauthorized.",
             code="RPC_BACKEND_UNAUTHORIZED",
         )
-    if policy.secret_protected and 300 <= response.status_code < 400:
+    if (
+        policy.secret_protected
+        or policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER
+    ) and 300 <= response.status_code < 400:
         if policy.streamed:
             response.close()
         return _closed_backend_transport_failure(policy, stage="indeterminate")
@@ -647,6 +670,7 @@ def _read_backend_response(
     except (ValueError, requests.exceptions.RequestException) as exc:
         if (
             policy.secret_protected
+            or policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER
             or policy.kind is _BackendTransportKind.AKVORADO_INSTALL
         ):
             return _BackendReadResult(
@@ -804,6 +828,12 @@ def _normalize_backend_response(
             response,
             data,
         )
+    if policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
+        return _normalize_gitea_docker_runner_backend_response(
+            policy,
+            response,
+            data,
+        )
     return _normalize_generic_backend_response(response, data)
 
 
@@ -912,6 +942,125 @@ def _normalize_akvorado_install_closed_response(
     except jsonschema.ValidationError:
         return None
     return data
+
+
+def _gitea_docker_runner_snapshot() -> dict[str, Any]:
+    """Return a closed, non-sensitive snapshot for transport uncertainty."""
+
+    return {
+        "docker_active": False,
+        "runner_container_name": "ci-ubuntu-emersonfelipesp-241",
+        "runner_container_id": None,
+        "runner_state": "unknown",
+        "active_job": False,
+        "daemon_dns": [],
+        "default_address_pools": [],
+        "probes": [
+            {
+                "host": host,
+                "resolved": False,
+                "addresses": [],
+                "status": "error",
+            }
+            for host in ("git.nmulti.cloud", "github.com")
+        ],
+        "networks": [],
+        "address_pool_exhausted": False,
+        "last_log_activity": None,
+        "truncated": True,
+    }
+
+
+def _gitea_docker_runner_transport_failure_response(
+    policy: _BackendTransportPolicy,
+) -> dict[str, Any]:
+    """Return a schema-valid result without preserving backend error text."""
+
+    from . import gitea_docker_runner_contract as contract
+
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    snapshot = _gitea_docker_runner_snapshot()
+    if procedure_name == contract.DIAGNOSE_PROCEDURE_NAME:
+        result = {
+            **snapshot,
+            "ok": False,
+            "procedure": contract.DIAGNOSE_PROCEDURE_NAME,
+            "target": contract.TARGET_NAME,
+            "target_object_id": contract.TARGET_OBJECT_ID,
+            "lane": contract.LANE,
+            "stage": "diagnose",
+        }
+    else:
+        result = {
+            "ok": False,
+            "procedure": contract.RECOVER_PROCEDURE_NAME,
+            "target": contract.TARGET_NAME,
+            "target_object_id": contract.TARGET_OBJECT_ID,
+            "lane": contract.LANE,
+            "stage": "indeterminate",
+            "before": snapshot,
+            "after": None,
+            "removed_network_ids": [],
+            "resolver_reconciled": False,
+            "restart_performed": False,
+            "refused_active_job": False,
+        }
+    return {"ok": False, "result": result}
+
+
+def _normalize_gitea_docker_runner_closed_response(
+    policy: _BackendTransportPolicy,
+    data: object,
+) -> dict[str, Any] | None:
+    """Validate and reduce the backend envelope to its closed public result."""
+
+    from . import gitea_docker_runner_contract as contract
+
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    result = data.get("result")
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    result_schema = contract.RESULT_SCHEMAS.get(procedure_name)
+    if (
+        type(data.get("ok")) is not bool
+        or not isinstance(result, dict)
+        or result.get("ok") is not data["ok"]
+        or result.get("procedure") != procedure_name
+        or result.get("target") != contract.TARGET_NAME
+        or result.get("target_object_id") != contract.TARGET_OBJECT_ID
+        or result.get("lane") != contract.LANE
+        or data.get("events") != []
+        or not isinstance(data.get("error_code"), str)
+        or not isinstance(data.get("error_message"), str)
+        or (data["ok"] and (data["error_code"] or data["error_message"]))
+        or not isinstance(result_schema, dict)
+    ):
+        return None
+    try:
+        jsonschema.validate(result, result_schema)
+    except jsonschema.ValidationError:
+        return None
+    return {"ok": data["ok"], "result": result}
+
+
+def _normalize_gitea_docker_runner_backend_response(
+    policy: _BackendTransportPolicy,
+    response: requests.Response,
+    data: object,
+) -> dict[str, Any]:
+    normalized = _normalize_gitea_docker_runner_closed_response(policy, data)
+    if normalized is None or not _closed_response_matches_http_status(
+        response,
+        normalized,
+    ):
+        return _gitea_docker_runner_transport_failure_response(policy)
+    return normalized
 
 
 def _gitea_transport_failure_response(*, stage: str) -> dict[str, Any]:

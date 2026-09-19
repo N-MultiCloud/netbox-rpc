@@ -94,6 +94,23 @@ command behavior changes.
 > pin into approval/lease evidence, and reports every uncertain post-process outcome as
 > `deployed=null, stage=indeterminate`. Never place provider credentials, DNS
 > records, routing, command output, or operator notes in this execution.
+> `service.gitea.actions_runner.recover_user_ci_runner` is also an
+> approval-required protected procedure and must never be dispatched
+> autonomously. It and the paired read-only diagnosis are seeded disabled,
+> accept only `{}`, and target exact `Gitea-Runner` VM PK 604 through an
+> approval/lease-bound non-secret SSH service, credential, host, port,
+> principal, method, revision, and host-key snapshot; backend point-of-use
+> resolution rejects drift. Recovery requires authenticated Gitea
+> current-held-task evidence to agree with Docker before every mutation. No
+> approved client/credential provider exists yet, so recovery must remain
+> disabled and fail closed as indeterminate without mutation. The backend
+> advertises diagnosis but omits recovery until both the fixed client and a
+> whole-transaction host lock exist, so plugin capability gates reject it at
+> advertisement, admission, and worker claim. Once those dependencies land,
+> recovery refuses active jobs, removes
+> only proven stale unattached task networks, reconciles only the reviewed DNS
+> pair, leaves address pools unchanged, and restarts only the fixed user-lane
+> unit. See `docs/gitea-user-ci-runner-recovery.md`.
 > `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
 > runner-host `provision|reconcile` procedure, seeded disabled and hard-gated.
 > It is pinned to `Gitea-Runner` VM PK 416 (`10.0.30.241`) and uses protected

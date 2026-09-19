@@ -272,6 +272,21 @@ The procedure catalog is intentionally narrow:
   `netbox-network` credential-identity API, signed lease, and scheduling-domain
   isolation are deployed together. See
   [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md).
+- `service.gitea.actions_runner.diagnose_user_ci_runner` and
+  `service.gitea.actions_runner.recover_user_ci_runner` — disabled-by-default,
+  empty-params diagnosis and approval-gated recovery for exact `Gitea-Runner`
+  VM PK 604. The backend refuses active jobs, removes only proven stale
+  unattached task networks, reconciles only the reviewed ordered DNS pair,
+  never rewrites address pools, and restarts only the fixed user-lane unit.
+  Normalization binds the complete non-secret target-owned SSH identity into
+  approval and the signed lease, and dispatch rejects point-of-use drift.
+  Recovery remains disabled until an approved authenticated Gitea
+  current-held-task client can agree with Docker evidence before every
+  mutation and one host-side lock spans the complete transaction. The backend
+  advertises diagnosis but omits recovery until both dependencies exist, so the
+  explicit capability gate rejects recovery at advertisement, admission, and
+  worker claim. Both require exact capabilities and bounded closed responses; see
+  [`docs/gitea-user-ci-runner-recovery.md`](docs/gitea-user-ci-runner-recovery.md).
 - `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
   approval-required `provision|reconcile` contract for exactly the
   `root-python312` organization CI lane on `Gitea-Runner` VM PK 416

@@ -11,13 +11,13 @@ import threading
 import time
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import requests as real_requests
 from jsonschema import FormatChecker, validate
-
 
 PROCEDURE_ID = "service.gitea.production.upgrade_1_27_1"
 _HOST_ALGORITHM = "ssh-ed25519"
@@ -30,6 +30,10 @@ _HOST_KEY_BLOB = (
 KNOWN_HOSTS_ENTRY = "10.0.30.96 ssh-ed25519 " + base64.b64encode(_HOST_KEY_BLOB).decode(
     "ascii"
 )
+
+
+def _known_hosts_entry(host: str) -> str:
+    return f"{host} ssh-ed25519 {base64.b64encode(_HOST_KEY_BLOB).decode('ascii')}"
 
 
 @pytest.fixture()
@@ -105,6 +109,176 @@ def test_gitea_upgrade_normalizer_emits_exact_backend_contract(jobs_module) -> N
         normalized["command_fingerprint"],
         contract.COMMAND_FINGERPRINT_SCHEMA,
     )
+
+
+@pytest.mark.parametrize(
+    ("procedure_name", "timeout_seconds", "expected_stage"),
+    [
+        (
+            "service.gitea.actions_runner.diagnose_user_ci_runner",
+            120,
+            "diagnose",
+        ),
+        (
+            "service.gitea.actions_runner.recover_user_ci_runner",
+            300,
+            "indeterminate",
+        ),
+    ],
+)
+def test_gitea_docker_runner_transport_is_bounded_and_closed(
+    jobs_module,
+    procedure_name: str,
+    timeout_seconds: int,
+    expected_stage: str,
+) -> None:
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=procedure_name,
+            timeout_seconds=timeout_seconds,
+        ),
+        params={},
+        normalized_params={},
+        target_display="Gitea-Runner",
+    )
+    policy = jobs_module._resolve_backend_transport_policy(execution)
+
+    assert policy.kind is jobs_module._BackendTransportKind.GITEA_DOCKER_RUNNER
+    assert policy.secret_protected is True
+    assert policy.streamed is True
+    assert jobs_module._protected_response_limits(policy) == (
+        timeout_seconds + 10,
+        65_536,
+    )
+    failure = jobs_module._gitea_docker_runner_transport_failure_response(policy)
+    assert failure["ok"] is False
+    assert failure["result"]["procedure"] == procedure_name
+    assert failure["result"]["target_object_id"] == 604
+    assert failure["result"]["stage"] == expected_stage
+
+
+def test_gitea_docker_runner_response_rejects_events_and_error_text(
+    jobs_module,
+) -> None:
+    procedure_name = "service.gitea.actions_runner.diagnose_user_ci_runner"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, timeout_seconds=120),
+        params={},
+        normalized_params={},
+        target_display="Gitea-Runner",
+    )
+    policy = jobs_module._resolve_backend_transport_policy(execution)
+    envelope = {
+        **jobs_module._gitea_docker_runner_transport_failure_response(policy),
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+    normalized = jobs_module._normalize_gitea_docker_runner_closed_response(
+        policy,
+        envelope,
+    )
+    assert normalized == {
+        "ok": False,
+        "result": envelope["result"],
+    }
+
+    envelope["events"] = [{"message": "untrusted backend output"}]
+    assert (
+        jobs_module._normalize_gitea_docker_runner_closed_response(policy, envelope)
+        is None
+    )
+
+
+def test_gitea_docker_runner_normalizer_binds_approved_ssh_snapshot(
+    jobs_module,
+) -> None:
+    from netbox_rpc import gitea_docker_runner_contract as contract
+
+    execution = _docker_runner_execution()
+    normalized = jobs_module.normalize_execution_params(execution)
+    snapshot = normalized["ssh_snapshot"]
+    assert snapshot == {
+        "ssh_service_id": 903,
+        "ssh_service_revision": "2026-08-17T12:00:00Z",
+        "ssh_identity_id": 904,
+        "ssh_identity_revision": "2026-08-17T11:00:00Z",
+        "ssh_storage_backend": "local",
+        "ssh_principal": "runner-admin",
+        "ssh_method": "key",
+        "ssh_host": "10.0.30.241",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": hashlib.sha256(
+            _known_hosts_entry("10.0.30.241").encode("utf-8")
+        ).hexdigest(),
+        "ssh_policy_ref": contract.TARGET_SSH_POLICY_REF,
+    }
+    assert normalized["ssh_policy_ref"] == contract.TARGET_SSH_POLICY_REF
+    assert normalized["command_fingerprint"] == {
+        "handler_id": contract.DIAGNOSE_PROCEDURE_NAME,
+        "assigned_object_id": contract.TARGET_OBJECT_ID,
+        "target_object_sha256": contract.TARGET_OBJECT_SHA256,
+        "ssh_snapshot_sha256": jobs_module._hash_json(snapshot),
+        "ssh_policy_ref": contract.TARGET_SSH_POLICY_REF,
+    }
+    assert "comments" not in json.dumps(normalized)
+    assert "description" not in json.dumps(normalized)
+
+    execution.params = {"unit": "attacker.service"}
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
+def test_recovery_fingerprint_binds_ssh_snapshot_for_approval_and_lease(
+    jobs_module,
+) -> None:
+    from netbox_rpc import gitea_docker_runner_contract as contract
+
+    normalized = jobs_module.normalize_execution_params(
+        _docker_runner_execution(recover=True)
+    )
+    assert normalized["command_fingerprint"]["handler_id"] == (
+        contract.RECOVER_PROCEDURE_NAME
+    )
+    assert normalized["command_fingerprint"]["ssh_snapshot_sha256"] == (
+        jobs_module._hash_json(normalized["ssh_snapshot"])
+    )
+    handlers = Path("netbox_rpc/application/command_handlers.py").read_text()
+    lease = Path("netbox_rpc/dispatch_lease.py").read_text()
+    assert '"normalized_params": normalized' in handlers
+    assert '"command_fingerprint": (' in handlers
+    assert 'normalized_params or {}).get("command_fingerprint")' in lease
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("assigned_object_id", 416),
+        ("target_display", "Other"),
+        ("target_model_label", "dcim.device"),
+        ("name", "Other"),
+        ("status", "offline"),
+    ],
+)
+def test_gitea_docker_runner_normalizer_rejects_target_drift(
+    jobs_module,
+    field: str,
+    value: object,
+) -> None:
+    execution = _docker_runner_execution()
+    if field in {"assigned_object_id", "target_display", "target_model_label"}:
+        setattr(execution, field, value)
+    else:
+        setattr(execution.assigned_object, field, value)
+    if field == "target_model_label":
+        execution.assigned_object_type = SimpleNamespace(
+            app_label="dcim", model="device"
+        )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+    assert exc_info.value.code == "RPC_TARGET_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -1004,6 +1178,40 @@ def _execution(params: object):
     )
 
 
+def _docker_runner_execution(*, recover: bool = False):
+    handler_id = (
+        "service.gitea.actions_runner.recover_user_ci_runner"
+        if recover
+        else "service.gitea.actions_runner.diagnose_user_ci_runner"
+    )
+    return SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=handler_id,
+            handler_id=handler_id,
+            timeout_seconds=300 if recover else 120,
+        ),
+        params={},
+        credential_references={},
+        target_display="Gitea-Runner",
+        target_model_label="virtualization.virtualmachine",
+        assigned_object_type=SimpleNamespace(
+            pk=99,
+            app_label="virtualization",
+            model="virtualmachine",
+        ),
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        assigned_object=SimpleNamespace(
+            pk=604,
+            name="Gitea-Runner",
+            status="active",
+            primary_ip4=SimpleNamespace(address="10.0.30.241/24"),
+            comments="COMPROMISED_SENTINEL",
+            description="COMPROMISED_SENTINEL",
+        ),
+    )
+
+
 def _backend_target(jobs_module):
     return jobs_module.BackendTarget(
         url="https://backend.example",
@@ -1270,11 +1478,37 @@ class _FakeDeviceServiceManager:
             ssh_known_hosts_entry=KNOWN_HOSTS_ENTRY,
             ssh_strict_host_key_checking=True,
         )
+        runner_identity = SimpleNamespace(
+            pk=904,
+            last_updated=datetime(2026, 8, 17, 11, tzinfo=timezone.utc),
+            username="runner-admin",
+            auth_method="key",
+            storage_backend="local",
+            ssh_private_key_encrypted="encrypted-not-returned",
+        )
+        self.runner_service = SimpleNamespace(
+            pk=903,
+            last_updated=datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+            assigned_object_type_id=99,
+            assigned_object_id=604,
+            service_type="ssh",
+            enabled=True,
+            management_host=SimpleNamespace(address="10.0.30.241/24"),
+            port=22,
+            credential=runner_identity,
+            credential_id=904,
+            ssh_known_hosts_entry=_known_hosts_entry("10.0.30.241"),
+            ssh_strict_host_key_checking=True,
+        )
 
     def filter(self, **kwargs):
-        service = self.service
-        matches = all(getattr(service, key) == value for key, value in kwargs.items())
-        return _FakeDeviceServiceQuery([service] if matches else [])
+        services = (self.service, self.runner_service)
+        matches = [
+            service
+            for service in services
+            if all(getattr(service, key) == value for key, value in kwargs.items())
+        ]
+        return _FakeDeviceServiceQuery(matches)
 
 
 def _org_ci_runner_execution(*, operation: str = "provision") -> SimpleNamespace:

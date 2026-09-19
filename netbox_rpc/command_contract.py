@@ -124,6 +124,14 @@ EXEMPT_HANDLER_RATIONALE = {
         "The sequencing, token delivery, and final Gitea verification cannot be "
         "represented safely as one public argv."
     ),
+    "service.gitea.actions_runner.diagnose_user_ci_runner": (
+        "Collects bounded structured Docker, runner, resolver, probe, log, and "
+        "network evidence for one fixed lane through backend-owned fixed argv."
+    ),
+    "service.gitea.actions_runner.recover_user_ci_runner": (
+        "Fences the fixed runner, refuses active jobs, removes only proven stale "
+        "unattached networks, reconciles reviewed DNS, and restarts one fixed unit."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "
