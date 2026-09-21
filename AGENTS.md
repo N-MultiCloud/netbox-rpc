@@ -803,6 +803,15 @@ pending approval or distinct-actor check.
   target comments/descriptions. Cancellation cleanup is bounded and awaited;
   post-pause/mutation route deadlines are closed indeterminate results. See
   `docs/gitea-user-ci-runner-recovery.md` for activation and rollback rules.
+- **Gitea organization CI Docker-network recovery** is the fixed-contract
+  workflow seeded disabled by migration `0092`. Diagnosis is read-only;
+  recovery is a protected write with two-person approval and a signed lease.
+  Both accept only `{}` and target exact `Gitea-Runner` VM PK 604. Recovery
+  requires authenticated Gitea current-held-task and Docker evidence to prove
+  the fixed `general-ubuntu` lane idle before every removal. It removes only
+  unattached `GITEA-ACTIONS-TASK-` networks and never changes address pools,
+  DNS, containers, or runner lifecycle state. See
+  `docs/gitea-org-ci-runner-network-recovery.md` for activation and rollback.
 - **Gitea Actions org CI runner provisioning** was seeded disabled by migration
   `0084`; forward migration `0087` extends the same disabled row as
   `service.gitea.actions_runner.provision_org_ci_runner`. It is a distinct

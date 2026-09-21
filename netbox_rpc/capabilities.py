@@ -50,6 +50,8 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.actions_runner.provision_org_ci_runner",
         "service.gitea.actions_runner.diagnose_user_ci_runner",
         "service.gitea.actions_runner.recover_user_ci_runner",
+        "service.gitea.actions_runner.diagnose_org_ci_runner",
+        "service.gitea.actions_runner.recover_org_ci_runner",
         "service.netbox.staging.deploy_dns_pair",
     }
 )
@@ -143,6 +145,9 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_org_ci_runner_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as org_ci_runner_contract,
         )
+        from .gitea_org_docker_runner_recovery_contract import (
+            SEMANTIC_CONTRACTS as org_docker_runner_contracts,
+        )
         from .gitea_runner_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as runner_contract,
         )
@@ -164,6 +169,16 @@ def derive_command_contract_hash(procedure: Any) -> str:
             "service.gitea.actions_runner.recover_user_ci_runner": (
                 docker_runner_contracts[
                     "service.gitea.actions_runner.recover_user_ci_runner"
+                ]
+            ),
+            "service.gitea.actions_runner.diagnose_org_ci_runner": (
+                org_docker_runner_contracts[
+                    "service.gitea.actions_runner.diagnose_org_ci_runner"
+                ]
+            ),
+            "service.gitea.actions_runner.recover_org_ci_runner": (
+                org_docker_runner_contracts[
+                    "service.gitea.actions_runner.recover_org_ci_runner"
                 ]
             ),
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,

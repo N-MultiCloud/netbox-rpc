@@ -330,6 +330,12 @@ _PROCEDURE_TRANSPORT_KINDS = {
     "service.gitea.actions_runner.recover_user_ci_runner": (
         _BackendTransportKind.GITEA_DOCKER_RUNNER
     ),
+    "service.gitea.actions_runner.diagnose_org_ci_runner": (
+        _BackendTransportKind.GITEA_DOCKER_RUNNER
+    ),
+    "service.gitea.actions_runner.recover_org_ci_runner": (
+        _BackendTransportKind.GITEA_DOCKER_RUNNER
+    ),
     "service.netbox.staging.deploy_dns_pair": (
         _BackendTransportKind.DNS_STAGING_DEPLOY
     ),
@@ -944,31 +950,42 @@ def _normalize_akvorado_install_closed_response(
     return data
 
 
-def _gitea_docker_runner_snapshot() -> dict[str, Any]:
+def _gitea_docker_runner_contract(policy: _BackendTransportPolicy) -> Any:
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    if procedure_name.endswith("_org_ci_runner"):
+        from . import gitea_org_docker_runner_recovery_contract as contract
+    else:
+        from . import gitea_docker_runner_contract as contract
+    return contract
+
+
+def _gitea_docker_runner_snapshot(contract: Any) -> dict[str, Any]:
     """Return a closed, non-sensitive snapshot for transport uncertainty."""
 
-    return {
+    snapshot = {
         "docker_active": False,
-        "runner_container_name": "ci-ubuntu-emersonfelipesp-241",
+        "runner_container_name": contract.RUNNER_IDENTITY,
         "runner_container_id": None,
         "runner_state": "unknown",
         "active_job": False,
-        "daemon_dns": [],
         "default_address_pools": [],
-        "probes": [
+        "networks": [],
+        "address_pool_exhausted": False,
+        "last_log_activity": None,
+        "truncated": True,
+    }
+    if hasattr(contract, "PROBE_HOSTS"):
+        snapshot["daemon_dns"] = []
+        snapshot["probes"] = [
             {
                 "host": host,
                 "resolved": False,
                 "addresses": [],
                 "status": "error",
             }
-            for host in ("git.nmulti.cloud", "github.com")
-        ],
-        "networks": [],
-        "address_pool_exhausted": False,
-        "last_log_activity": None,
-        "truncated": True,
-    }
+            for host in contract.PROBE_HOSTS
+        ]
+    return snapshot
 
 
 def _gitea_docker_runner_transport_failure_response(
@@ -976,10 +993,9 @@ def _gitea_docker_runner_transport_failure_response(
 ) -> dict[str, Any]:
     """Return a schema-valid result without preserving backend error text."""
 
-    from . import gitea_docker_runner_contract as contract
-
+    contract = _gitea_docker_runner_contract(policy)
     procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
-    snapshot = _gitea_docker_runner_snapshot()
+    snapshot = _gitea_docker_runner_snapshot(contract)
     if procedure_name == contract.DIAGNOSE_PROCEDURE_NAME:
         result = {
             **snapshot,
@@ -1001,10 +1017,11 @@ def _gitea_docker_runner_transport_failure_response(
             "before": snapshot,
             "after": None,
             "removed_network_ids": [],
-            "resolver_reconciled": False,
-            "restart_performed": False,
             "refused_active_job": False,
         }
+        if hasattr(contract, "REVIEWED_DNS"):
+            result["resolver_reconciled"] = False
+            result["restart_performed"] = False
     return {"ok": False, "result": result}
 
 
@@ -1014,8 +1031,7 @@ def _normalize_gitea_docker_runner_closed_response(
 ) -> dict[str, Any] | None:
     """Validate and reduce the backend envelope to its closed public result."""
 
-    from . import gitea_docker_runner_contract as contract
-
+    contract = _gitea_docker_runner_contract(policy)
     if not isinstance(data, dict) or set(data) != {
         "ok",
         "result",

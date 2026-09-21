@@ -287,6 +287,16 @@ The procedure catalog is intentionally narrow:
   explicit capability gate rejects recovery at advertisement, admission, and
   worker claim. Both require exact capabilities and bounded closed responses; see
   [`docs/gitea-user-ci-runner-recovery.md`](docs/gitea-user-ci-runner-recovery.md).
+- `service.gitea.actions_runner.diagnose_org_ci_runner` and
+  `service.gitea.actions_runner.recover_org_ci_runner` — disabled-by-default,
+  empty-params diagnosis and approval-gated recovery for the fixed
+  `general-ubuntu` organization lane on exact `Gitea-Runner` VM PK 604.
+  Recovery requires authenticated Gitea and Docker evidence to prove the
+  runner idle before every removal and can remove only unattached
+  `GITEA-ACTIONS-TASK-` networks. It never changes address pools, DNS,
+  containers, or runner lifecycle state. Both procedures require exact backend
+  capabilities and closed bounded responses; see
+  [`docs/gitea-org-ci-runner-network-recovery.md`](docs/gitea-org-ci-runner-network-recovery.md).
 - `service.gitea.actions_runner.provision_org_ci_runner` — disabled-by-default,
   approval-required `provision|reconcile` contract for exactly the
   `root-python312` organization CI lane on `Gitea-Runner` VM PK 416

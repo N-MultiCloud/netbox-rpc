@@ -14,6 +14,7 @@ from rest_framework.exceptions import PermissionDenied
 from .. import akvorado_bootstrap_contract as akvorado_contract
 from .. import dns_staging_deploy_contract as dns_staging_contract
 from .. import gitea_docker_runner_contract
+from .. import gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
@@ -24,7 +25,10 @@ from ..constants import (
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
     AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES,
     EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES,
+    GITEA_ORG_CI_RUNNER_DIAGNOSE,
     GITEA_ORG_CI_RUNNER_PROVISION,
+    GITEA_ORG_CI_RUNNER_RECOVER,
+    GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     GITEA_USER_CI_RUNNER_DIAGNOSE,
@@ -42,6 +46,7 @@ from ..domain.normalization import (
     normalize_execution_params,
     validate_akvorado_content_params,
     validate_gitea_docker_runner_target,
+    validate_gitea_org_docker_runner_recovery_target,
     validate_gitea_org_ci_runner_target,
     validate_gitea_runner_target,
     validate_gitea_upgrade_target,
@@ -75,6 +80,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     | {
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        *GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
         *GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
     }
 )
@@ -116,6 +122,8 @@ _GITEA_USER_CI_RUNNER_RECOVER_APPROVAL_REASON = (
 _GITEA_USER_CI_RUNNER_RECOVER_REJECTION_REASON = (
     "Rejected audited recovery of the fixed user-scoped Gitea CI runner."
 )
+_GITEA_ORG_CI_RUNNER_RECOVER_APPROVAL_REASON = "Approved audited task-network reclamation for the fixed organization Gitea CI runner."
+_GITEA_ORG_CI_RUNNER_RECOVER_REJECTION_REASON = "Rejected audited task-network reclamation for the fixed organization Gitea CI runner."
 _AKVORADO_INSTALL_APPROVAL_REASON = "Approved audited Debian 13 Akvorado bootstrap."
 _AKVORADO_INSTALL_REJECTION_REASON = "Rejected audited Debian 13 Akvorado bootstrap."
 
@@ -126,6 +134,7 @@ _PROTECTED_APPROVAL_REASON = {
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_APPROVAL_REASON,
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_APPROVAL_REASON,
+    GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_APPROVAL_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
@@ -135,6 +144,7 @@ _PROTECTED_REJECTION_REASON = {
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_REJECTION_REASON,
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_REJECTION_REASON,
+    GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_REJECTION_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_REJECTION_REASON,
 }
 
@@ -145,6 +155,7 @@ _PROTECTED_CONTRACTS = {
     GITEA_RUNNER_REGISTER: gitea_runner_contract,
     GITEA_ORG_CI_RUNNER_PROVISION: gitea_org_ci_runner_contract,
     GITEA_USER_CI_RUNNER_RECOVER: gitea_docker_runner_contract,
+    GITEA_ORG_CI_RUNNER_RECOVER: gitea_org_docker_runner_recovery_contract,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: akvorado_contract,
 }
 _PROTECTED_LABELS = {
@@ -154,6 +165,7 @@ _PROTECTED_LABELS = {
     GITEA_RUNNER_REGISTER: "Gitea runner registration",
     GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
     GITEA_USER_CI_RUNNER_RECOVER: "Gitea user CI runner recovery",
+    GITEA_ORG_CI_RUNNER_RECOVER: "Gitea organization CI runner network recovery",
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "Debian 13 Akvorado bootstrap",
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
@@ -179,6 +191,22 @@ _GITEA_RUNNER_TARGET_POLICIES = {
         for procedure_name in (
             GITEA_USER_CI_RUNNER_DIAGNOSE,
             GITEA_USER_CI_RUNNER_RECOVER,
+        )
+    },
+    **{
+        procedure_name: {
+            "content_type": (
+                gitea_org_docker_runner_recovery_contract.TARGET_OBJECT["content_type"]
+            ),
+            "object_id": gitea_org_docker_runner_recovery_contract.TARGET_OBJECT_ID,
+            "validator": validate_gitea_org_docker_runner_recovery_target,
+            "required_message": (
+                "The exact organization-scoped Gitea CI runner VM is required."
+            ),
+        }
+        for procedure_name in (
+            GITEA_ORG_CI_RUNNER_DIAGNOSE,
+            GITEA_ORG_CI_RUNNER_RECOVER,
         )
     },
 }

@@ -111,6 +111,14 @@ command behavior changes.
 > only proven stale unattached task networks, reconciles only the reviewed DNS
 > pair, leaves address pools unchanged, and restarts only the fixed user-lane
 > unit. See `docs/gitea-user-ci-runner-recovery.md`.
+> `service.gitea.actions_runner.recover_org_ci_runner` is also an
+> approval-required protected procedure and must never be dispatched
+> autonomously. It and its paired read diagnosis accept only `{}` and target
+> exact `Gitea-Runner` VM PK 604. Before every removal, authenticated Gitea and
+> Docker evidence must prove the fixed organization runner idle. Recovery may
+> remove only unattached `GITEA-ACTIONS-TASK-` networks and never changes
+> address pools, DNS, containers, or runner lifecycle state. See
+> `docs/gitea-org-ci-runner-network-recovery.md`.
 > `service.gitea.actions_runner.provision_org_ci_runner` is an approval-required
 > runner-host `provision|reconcile` procedure, seeded disabled and hard-gated.
 > It is pinned to `Gitea-Runner` VM PK 416 (`10.0.30.241`) and uses protected

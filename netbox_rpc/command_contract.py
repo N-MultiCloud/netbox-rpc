@@ -132,6 +132,14 @@ EXEMPT_HANDLER_RATIONALE = {
         "Fences the fixed runner, refuses active jobs, removes only proven stale "
         "unattached networks, reconciles reviewed DNS, and restarts one fixed unit."
     ),
+    "service.gitea.actions_runner.diagnose_org_ci_runner": (
+        "Collects bounded Docker, runner, task, address-pool, and network evidence "
+        "for the fixed organization lane through backend-owned fixed argv."
+    ),
+    "service.gitea.actions_runner.recover_org_ci_runner": (
+        "Requires authenticated idle-task evidence and removes only matching "
+        "zero-attachment task networks without changing runner or resolver state."
+    ),
     "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state": (
         "Builds a timestamped backup directory and manifest from "
         "/etc/apt/sources.list*, dpkg --get-selections, apt-mark showhold, and "

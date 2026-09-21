@@ -124,6 +124,16 @@ def test_gitea_upgrade_normalizer_emits_exact_backend_contract(jobs_module) -> N
             300,
             "indeterminate",
         ),
+        (
+            "service.gitea.actions_runner.diagnose_org_ci_runner",
+            120,
+            "diagnose",
+        ),
+        (
+            "service.gitea.actions_runner.recover_org_ci_runner",
+            180,
+            "indeterminate",
+        ),
     ],
 )
 def test_gitea_docker_runner_transport_is_bounded_and_closed(
@@ -155,6 +165,24 @@ def test_gitea_docker_runner_transport_is_bounded_and_closed(
     assert failure["result"]["procedure"] == procedure_name
     assert failure["result"]["target_object_id"] == 604
     assert failure["result"]["stage"] == expected_stage
+
+
+def test_org_docker_runner_transport_failure_has_no_adjacent_mutation_fields(
+    jobs_module,
+) -> None:
+    procedure_name = "service.gitea.actions_runner.recover_org_ci_runner"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, timeout_seconds=180),
+        params={},
+        normalized_params={},
+        target_display="Gitea-Runner",
+    )
+    policy = jobs_module._resolve_backend_transport_policy(execution)
+    failure = jobs_module._gitea_docker_runner_transport_failure_response(policy)
+
+    assert failure["result"]["lane"] == "general-ubuntu"
+    assert "resolver_reconciled" not in failure["result"]
+    assert "restart_performed" not in failure["result"]
 
 
 def test_gitea_docker_runner_response_rejects_events_and_error_text(
@@ -249,6 +277,28 @@ def test_recovery_fingerprint_binds_ssh_snapshot_for_approval_and_lease(
     assert '"normalized_params": normalized' in handlers
     assert '"command_fingerprint": (' in handlers
     assert 'normalized_params or {}).get("command_fingerprint")' in lease
+
+
+def test_org_docker_runner_normalizer_binds_fixed_target_and_empty_params(
+    jobs_module,
+) -> None:
+    from netbox_rpc import gitea_org_docker_runner_recovery_contract as contract
+
+    execution = _docker_runner_execution(org=True)
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["ssh_policy_ref"] == contract.TARGET_SSH_POLICY_REF
+    assert normalized["command_fingerprint"]["handler_id"] == (
+        contract.DIAGNOSE_PROCEDURE_NAME
+    )
+    assert normalized["command_fingerprint"]["assigned_object_id"] == 604
+    assert "comments" not in json.dumps(normalized)
+    assert "description" not in json.dumps(normalized)
+
+    execution.params = {"network_id": "caller-selected"}
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -1178,17 +1228,18 @@ def _execution(params: object):
     )
 
 
-def _docker_runner_execution(*, recover: bool = False):
+def _docker_runner_execution(*, recover: bool = False, org: bool = False):
+    scope = "org" if org else "user"
     handler_id = (
-        "service.gitea.actions_runner.recover_user_ci_runner"
+        f"service.gitea.actions_runner.recover_{scope}_ci_runner"
         if recover
-        else "service.gitea.actions_runner.diagnose_user_ci_runner"
+        else f"service.gitea.actions_runner.diagnose_{scope}_ci_runner"
     )
     return SimpleNamespace(
         procedure=SimpleNamespace(
             name=handler_id,
             handler_id=handler_id,
-            timeout_seconds=300 if recover else 120,
+            timeout_seconds=(180 if org else 300) if recover else 120,
         ),
         params={},
         credential_references={},

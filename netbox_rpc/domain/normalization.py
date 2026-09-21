@@ -16,6 +16,7 @@ import jsonschema
 import yaml
 
 from .. import gitea_docker_runner_contract
+from .. import gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
@@ -41,6 +42,7 @@ from ..constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
+    GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
     GITEA_ORG_CI_RUNNER_PROVISION,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
@@ -698,7 +700,10 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     them from ``normalized_params``. Non-default values only are injected, so
     legacy AsyncSSH/raw-output procedures keep a byte-for-byte identical payload.
     """
-    if execution.procedure.name in GITEA_USER_CI_RUNNER_PROCEDURE_NAMES:
+    if execution.procedure.name in (
+        GITEA_USER_CI_RUNNER_PROCEDURE_NAMES
+        | GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES
+    ):
         normalized = _normalize_gitea_docker_runner_execution(execution)
     else:
         normalized = _dispatch_normalize_execution_params(execution)
@@ -2354,7 +2359,46 @@ def validate_gitea_docker_runner_target(
 ) -> str:
     """Require the exact active VM 604 without reading free-form inventory fields."""
 
-    contract = gitea_docker_runner_contract
+    return _validate_gitea_docker_runner_target(
+        target,
+        target_model_label=target_model_label,
+        assigned_object_id=assigned_object_id,
+        target_display=target_display,
+        contract=gitea_docker_runner_contract,
+        lane_label="user",
+    )
+
+
+def validate_gitea_org_docker_runner_recovery_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> str:
+    """Require the exact active VM 604 for organization network recovery."""
+
+    return _validate_gitea_docker_runner_target(
+        target,
+        target_model_label=target_model_label,
+        assigned_object_id=assigned_object_id,
+        target_display=target_display,
+        contract=gitea_org_docker_runner_recovery_contract,
+        lane_label="organization",
+    )
+
+
+def _validate_gitea_docker_runner_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None,
+    contract: object,
+    lane_label: str,
+) -> str:
+    """Validate one fixed runner target without reading free-form fields."""
+
     if (
         target_model_label != contract.TARGET_OBJECT["content_type"]
         or assigned_object_id != contract.TARGET_OBJECT_ID
@@ -2365,14 +2409,14 @@ def validate_gitea_docker_runner_target(
         or (target_display is not None and target_display != contract.TARGET_NAME)
     ):
         raise RPCExecutionError(
-            "Gitea user CI runner operations require the exact dedicated runner VM.",
+            f"Gitea {lane_label} CI runner operations require the exact dedicated runner VM.",
             code="RPC_TARGET_INVALID",
         )
     raw_status = getattr(target, "status", None)
     status = str(getattr(raw_status, "value", raw_status) or "").lower()
     if status != "active":
         raise RPCExecutionError(
-            "Gitea user CI runner target must be active.",
+            f"Gitea {lane_label} CI runner target must be active.",
             code="RPC_TARGET_INVALID",
         )
     raw_address = getattr(
@@ -2384,12 +2428,12 @@ def validate_gitea_docker_runner_target(
         host = ip_address(str(raw_address).split("/", 1)[0])
     except ValueError as exc:
         raise RPCExecutionError(
-            "Gitea user CI runner target requires one canonical primary IPv4 address.",
+            f"Gitea {lane_label} CI runner target requires one canonical primary IPv4 address.",
             code="RPC_TARGET_INVALID",
         ) from exc
     if host.version != 4:
         raise RPCExecutionError(
-            "Gitea user CI runner target requires one canonical primary IPv4 address.",
+            f"Gitea {lane_label} CI runner target requires one canonical primary IPv4 address.",
             code="RPC_TARGET_INVALID",
         )
     return str(host)
@@ -2400,16 +2444,25 @@ def _normalize_gitea_docker_runner_execution(
 ) -> dict[str, Any]:
     """Validate the fixed target and preserve the backend's exact empty payload."""
 
+    procedure_name = execution.procedure.name
+    if procedure_name in GITEA_USER_CI_RUNNER_PROCEDURE_NAMES:
+        contract = gitea_docker_runner_contract
+        validator = validate_gitea_docker_runner_target
+        lane_label = "user"
+    else:
+        contract = gitea_org_docker_runner_recovery_contract
+        validator = validate_gitea_org_docker_runner_recovery_target
+        lane_label = "organization"
     params = execution.params or {}
     internal_keys = {"_intent", "_intent_name", "_timeout_seconds_snapshot"}
     if not isinstance(params, dict) or set(params) - internal_keys:
         raise RPCExecutionError(
-            "Gitea user CI runner operations accept no caller parameters.",
+            f"Gitea {lane_label} CI runner operations accept no caller parameters.",
             code="RPC_PARAM_INVALID",
         )
     if getattr(execution, "credential_references", None):
         raise RPCExecutionError(
-            "Gitea user CI runner credentials are resolved from the assigned target.",
+            f"Gitea {lane_label} CI runner credentials are resolved from the assigned target.",
             code="RPC_PARAM_INVALID",
         )
 
@@ -2421,16 +2474,15 @@ def _normalize_gitea_docker_runner_execution(
     target_model = str(getattr(execution, "target_model_label", "") or "")
     if content_type != target_model:
         raise RPCExecutionError(
-            "Gitea user CI runner target content type is inconsistent.",
+            f"Gitea {lane_label} CI runner target content type is inconsistent.",
             code="RPC_TARGET_INVALID",
         )
-    ssh_host = validate_gitea_docker_runner_target(
+    ssh_host = validator(
         getattr(execution, "assigned_object", None),
         target_model_label=content_type,
         assigned_object_id=getattr(execution, "assigned_object_id", None),
         target_display=getattr(execution, "target_display", None),
     )
-    contract = gitea_docker_runner_contract
     ssh_snapshot = _resolve_locked_ssh_identity(
         assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
         assigned_object_id=contract.TARGET_OBJECT_ID,
