@@ -1,5 +1,20 @@
 # netbox-rpc Agent Notes
 
+## Proxmox OCI pull contract
+
+- Use `os.linux.proxmox.oci_registry_pull` for the public
+  `emersonfelipesp/netbox-proxbox` appliance only.
+- Keep it `effect="write"`, approval-required, AsyncSSH-pinned, and without a
+  transport fallback chain.
+- Require `proxmox_endpoint_id` to equal the execution target object. Never
+  accept caller-provided credentials, command text, argv, registry credentials,
+  arbitrary repositories, digest-only references, paths, or shell fragments.
+- Keep the paired backend representative command and capability hash aligned
+  byte-for-byte with migration `0093_seed_proxmox_oci_registry_pull`.
+- Never approve or dispatch the procedure autonomously. Present the exact
+  endpoint, node, storage, image reference, and optional filename to the
+  operator before execution.
+
 ## Execution-bound credential authority
 
 Named metadata-only `RPCExecution.credential_references` and the read-only

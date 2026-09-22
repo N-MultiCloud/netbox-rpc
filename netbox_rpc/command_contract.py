@@ -159,6 +159,10 @@ EXEMPT_HANDLER_RATIONALE = {
         "Destructive structured lifecycle orchestrator with operation loops, QEMU "
         "guest-agent JSON-RPC, dynamic config lists, and secret password resolution."
     ),
+    "os.linux_proxmox.oci_registry_pull": (
+        "Approval-gated OCI download uses backend-owned fixed argv, strict SSH, and "
+        "ambiguous-outcome fencing that cannot be represented by a catalog command row."
+    ),
     "service.nginx.1.config_deploy": (
         "Writes caller-provided config via stdin, tests it, and rolls back through "
         "backend-owned shell orchestration."

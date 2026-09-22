@@ -504,6 +504,8 @@ LINUX_PROXMOX_CONVERT_MELLANOX_NIC_HANDLER = (
 )
 LINUX_PROXMOX_QEMU_VM_LIFECYCLE = "os.linux.proxmox.qemu_vm_lifecycle"
 LINUX_PROXMOX_QEMU_VM_LIFECYCLE_HANDLER = "os.linux_proxmox.qemu_vm_lifecycle"
+LINUX_PROXMOX_OCI_REGISTRY_PULL = "os.linux.proxmox.oci_registry_pull"
+LINUX_PROXMOX_OCI_REGISTRY_PULL_HANDLER = "os.linux_proxmox.oci_registry_pull"
 LINUX_PROXMOX_PVESH_JSON = "os.linux.proxmox.pvesh_json"
 LINUX_PROXMOX_PVESH_JSON_HANDLER = "os.linux.proxmox.pvesh_json"
 

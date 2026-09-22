@@ -15,8 +15,7 @@ from urllib.parse import urlparse
 import jsonschema
 import yaml
 
-from .. import gitea_docker_runner_contract
-from .. import gitea_org_docker_runner_recovery_contract
+from .. import gitea_docker_runner_contract, gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
@@ -42,8 +41,8 @@ from ..constants import (
     DNS_HOST_DEPLOY_PROCEDURE,
     DNS_HOST_STATUS_PROCEDURE,
     GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
-    GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
     GITEA_ORG_CI_RUNNER_PROVISION,
+    GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
@@ -70,6 +69,7 @@ from ..constants import (
     LINUX_INSTALL_SSH_KEY,
     LINUX_INSTALL_ZABBIX_AGENT2,
     LINUX_PROXMOX_CONVERT_MELLANOX_NIC,
+    LINUX_PROXMOX_OCI_REGISTRY_PULL,
     LINUX_PROXMOX_PVESH_JSON,
     LINUX_PROXMOX_QEMU_VM_LIFECYCLE,
     LINUX_PROXMOX_SHOW_SYSTEMCTL_SERVICES,
@@ -1103,6 +1103,9 @@ def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, A
 
     if procedure_name == LINUX_PROXMOX_PVESH_JSON:
         return _normalize_pvesh_json_execution(execution, target)
+
+    if procedure_name == LINUX_PROXMOX_OCI_REGISTRY_PULL:
+        return _normalize_proxmox_oci_registry_pull_execution(execution, target)
 
     if procedure_name == LINUX_COLLECT_FACTS:
         return _normalize_pipeline_fixed_execution(execution, target)
@@ -5131,6 +5134,66 @@ def _resolve_proxmox_ssh_binding(endpoint_id: int) -> dict[str, Any]:
             code="RPC_PROXMOX_SSH_CREDENTIAL_MISSING",
         )
     return {**resolved, "host": host}
+
+
+_PROXMOX_OCI_NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PROXMOX_OCI_STORAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PROXMOX_OCI_REFERENCE_RE = re.compile(
+    r"^(?:docker[.]io/)?emersonfelipesp/netbox-proxbox:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+)
+_PROXMOX_OCI_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+
+
+def _normalize_proxmox_oci_registry_pull_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize one approval-gated pull from the public appliance repository."""
+    params = execution.params or {}
+    endpoint_id = _int_range(params, "proxmox_endpoint_id", 1, None)
+    assigned_id = getattr(execution, "assigned_object_id", None)
+    if assigned_id is not None and int(assigned_id) != endpoint_id:
+        raise RPCExecutionError(
+            "proxmox_endpoint_id must match the execution target object.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    node = _optional_regex_param(params, "node", _PROXMOX_OCI_NODE_RE)
+    storage = _optional_regex_param(params, "storage", _PROXMOX_OCI_STORAGE_RE)
+    reference = _optional_regex_param(params, "reference", _PROXMOX_OCI_REFERENCE_RE)
+    if not node or not storage or not reference:
+        raise RPCExecutionError(
+            "node, storage, and reference are required.",
+            code="RPC_PARAM_INVALID",
+        )
+    filename = _optional_regex_param(params, "filename", _PROXMOX_OCI_FILENAME_RE)
+    resolved = _resolve_proxmox_ssh_binding(endpoint_id)
+
+    normalized: dict[str, Any] = {
+        "target": target,
+        "rpc_ssh_host": resolved["host"],
+        "rpc_ssh_port": int(resolved.get("port") or 22),
+        "rpc_ssh_credential_pk": int(resolved["credential_pk"]),
+        "rpc_ssh_known_hosts_entry": str(resolved.get("known_hosts_entry") or ""),
+        "rpc_ssh_strict_host_key_checking": bool(
+            resolved.get("strict_host_key_checking", True)
+        ),
+        "proxmox_endpoint_id": endpoint_id,
+        "node": node,
+        "storage": storage,
+        "reference": reference,
+    }
+    if filename:
+        normalized["filename"] = filename
+    normalized["command_fingerprint"] = {
+        "handler_id": execution.procedure.handler_id,
+        "proxmox_endpoint_id": endpoint_id,
+        "node": node,
+        "storage": storage,
+        "reference": reference,
+        "filename": filename,
+    }
+    return normalized
 
 
 def _proxmox_operations(params: dict[str, Any]) -> list[str]:

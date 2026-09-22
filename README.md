@@ -42,6 +42,12 @@ adapter. The `nms` extra installs `netbox-nms>=0.1.9,<0.2.0`.
 
 The procedure catalog is intentionally narrow:
 
+- `os.linux.proxmox.oci_registry_pull` — approval-gated import of an explicitly
+  tagged public `emersonfelipesp/netbox-proxbox` appliance into selected
+  Proxmox node storage. The endpoint ID must match the audited target object;
+  normalization resolves its approved SSH binding and pins AsyncSSH without
+  fallback. The paired backend owns the fixed `pvesh create
+  .../oci-registry-pull` argv and returns the Proxmox task UPID.
 - `network.device.huawei.olt.ma5800.r024.start_ont`
 - `network.device.dell_os10.s5232f_on.bootstrap_restconf`
 - `network.device.dell_os10.s5232f_on.show_version`

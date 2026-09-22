@@ -196,6 +196,95 @@ def test_proxmox_qemu_lifecycle_accepts_zabbix_agent2_configure(jobs_module) -> 
     assert normalized["zabbix_server"] == "zabbix.example.com"
 
 
+def test_proxmox_oci_registry_pull_normalizes_fixed_repository(jobs_module) -> None:
+    _set_resolver(
+        {
+            "host": "10.0.30.58",
+            "port": 22,
+            "credential_pk": 7,
+            "known_hosts_entry": "10.0.30.58 ssh-ed25519 AAAA...",
+            "strict_host_key_checking": True,
+        }
+    )
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="os.linux.proxmox.oci_registry_pull",
+            handler_id="os.linux_proxmox.oci_registry_pull",
+        ),
+        params={
+            "proxmox_endpoint_id": 5,
+            "node": "pve01",
+            "storage": "local",
+            "reference": "docker.io/emersonfelipesp/netbox-proxbox:0.0.27",
+            "filename": "netbox-proxbox-0.0.27.tar",
+        },
+        assigned_object_id=5,
+        target_display="CLUSTER01-DC01",
+        target_model_label="netbox_proxbox.proxmoxendpoint",
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["rpc_ssh_host"] == "10.0.30.58"
+    assert normalized["rpc_ssh_credential_pk"] == 7
+    assert normalized["node"] == "pve01"
+    assert normalized["storage"] == "local"
+    assert normalized["reference"] == (
+        "docker.io/emersonfelipesp/netbox-proxbox:0.0.27"
+    )
+    assert normalized["filename"] == "netbox-proxbox-0.0.27.tar"
+    assert normalized["command_fingerprint"] == {
+        "handler_id": "os.linux_proxmox.oci_registry_pull",
+        "proxmox_endpoint_id": 5,
+        "node": "pve01",
+        "storage": "local",
+        "reference": "docker.io/emersonfelipesp/netbox-proxbox:0.0.27",
+        "filename": "netbox-proxbox-0.0.27.tar",
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "assigned_object_id"),
+    [
+        ({"reference": "emersonfelipesp/netbox-proxbox:latest;id"}, 5),
+        ({"reference": "private.example/netbox-proxbox:0.0.27"}, 5),
+        ({"reference": "emersonfelipesp/netbox-proxbox"}, 5),
+        ({"node": "pve01/../../etc"}, 5),
+        ({"storage": "local;id"}, 5),
+        ({"filename": "../escape.tar"}, 5),
+        ({}, 6),
+    ],
+)
+def test_proxmox_oci_registry_pull_rejects_untrusted_inputs(
+    jobs_module,
+    overrides: dict[str, object],
+    assigned_object_id: int,
+) -> None:
+    _set_resolver({"host": "10.0.30.58", "port": 22, "credential_pk": 7})
+    params = {
+        "proxmox_endpoint_id": 5,
+        "node": "pve01",
+        "storage": "local",
+        "reference": "emersonfelipesp/netbox-proxbox:0.0.27",
+    }
+    params.update(overrides)
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="os.linux.proxmox.oci_registry_pull",
+            handler_id="os.linux_proxmox.oci_registry_pull",
+        ),
+        params=params,
+        assigned_object_id=assigned_object_id,
+        target_display="CLUSTER01-DC01",
+        target_model_label="netbox_proxbox.proxmoxendpoint",
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as exc_info:
+        jobs_module.normalize_execution_params(execution)
+
+    assert exc_info.value.code == "RPC_PARAM_INVALID"
+
+
 def _set_resolver(return_value) -> None:
     sys.modules["netbox_nms.proxmox_ssh"].resolve_proxmox_endpoint_ssh = MagicMock(
         return_value=return_value
