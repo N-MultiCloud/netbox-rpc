@@ -2237,6 +2237,83 @@ at 1 MiB of **UTF-8 bytes** before the more expensive classifiers run. The
 seeded schemas impose much narrower typed and enum-constrained limits; none
 accepts free-form text.
 
+## Migrating Credential References to netbox-openbao (#321)
+
+`RPCLinuxServiceAllowlist` and `RPCNetBoxPluginAllowlist` both carry an
+optional `openbao_assignment_id` (migration `0094`; two rounds of adversarial
+review squashed onto this same unreleased branch, so it is the only migration
+that ever adds this field in this repo's history) alongside the legacy
+`ssh_credential_override` (`netbox-nms.DeviceCredential` PK). It references a
+**`netbox_openbao.CredentialAssignment`**, not a raw `Credential` PK --
+an assignment already binds a credential to one target object for a stated
+purpose, so the reference can be verified rather than merely asserted to
+exist. `packer.vm.*` procedures accept the equivalent `openbao_assignment_id`
+param (migration `0095`), mutually exclusive with `rpc_ssh_credential_pk`
+(see below); `COMMAND_RUNTIME_KEYS` includes the matching
+`rpc_openbao_assignment_id` runtime key. netbox-rpc never imports
+netbox-openbao (`apps.get_model`/`apps.is_installed` only). The legacy field
+is never cleared automatically.
+
+**`packer.vm.*` target binding and host authority (round-2 review; this is
+the one family where the credential's binding target genuinely IS the
+execution's own assigned object).** Unlike the three allowlist-driven
+normalizers below, `packer_normalizer.py` calls
+`resolve_openbao_assignment_reference(..., enforce_target_binding=True)`: the
+referenced assignment must be bound to the exact `PackerTemplate` the
+execution targets, or `RPC_OPENBAO_ASSIGNMENT_TARGET_MISMATCH`. Binding the
+credential to the template alone would still be bypassable through the
+caller-controlled `ssh_host` override, so `_resolve_ssh_host()` also requires
+any supplied `ssh_host` to equal the template's own `proxmox_node` exactly
+(`RPC_PACKER_HOST_MISMATCH` otherwise) -- a credential verified as belonging
+to template A must not be dispatchable against a caller-chosen host B. The
+params_schema additionally makes `rpc_ssh_credential_pk` and
+`openbao_assignment_id` a JSON Schema `oneOf` (exactly one, never both,
+never neither) rather than an always-required legacy key plus an
+always-optional new one; `_resolve_credential_reference()` in
+`packer_normalizer.py` re-checks the same exclusivity in the pure domain
+(schema validation alone does not protect a row written outside
+`params_schema` validation). Only one of `rpc_ssh_credential_pk` /
+`rpc_openbao_assignment_id` is ever emitted into `normalized_params` and
+`command_fingerprint`, never both.
+
+**Two validation layers, because a static config row can't know its
+execution target.**
+`models._validate_openbao_assignment_id_for_save()` runs at row-save time
+(existence, `enabled`, `purpose="login"`) -- it cannot check that the
+assignment is bound to the *right* device, because an allowlist row is not
+bound to one target (`target_models` names a set of content types, not one
+object). `domain.normalization.resolve_openbao_assignment_reference()` is
+the dispatch-time check, run from the three normalizers that resolve an
+allowlist row's SSH credential
+(`_apply_allowlist_credential_reference()` in `_normalize_linux_service_execution`,
+`_normalize_netbox_plugin_install_execution`, and
+`_normalize_linux_env_file_upsert_execution`): it re-validates
+existence/enabled/purpose, requires the assignment's
+`assigned_object_type`/`assigned_object_id` to equal the *execution's own*
+target (`RPC_OPENBAO_ASSIGNMENT_TARGET_MISMATCH` otherwise), and requires the
+requester to hold `netbox_openbao.view_credential` on the referenced
+credential (`RPC_OPENBAO_CREDENTIAL_PERMISSION_DENIED` otherwise). A valid
+`openbao_assignment_id` takes explicit precedence over
+`ssh_credential_override` -- only `rpc_openbao_assignment_id` is emitted, into
+both `normalized_params` and `command_fingerprint`, never both keys at once.
+(`packer.vm.*` is the exception to "never bind to the execution target" --
+see the round-2 note above: there, the execution's assigned object *is* the
+PackerTemplate the credential is meant for, so `enforce_target_binding=True`
+is correct.)
+
+`python manage.py rpc_remap_credentials_to_openbao [--dry-run]` resolves the
+migrated `Credential` via `import_source`
+(`netbox_nms.DeviceCredential:<pk>`, written by netbox-openbao's
+`openbao_import_nms_credentials`), then looks up an existing enabled
+`purpose="login"` `CredentialAssignment` for it, or -- only when the
+credential has exactly one existing assignment of *any* purpose to adopt a
+target from -- creates the missing `purpose="login"` row against that same
+object. An allowlist row is not bound to one device (see above), so the
+command cannot always infer a target to create an assignment against; when it
+can't, the row is reported under "needs manual assignment" and left
+unchanged, rather than guessing. See the command's module docstring for the
+full rationale.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in

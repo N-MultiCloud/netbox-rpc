@@ -4104,6 +4104,115 @@ def _normalize_nginx_node_execution(
     return result
 
 
+_OPENBAO_SSH_ASSIGNMENT_PURPOSE = "login"
+
+
+def resolve_openbao_assignment_reference(
+    assignment_id: int | None,
+    execution: RPCExecution,
+    *,
+    enforce_target_binding: bool = True,
+) -> dict[str, int] | None:
+    """Validate an ``openbao_assignment_id`` and return its runtime key.
+
+    Returns ``None`` when ``assignment_id`` is ``None`` (caller then falls
+    back to the legacy ``rpc_ssh_credential_pk`` override). Otherwise
+    validates, in order:
+
+    1. netbox-openbao is installed (``apps.get_model`` only, never a hard
+       import -- this module must never fail to import when the plugin is
+       absent);
+    2. the ``CredentialAssignment`` row exists and is ``enabled``;
+    3. its ``purpose`` is ``"login"`` -- the purpose this SSH dispatch path
+       needs, not any purpose a caller happened to pick;
+    4. (when ``enforce_target_binding``) the assignment's
+       ``assigned_object_type``/``assigned_object_id`` equal the execution's
+       own target -- an assignment bound to a *different* object must never
+       be honoured just because its row references this allowlist entry.
+       Callers whose execution target is not itself the credential's natural
+       binding target (e.g. packer.vm.* targets a PackerTemplate, not the
+       Proxmox node the credential is actually for) pass
+       ``enforce_target_binding=False`` and document why;
+    5. the requester (``execution.requested_by``) can view the referenced
+       ``Credential`` through NetBox's object-permission ``restrict()``.
+
+    Raises :class:`RPCExecutionError` with a structured, value-free code on
+    any failure -- this runs at dispatch time, so failing closed here stops a
+    misconfigured or stale reference before nms-backend ever sees it.
+    """
+    if assignment_id is None:
+        return None
+    from django.apps import apps
+
+    if not apps.is_installed("netbox_openbao"):
+        raise RPCExecutionError(
+            "An OpenBao credential assignment is configured but "
+            "netbox-openbao is not installed.",
+            code="RPC_OPENBAO_NOT_INSTALLED",
+        )
+    CredentialAssignment = apps.get_model("netbox_openbao", "CredentialAssignment")
+    assignment = (
+        CredentialAssignment.objects.filter(pk=assignment_id, enabled=True)
+        .select_related("credential")
+        .first()
+    )
+    if assignment is None:
+        raise RPCExecutionError(
+            "The configured OpenBao credential assignment does not exist or "
+            "is disabled.",
+            code="RPC_OPENBAO_ASSIGNMENT_INVALID",
+        )
+    if assignment.purpose != _OPENBAO_SSH_ASSIGNMENT_PURPOSE:
+        raise RPCExecutionError(
+            "The configured OpenBao credential assignment has the wrong "
+            "purpose for SSH dispatch.",
+            code="RPC_OPENBAO_ASSIGNMENT_PURPOSE_MISMATCH",
+        )
+    if enforce_target_binding and (
+        assignment.assigned_object_type_id != execution.assigned_object_type_id
+        or assignment.assigned_object_id != execution.assigned_object_id
+    ):
+        raise RPCExecutionError(
+            "The configured OpenBao credential assignment is not bound to "
+            "this execution's target.",
+            code="RPC_OPENBAO_ASSIGNMENT_TARGET_MISMATCH",
+        )
+    requester = execution.requested_by
+    if requester is not None:
+        Credential = apps.get_model("netbox_openbao", "Credential")
+        if not Credential.objects.restrict(requester, "view").filter(
+            pk=assignment.credential_id
+        ).exists():
+            raise RPCExecutionError(
+                "You do not have permission to view the configured OpenBao "
+                "credential.",
+                code="RPC_OPENBAO_CREDENTIAL_PERMISSION_DENIED",
+            )
+    return {"rpc_openbao_assignment_id": assignment_id}
+
+
+def _apply_allowlist_credential_reference(
+    allow: object, execution: RPCExecution, result: dict[str, Any]
+) -> None:
+    """Resolve an allowlist row's SSH credential into ``result``.
+
+    An ``openbao_assignment_id`` takes explicit precedence over the legacy
+    ``ssh_credential_override``: when set and valid, only the OpenBao
+    reference is emitted (never both), so a partially-migrated row cannot
+    have nms-backend silently fall back to the credential it was meant to
+    replace. A missing or invalid assignment fails closed via
+    ``resolve_openbao_assignment_reference`` rather than falling back.
+    """
+    openbao_reference = resolve_openbao_assignment_reference(
+        getattr(allow, "openbao_assignment_id", None), execution
+    )
+    if openbao_reference is not None:
+        result.update(openbao_reference)
+        result["command_fingerprint"].update(openbao_reference)
+    elif allow.ssh_credential_override_id is not None:
+        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+
+
 def _normalize_linux_service_execution(
     execution: RPCExecution,
     target: str,
@@ -4131,8 +4240,7 @@ def _normalize_linux_service_execution(
             "systemd_unit": unit,
         },
     }
-    if allow.ssh_credential_override_id is not None:
-        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    _apply_allowlist_credential_reference(allow, execution, result)
     return result
 
 
@@ -4262,8 +4370,7 @@ def _normalize_netbox_plugin_install_execution(
             "systemd_units": systemd_units,
         },
     }
-    if allow.ssh_credential_override_id is not None:
-        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    _apply_allowlist_credential_reference(allow, execution, result)
     return result
 
 
@@ -4337,8 +4444,7 @@ def _normalize_linux_env_file_upsert_execution(
             "credential_pk": credential_pk,
         },
     }
-    if allow.ssh_credential_override_id is not None:
-        result["rpc_ssh_credential_pk"] = allow.ssh_credential_override_id
+    _apply_allowlist_credential_reference(allow, execution, result)
     return result
 
 

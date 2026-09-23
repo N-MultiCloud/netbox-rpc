@@ -40,6 +40,12 @@ COMMAND_RUNTIME_KEYS = frozenset(
         "rpc_ssh_host",
         "rpc_ssh_port",
         "rpc_ssh_credential_pk",
+        # Optional forward-compatible netbox-openbao CredentialAssignment PK,
+        # emitted alongside (or instead of) rpc_ssh_credential_pk wherever a
+        # procedure/normalizer resolves one (see
+        # domain/normalization.resolve_openbao_assignment_reference and
+        # packer_normalizer.py). Never caller-required.
+        "rpc_openbao_assignment_id",
         "rpc_ssh_known_hosts_entry",
         "rpc_ssh_strict_host_key_checking",
         "target",

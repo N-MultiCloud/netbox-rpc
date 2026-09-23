@@ -1286,6 +1286,38 @@ instead of resolving SSH credentials by device name. Standalone deployments can
 submit the same structured credential-reference params to a backend that
 understands them.
 
+**Migrating to netbox-openbao credentials (#321).** Both Linux allowlist
+models (`RPCLinuxServiceAllowlist`, `RPCNetBoxPluginAllowlist`) additionally
+carry an optional `openbao_assignment_id` — a `netbox_openbao.CredentialAssignment`
+PK, not a raw `Credential` PK, resolved only through `apps.get_model()` and
+never a hard FK or import, so netbox-openbao stays fully optional. An
+assignment binds a credential to one target object for a stated purpose, so
+it can be verified against the actual execution target and the requester's
+view permission at dispatch time — a raw credential PK could only be
+asserted to exist. When set and valid it takes precedence over
+`ssh_credential_override`, which is never cleared or removed and remains the
+fallback for an unset or invalid reference. The `packer.vm.*` procedures
+accept `openbao_assignment_id` as a JSON Schema `oneOf` alternative to
+`rpc_ssh_credential_pk` (exactly one, never both, migration `0095`) — and,
+unlike the three allowlist-driven procedures, target binding **is** enforced
+there (`enforce_target_binding=True`), since a `packer.vm.*` execution's
+assigned object genuinely is the `PackerTemplate` the credential is for. A
+caller-supplied `ssh_host` override must also equal the template's own
+`proxmox_node`, or it's rejected — otherwise a credential correctly bound to
+one template could still be redirected to a different host by the caller.
+`COMMAND_RUNTIME_KEYS` gained the matching `rpc_openbao_assignment_id`
+runtime key for jinja-templated command rows.
+
+Use `python manage.py rpc_remap_credentials_to_openbao [--dry-run]` to
+resolve an existing (or, only when unambiguous, newly created) `purpose="login"`
+`CredentialAssignment` for each allowlist row's migrated credential, once
+`netbox-openbao`'s `openbao_import_nms_credentials` command has copied the
+referenced `netbox_nms.DeviceCredential` rows (tagged
+`import_source="netbox_nms.DeviceCredential:<pk>"`). The command only ever
+fills in an unset `openbao_assignment_id`; rows with no legacy value, an
+already-set value, no migrated credential, or an assignment target that
+cannot be inferred unambiguously are reported and left untouched.
+
 For the authoring decision matrix, production dependency table, inline template
 rules, and deploy ordering for new exemplars, see
 [`docs/transport-and-parsing-selection.md`](docs/transport-and-parsing-selection.md).

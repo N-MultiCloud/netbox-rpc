@@ -183,6 +183,17 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
             return None
         return int(getattr(value, "pk", value))
 
+    openbao_assignment_id = forms.IntegerField(
+        required=False,
+        min_value=1,
+        label="OpenBao Credential Assignment (netbox_openbao.CredentialAssignment PK)",
+        help_text=(
+            "Optional replacement for ssh_credential_override, once a "
+            "CredentialAssignment binding the migrated credential to this "
+            "row's target for purpose=login exists in netbox-openbao."
+        ),
+    )
+
     class Meta:
         model = RPCLinuxServiceAllowlist
         fields = (
@@ -192,6 +203,7 @@ class RPCLinuxServiceAllowlistForm(NetBoxModelForm):
             "enabled",
             "target_models",
             "ssh_credential_override",
+            "openbao_assignment_id",
             "description",
             "tags",
             "comments",
@@ -237,6 +249,17 @@ class RPCNetBoxPluginAllowlistForm(NetBoxModelForm):
             return None
         return int(getattr(value, "pk", value))
 
+    openbao_assignment_id = forms.IntegerField(
+        required=False,
+        min_value=1,
+        label="OpenBao Credential Assignment (netbox_openbao.CredentialAssignment PK)",
+        help_text=(
+            "Optional replacement for ssh_credential_override, once a "
+            "CredentialAssignment binding the migrated credential to this "
+            "row's target for purpose=login exists in netbox-openbao."
+        ),
+    )
+
     class Meta:
         model = RPCNetBoxPluginAllowlist
         fields = (
@@ -250,6 +273,7 @@ class RPCNetBoxPluginAllowlistForm(NetBoxModelForm):
             "enabled",
             "target_models",
             "ssh_credential_override",
+            "openbao_assignment_id",
             "description",
             "tags",
             "comments",

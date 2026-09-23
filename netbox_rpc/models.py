@@ -53,6 +53,58 @@ SYSTEMD_UNIT_RE = re.compile(
 # _OOKLA_ABS_PATH_RE convention in domain/normalization.py.
 ENVIRONMENT_FILE_PATH_RE = re.compile(r"^/(?!.*\.\.)[A-Za-z0-9/._-]{1,254}$")
 
+# The credential purpose an SSH-bearing openbao_assignment_id must carry.
+# Matches netbox_openbao.choices.PurposeChoices.PURPOSE_LOGIN's value.
+_OPENBAO_SSH_ASSIGNMENT_PURPOSE = "login"
+
+
+def _validate_openbao_assignment_id_for_save(assignment_id: int | None) -> None:
+    """Row-save-time check: the assignment exists, is enabled, and has the
+    right purpose. This cannot check target binding -- the row is not tied
+    to one execution target -- so dispatch-time normalizers additionally
+    verify the assignment's assigned_object matches the actual execution
+    target and that the requester can view the credential (see
+    domain/normalization.py's ``_resolve_openbao_credential_reference``).
+    """
+    if assignment_id is None:
+        return
+    from django.apps import apps
+
+    if not apps.is_installed("netbox_openbao"):
+        raise ValidationError(
+            {
+                "openbao_assignment_id": (
+                    "netbox-openbao is not installed; this reference cannot "
+                    "be validated."
+                )
+            }
+        )
+    CredentialAssignment = apps.get_model("netbox_openbao", "CredentialAssignment")
+    assignment = CredentialAssignment.objects.filter(pk=assignment_id).first()
+    if assignment is None:
+        raise ValidationError(
+            {
+                "openbao_assignment_id": (
+                    "No netbox_openbao.CredentialAssignment matches this "
+                    "primary key."
+                )
+            }
+        )
+    if not assignment.enabled:
+        raise ValidationError(
+            {"openbao_assignment_id": "This credential assignment is disabled."}
+        )
+    if assignment.purpose != _OPENBAO_SSH_ASSIGNMENT_PURPOSE:
+        raise ValidationError(
+            {
+                "openbao_assignment_id": (
+                    f"This assignment's purpose must be "
+                    f"{_OPENBAO_SSH_ASSIGNMENT_PURPOSE!r} for SSH dispatch, "
+                    f"got {assignment.purpose!r}."
+                )
+            }
+        )
+
 # PEP 503 normalized distribution name. Deliberately strict: this is the name
 # handed to `pip install`, and pip accepts far more than a name -- a URL, a
 # local path, a VCS reference, an `--option`. None of those may ever reach it,
@@ -669,6 +721,25 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
             "SSH DeviceService credential resolved by device name."
         ),
     )
+    openbao_assignment_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Optional netbox_openbao.CredentialAssignment PK to use instead of "
+            "the legacy netbox-nms DeviceCredential referenced by "
+            "ssh_credential_override. Unlike a raw Credential PK, an assignment "
+            "already binds a credential to one target object for a stated "
+            "purpose (see netbox_openbao.CredentialAssignment), so the "
+            "normalizer can verify at dispatch time that the assignment is "
+            "actually bound to the execution's target and that the requester "
+            "can view the credential -- not just that some integer exists. "
+            "netbox-openbao stays an optional dependency: this is a plain "
+            "integer reference, resolved (if at all) through apps.get_model, "
+            "never a hard FK. Leave blank while netbox-openbao is not installed "
+            "or the legacy credential has not been migrated yet."
+        ),
+    )
 
     class Meta:
         app_label = "netbox_rpc"
@@ -713,6 +784,7 @@ class RPCLinuxServiceAllowlist(NetBoxModel):
                     )
                 }
             )
+        _validate_openbao_assignment_id_for_save(self.openbao_assignment_id)
 
 
 class RPCExecution(NetBoxModel):
@@ -1606,6 +1678,25 @@ class RPCNetBoxPluginAllowlist(NetBoxModel):
             "default SSH DeviceService credential resolved by device name."
         ),
     )
+    openbao_assignment_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Optional netbox_openbao.CredentialAssignment PK to use instead of "
+            "the legacy netbox-nms DeviceCredential referenced by "
+            "ssh_credential_override. Unlike a raw Credential PK, an assignment "
+            "already binds a credential to one target object for a stated "
+            "purpose (see netbox_openbao.CredentialAssignment), so the "
+            "normalizer can verify at dispatch time that the assignment is "
+            "actually bound to the execution's target and that the requester "
+            "can view the credential -- not just that some integer exists. "
+            "netbox-openbao stays an optional dependency: this is a plain "
+            "integer reference, resolved (if at all) through apps.get_model, "
+            "never a hard FK. Leave blank while netbox-openbao is not installed "
+            "or the legacy credential has not been migrated yet."
+        ),
+    )
 
     class Meta:
         app_label = "netbox_rpc"
@@ -1661,3 +1752,5 @@ class RPCNetBoxPluginAllowlist(NetBoxModel):
 
         if errors:
             raise ValidationError(errors)
+
+        _validate_openbao_assignment_id_for_save(self.openbao_assignment_id)

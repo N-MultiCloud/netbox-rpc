@@ -157,6 +157,7 @@ class RPCLinuxServiceAllowlistTable(NetBoxTable):
     slug = tables.Column(linkify=True)
     enabled = columns.BooleanColumn()
     ssh_credential_override = tables.Column(verbose_name="SSH Credential Override")
+    openbao_assignment_id = tables.Column(verbose_name="OpenBao Assignment")
 
     class Meta(NetBoxTable.Meta):
         model = RPCLinuxServiceAllowlist
@@ -168,6 +169,7 @@ class RPCLinuxServiceAllowlistTable(NetBoxTable):
             "environment_file",
             "enabled",
             "ssh_credential_override",
+            "openbao_assignment_id",
             "description",
             "tags",
             "actions",
@@ -250,6 +252,7 @@ class RPCNetBoxPluginAllowlistTable(NetBoxTable):
     slug = tables.Column(linkify=True)
     enabled = columns.BooleanColumn()
     ssh_credential_override = tables.Column(verbose_name="SSH Credential Override")
+    openbao_assignment_id = tables.Column(verbose_name="OpenBao Assignment")
 
     class Meta(NetBoxTable.Meta):
         model = RPCNetBoxPluginAllowlist
@@ -266,6 +269,7 @@ class RPCNetBoxPluginAllowlistTable(NetBoxTable):
             "enabled",
             "target_models",
             "ssh_credential_override",
+            "openbao_assignment_id",
             "description",
         )
         default_columns = ("slug", "distribution", "module", "enabled")
