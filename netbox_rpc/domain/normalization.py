@@ -6223,47 +6223,157 @@ def _require_locked_ssh_identity_material(
         )
 
 
-def _resolve_locked_ssh_identity(
+def _openbao_ssh_method(credential_type: str) -> str:
+    """Map public OpenBao credential metadata to the SSH transport selector."""
+    if credential_type in {"ssh-keypair", "ssh_key"}:
+        return "key"
+    if credential_type in {"password", "ssh-password", "ssh_password"}:
+        return "password"
+    raise RPCExecutionError(
+        "Runner registration OpenBao SSH identity type is unsupported.",
+        code="RPC_TARGET_INVALID",
+    )
+
+
+def _openbao_ssh_host(service: object, expected_host: str) -> tuple[str, str]:
+    host = str(getattr(service, "host", "") or "")
+    try:
+        parsed_host = ip_address(host)
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Runner registration OpenBao SSH service has an invalid host.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    known_hosts_entry = str(getattr(service, "ssh_known_hosts_entry", "") or "")
+    if (
+        parsed_host.version != 4
+        or str(parsed_host) != expected_host
+        or getattr(service, "ssh_strict_host_key_checking", None) is not True
+    ):
+        raise RPCExecutionError(
+            "Runner registration OpenBao SSH service does not match the locked host policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    _validate_locked_known_hosts_entry(known_hosts_entry, expected_host=expected_host)
+    return str(parsed_host), known_hosts_entry
+
+
+def _openbao_ssh_identity_metadata(identity: object) -> tuple[str, str, str, int]:
+    if str(getattr(identity, "status", "") or "") != "active":
+        raise RPCExecutionError(
+            "Runner registration OpenBao SSH identity is not active.",
+            code="RPC_TARGET_INVALID",
+        )
+    live_version = getattr(identity, "live_kv_version", None)
+    kv_version = (
+        live_version
+        if live_version is not None
+        else getattr(identity, "kv_version", None)
+    )
+    principal = str(getattr(identity, "username", "") or "")
+    credential_type = str(getattr(identity, "credential_type", "") or "")
+    credential_uuid = str(getattr(identity, "uuid", "") or "")
+    if type(kv_version) is not int or kv_version < 0:
+        raise RPCExecutionError(
+            "Runner registration OpenBao SSH identity has no current KV version.",
+            code="RPC_TARGET_INVALID",
+        )
+    if (
+        not principal
+        or principal != principal.strip()
+        or len(principal) > 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in principal)
+        or not credential_uuid
+        or len(credential_type) > 64
+    ):
+        raise RPCExecutionError(
+            "Runner registration OpenBao SSH identity is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    return principal, credential_type, credential_uuid, kv_version
+
+
+def _resolve_openbao_ssh_identity(
     *,
-    assigned_object_type_id: object,
+    assigned_object_type_id: int,
     assigned_object_id: int,
     expected_host: str,
     policy_ref: str,
-) -> dict[str, Any]:
-    """Return a non-secret approval snapshot for one exact SSH service."""
-    from .. import gitea_upgrade_contract
+) -> dict[str, Any] | None:
+    """Return one enabled, credentialed OpenBao SSH endpoint, when installed.
 
+    Every candidate is evaluated rather than a bounded slice, so a second
+    enabled credentialed endpoint can never fall outside the ambiguity check.
+    netbox-openbao's unique (object, service, port) constraint keeps this to
+    one row in practice.
+    """
     try:
-        from netbox_network.models import DeviceService
-    except (ImportError, AttributeError) as exc:
-        raise RPCExecutionError(
-            "Runner registration SSH policy is unavailable.",
-            code="RPC_TARGET_INVALID",
-        ) from exc
-    if type(assigned_object_type_id) is not int or assigned_object_type_id <= 0:
-        raise RPCExecutionError(
-            "Runner registration requires a concrete target content type.",
-            code="RPC_TARGET_INVALID",
+        from netbox_openbao.models import ServiceEndpoint
+    except (ImportError, AttributeError):
+        return None
+    try:
+        endpoints = list(
+            ServiceEndpoint.objects.filter(
+                assigned_object_type_id=assigned_object_type_id,
+                assigned_object_id=assigned_object_id,
+                service_type="ssh",
+                port=22,
+            ).select_related("credential")
         )
-    try:
-        queryset = DeviceService.objects.filter(
-            assigned_object_type_id=assigned_object_type_id,
-            assigned_object_id=assigned_object_id,
-            service_type=DeviceService.SERVICE_SSH,
-            enabled=True,
-        ).select_related("management_host", "credential")
-        services = list(queryset[:2])
     except Exception as exc:
         raise RPCExecutionError(
-            "Runner registration SSH policy could not be resolved.",
+            "Runner registration OpenBao SSH policy could not be resolved.",
             code="RPC_TARGET_INVALID",
         ) from exc
-    if len(services) != 1:
+    if not endpoints:
+        return None
+    enabled = [
+        endpoint
+        for endpoint in endpoints
+        if not (
+            isinstance(getattr(endpoint, "options", None), dict)
+            and endpoint.options.get("enabled") is False
+        )
+    ]
+    credentialed = [
+        endpoint
+        for endpoint in enabled
+        if getattr(endpoint, "credential", None) is not None
+    ]
+    if len(credentialed) != 1:
         raise RPCExecutionError(
-            "Runner registration requires exactly one enabled target-owned SSH service.",
+            "Runner registration requires exactly one enabled credentialed OpenBao SSH service.",
             code="RPC_TARGET_INVALID",
         )
-    service = services[0]
+    service = credentialed[0]
+    identity = service.credential
+    principal, credential_type, credential_uuid, kv_version = (
+        _openbao_ssh_identity_metadata(identity)
+    )
+    host, known_hosts_entry = _openbao_ssh_host(service, expected_host)
+    return {
+        "ssh_storage_backend": "openbao",
+        "ssh_service_id": _positive_model_pk(service, "OpenBao SSH service"),
+        "ssh_service_revision": _model_revision(service, "OpenBao SSH service"),
+        "ssh_identity_id": _positive_model_pk(identity, "OpenBao SSH identity"),
+        "ssh_identity_revision": _model_revision(identity, "OpenBao SSH identity"),
+        "ssh_credential_uuid": credential_uuid,
+        "ssh_credential_type": credential_type,
+        "ssh_kv_version": kv_version,
+        "ssh_principal": principal,
+        "ssh_method": _openbao_ssh_method(credential_type),
+        "ssh_host": host,
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
+        "ssh_policy_ref": policy_ref,
+    }
+
+
+def _build_local_ssh_snapshot(
+    service: object, *, expected_host: str, policy_ref: str
+) -> dict[str, Any]:
+    from .. import gitea_upgrade_contract
+
     raw_host = getattr(getattr(service, "management_host", None), "address", None)
     try:
         host = ip_address(str(raw_host).split("/", 1)[0])
@@ -6324,6 +6434,64 @@ def _resolve_locked_ssh_identity(
         "ssh_known_hosts_sha256": _hash_text(known_hosts_entry),
         "ssh_policy_ref": policy_ref,
     }
+
+
+def _resolve_locked_ssh_identity(
+    *,
+    assigned_object_type_id: object,
+    assigned_object_id: int,
+    expected_host: str,
+    policy_ref: str,
+) -> dict[str, Any]:
+    """Return a non-secret approval snapshot for one exact SSH service."""
+    try:
+        from netbox_network.models import DeviceService
+    except (ImportError, AttributeError):
+        DeviceService = None
+    if type(assigned_object_type_id) is not int or assigned_object_type_id <= 0:
+        raise RPCExecutionError(
+            "Runner registration requires a concrete target content type.",
+            code="RPC_TARGET_INVALID",
+        )
+    legacy_services = []
+    if DeviceService is not None:
+        try:
+            # Only enabled rows count, and two are enough to prove ambiguity:
+            # a disabled legacy row must not shadow a valid OpenBao endpoint.
+            queryset = DeviceService.objects.filter(
+                assigned_object_type_id=assigned_object_type_id,
+                assigned_object_id=assigned_object_id,
+                service_type=DeviceService.SERVICE_SSH,
+                enabled=True,
+            ).select_related("management_host", "credential")
+            legacy_services = list(queryset[:2])
+        except Exception as exc:
+            raise RPCExecutionError(
+                "Runner registration SSH policy could not be resolved.",
+                code="RPC_TARGET_INVALID",
+            ) from exc
+    if not legacy_services:
+        openbao_snapshot = _resolve_openbao_ssh_identity(
+            assigned_object_type_id=assigned_object_type_id,
+            assigned_object_id=assigned_object_id,
+            expected_host=expected_host,
+            policy_ref=policy_ref,
+        )
+        if openbao_snapshot is not None:
+            return openbao_snapshot
+    services = [
+        service
+        for service in legacy_services
+        if getattr(service, "enabled", None) is True
+    ]
+    if len(services) != 1 or len(legacy_services) != 1:
+        raise RPCExecutionError(
+            "Runner registration requires exactly one enabled target-owned SSH service.",
+            code="RPC_TARGET_INVALID",
+        )
+    return _build_local_ssh_snapshot(
+        services[0], expected_host=expected_host, policy_ref=policy_ref
+    )
 
 
 def _gitea_runner_fence_is_quiescent(

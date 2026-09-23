@@ -37,7 +37,7 @@ _TARGET_OBJECT_SCHEMA = {
     },
 }
 
-_SSH_APPROVAL_SNAPSHOT_SCHEMA = {
+_LOCAL_SSH_APPROVAL_SNAPSHOT_SCHEMA = {
     "type": "object",
     "required": [
         "ssh_service_id",
@@ -74,6 +74,58 @@ _SSH_APPROVAL_SNAPSHOT_SCHEMA = {
             "pattern": r"^target-owned-ssh:dcim\.device:[1-9][0-9]*$",
         },
     },
+}
+
+_OPENBAO_SSH_APPROVAL_SNAPSHOT_SCHEMA = {
+    "type": "object",
+    "required": [
+        "ssh_storage_backend",
+        "ssh_service_id",
+        "ssh_service_revision",
+        "ssh_identity_id",
+        "ssh_identity_revision",
+        "ssh_credential_uuid",
+        "ssh_credential_type",
+        "ssh_kv_version",
+        "ssh_principal",
+        "ssh_method",
+        "ssh_host",
+        "ssh_port",
+        "ssh_strict_host_key_checking",
+        "ssh_known_hosts_sha256",
+        "ssh_policy_ref",
+    ],
+    "additionalProperties": False,
+    "properties": {
+        "ssh_storage_backend": {"const": "openbao"},
+        "ssh_service_id": {"type": "integer", "minimum": 1},
+        "ssh_service_revision": {"type": "string", "format": "date-time"},
+        "ssh_identity_id": {"type": "integer", "minimum": 1},
+        "ssh_identity_revision": {"type": "string", "format": "date-time"},
+        "ssh_credential_uuid": {"type": "string", "format": "uuid"},
+        "ssh_credential_type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "ssh_kv_version": {"type": "integer", "minimum": 0},
+        "ssh_principal": {"type": "string", "minLength": 1, "maxLength": 200},
+        "ssh_method": {"enum": ["password", "key", "key_with_passphrase"]},
+        "ssh_host": {"type": "string", "format": "ipv4"},
+        "ssh_port": {"const": 22},
+        "ssh_strict_host_key_checking": {"const": True},
+        "ssh_known_hosts_sha256": {
+            "type": "string",
+            "pattern": r"^[0-9a-f]{64}$",
+        },
+        "ssh_policy_ref": {
+            "type": "string",
+            "pattern": r"^target-owned-ssh:dcim\.device:[1-9][0-9]*$",
+        },
+    },
+}
+
+_SSH_APPROVAL_SNAPSHOT_SCHEMA = {
+    "oneOf": [
+        _LOCAL_SSH_APPROVAL_SNAPSHOT_SCHEMA,
+        _OPENBAO_SSH_APPROVAL_SNAPSHOT_SCHEMA,
+    ]
 }
 
 
@@ -296,7 +348,7 @@ AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES: dict[str, str] = {
         "50ab427bb1f4fee18a76fbe00f19a65b9cbb03d3c1951d9f500b0da6938ece03"
     ),
     "os.linux.debian.13.install_akvorado": (
-        "b9ec74c18c69c53c494155671c638f878b1c74b6d1cf478b8665f822ab4469a6"
+        "b7a42b3e417541a9593726d64eb2159401dfcd8faffc807cdcfa1f39090afcfa"
     ),
 }
 

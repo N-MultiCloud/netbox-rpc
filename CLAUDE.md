@@ -58,6 +58,17 @@ for driver/parser authoring rules, production parser availability, inline
 template guidance, security boundaries, and deploy ordering for new pipeline
 exemplar procedures.
 
+## Target-owned SSH approval snapshots
+
+The approval normalizer keeps the legacy local snapshot unchanged whenever a
+legacy `DeviceService` exists. If none exists and `netbox-openbao` is installed,
+it may instead bind a single enabled, credentialed SSH `ServiceEndpoint` to an
+OpenBao snapshot. That variant includes endpoint and credential revisions,
+credential UUID and type, and the current KV version. Ambiguous endpoints,
+disabled-only endpoints, missing or inactive credentials, and unknown KV versions
+fail closed. DNS staging deploy, Docker runner, and Akvorado contracts accept both
+variants; the disabled organization root runner remains local-only.
+
 ## RPC Procedure Commands
 
 `AGENTS.md` is the source for the command source-of-truth contract. Keep its

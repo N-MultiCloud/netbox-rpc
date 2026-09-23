@@ -110,6 +110,30 @@ standalone. The UI-based opt-in surface lives here:
   `RpcPluginSettings` through a guarded `try/except ImportError` and degrades to
   nothing when netbox-rpc is absent. netbox-rpc never imports netbox-proxbox.
 
+## Target-owned SSH approval snapshots
+
+Approval normalization preserves the legacy 11-field `ssh_storage_backend="local"`
+snapshot byte-for-byte whenever a target has exactly one enabled legacy
+`DeviceService`; two enabled legacy services refuse, and disabled legacy rows are
+ignored. When no enabled legacy service exists, an installed `netbox-openbao` plugin may supply one enabled
+port-22 `ServiceEndpoint` with `service_type="ssh"` and an active credential. The
+OpenBao snapshot additionally binds the credential UUID, credential type, and
+current KV version (`live_kv_version`, falling back to `kv_version`). Both model
+revisions use the existing canonical UTC timestamp formatter. Resolution fails
+closed for ambiguous enabled credentialed endpoints, disabled-only endpoints,
+missing credentials, inactive credentials, unknown KV versions, invalid host-key
+policy, or identity metadata that cannot satisfy the transport contract.
+Every candidate endpoint is evaluated; the ambiguity check never runs on a
+bounded slice. A key credential is approved as `ssh_method="key"` because a
+passphrase is visible only after the reveal; netbox-rpc-backend accepts a
+`key_with_passphrase` reveal for an OpenBao `key` approval, since the approval
+already binds the exact credential version.
+
+DNS staging deploy, the Docker runner paths, and Akvorado accept local or OpenBao
+snapshots. The disabled organization root runner in
+`gitea_org_ci_runner_contract` remains local-only until that handler is activated
+and its business policy is redesigned.
+
 ## RPC Procedure Commands
 
 `netbox-rpc` is now the database source of truth for the structured command

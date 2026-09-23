@@ -543,6 +543,18 @@ The singleton can also be driven **programmatically**, not just from the UI:
 - CLI: `python manage.py rpc_settings --enable` (also `--disable`, `--show`,
   `--backend <name-or-id>`, `--clear-backend`, `--dry-run`).
 
+## Target-owned SSH approval snapshots
+
+Approval-gated target-owned SSH procedures bind only public credential metadata,
+never credential material. Existing targets with a legacy `DeviceService` retain
+the exact 11-field local snapshot. A target with no legacy service may resolve a
+single enabled port-22 SSH `ServiceEndpoint` from the optional `netbox-openbao`
+plugin and emit an OpenBao snapshot that also binds the credential UUID, type, and
+current KV version. Resolution refuses ambiguous endpoints, disabled-only
+endpoints, missing or inactive credentials, unknown KV versions, and invalid
+host-key policy. DNS staging deploy, Docker runner, and Akvorado accept either
+variant. The disabled organization root runner remains local-only.
+
 ## DDD / CQRS / Event Sourcing
 
 `netbox-rpc` is the Remote Command Policy bounded context for the NMS stack.

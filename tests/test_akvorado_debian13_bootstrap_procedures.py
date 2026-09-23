@@ -42,6 +42,29 @@ SSH_SNAPSHOT = {
 }
 
 
+def test_install_contract_accepts_openbao_ssh_snapshot() -> None:
+    from netbox_rpc import akvorado_bootstrap_contract as contract
+
+    snapshot = {
+        "ssh_storage_backend": "openbao",
+        "ssh_service_id": 101,
+        "ssh_service_revision": "2026-09-22T12:00:00Z",
+        "ssh_identity_id": 102,
+        "ssh_identity_revision": "2026-09-22T11:00:00Z",
+        "ssh_credential_uuid": "11111111-1111-4111-8111-111111111111",
+        "ssh_credential_type": "ssh-keypair",
+        "ssh_kv_version": 7,
+        "ssh_principal": "akvorado-admin",
+        "ssh_method": "key",
+        "ssh_host": "10.0.30.235",
+        "ssh_port": 22,
+        "ssh_strict_host_key_checking": True,
+        "ssh_known_hosts_sha256": "a" * 64,
+        "ssh_policy_ref": "target-owned-ssh:dcim.device:235",
+    }
+    validate(snapshot, contract._SSH_APPROVAL_SNAPSHOT_SCHEMA)
+
+
 class _ProcedureQuery:
     def __init__(self, manager: "_ProcedureManager", names: set[str]) -> None:
         self.manager = manager
@@ -509,7 +532,7 @@ def test_semantic_capability_hashes_match_backend_ground_truth(catalog) -> None:
 
     expected = {
         PREFLIGHT: "50ab427bb1f4fee18a76fbe00f19a65b9cbb03d3c1951d9f500b0da6938ece03",
-        INSTALL: "b9ec74c18c69c53c494155671c638f878b1c74b6d1cf478b8665f822ab4469a6",
+        INSTALL: "b7a42b3e417541a9593726d64eb2159401dfcd8faffc807cdcfa1f39090afcfa",
     }
     for name, digest in expected.items():
         command_rows = [

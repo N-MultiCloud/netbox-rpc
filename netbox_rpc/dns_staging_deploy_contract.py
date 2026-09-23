@@ -70,7 +70,7 @@ _REVISION_PATTERN = (
     r"(?:\.[0-9]{1,6})?Z(?![\s\S])"
 )
 SSH_POLICY_PATTERN = r"^target-owned-ssh:dcim[.]device:[1-9][0-9]*(?![\s\S])"
-SSH_SNAPSHOT_SCHEMA = {
+_LOCAL_SSH_SNAPSHOT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -105,6 +105,53 @@ SSH_SNAPSHOT_SCHEMA = {
         },
         "ssh_policy_ref": {"type": "string", "pattern": SSH_POLICY_PATTERN},
     },
+}
+
+_OPENBAO_SSH_SNAPSHOT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ssh_storage_backend",
+        "ssh_service_id",
+        "ssh_service_revision",
+        "ssh_identity_id",
+        "ssh_identity_revision",
+        "ssh_credential_uuid",
+        "ssh_credential_type",
+        "ssh_kv_version",
+        "ssh_principal",
+        "ssh_method",
+        "ssh_host",
+        "ssh_port",
+        "ssh_known_hosts_sha256",
+        "ssh_policy_ref",
+    ],
+    "properties": {
+        "ssh_storage_backend": {"const": "openbao"},
+        "ssh_service_id": {"type": "integer", "minimum": 1},
+        "ssh_service_revision": {"type": "string", "minLength": 1, "maxLength": 64},
+        "ssh_identity_id": {"type": "integer", "minimum": 1},
+        "ssh_identity_revision": {"type": "string", "minLength": 1, "maxLength": 64},
+        "ssh_credential_uuid": {"type": "string"},
+        "ssh_credential_type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "ssh_kv_version": {"type": "integer", "minimum": 0},
+        "ssh_principal": {"const": RPC_PRINCIPAL},
+        "ssh_method": {
+            "type": "string",
+            "enum": ["key", "key_with_passphrase", "password"],
+        },
+        "ssh_host": {"type": "string", "minLength": 7, "maxLength": 15},
+        "ssh_port": {"const": 22},
+        "ssh_known_hosts_sha256": {
+            "type": "string",
+            "pattern": r"^[0-9a-f]{64}(?![\s\S])",
+        },
+        "ssh_policy_ref": {"type": "string", "pattern": SSH_POLICY_PATTERN},
+    },
+}
+
+SSH_SNAPSHOT_SCHEMA = {
+    "oneOf": [_LOCAL_SSH_SNAPSHOT_SCHEMA, _OPENBAO_SSH_SNAPSHOT_SCHEMA]
 }
 
 COMMAND_CONTRACT = [

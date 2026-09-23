@@ -70,7 +70,7 @@ def test_dns_staging_deploy_policy_migration_matches_runtime_contract(
     )
     assert (
         runtime["SEMANTIC_CAPABILITY_SHA256"]
-        == "ec137f258aab79cf992ea95b98dbcf93054e9431a57755cad5fd67529a6e013c"
+        == "7cababb8b3ebcb3f3bb26bdd414b865c9a07be387a74843e082621869b2c3f5d"
     )
     assert (
         runtime["COMMAND_CONTRACT_SHA256"]

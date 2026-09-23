@@ -8,11 +8,36 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from jsonschema import validate
 
 PROCEDURE_ID = "service.netbox.staging.rotate_backend_token"
 DNS_PROCEDURE_ID = "service.netbox.staging.deploy_dns_pair"
 DNS_COMMIT = "a" * 40
 DNS_SSH_POLICY = "target-owned-ssh:dcim.device:32"
+
+
+def test_dns_contract_accepts_openbao_ssh_snapshot() -> None:
+    from netbox_rpc import dns_staging_deploy_contract as contract
+
+    validate(
+        {
+            "ssh_storage_backend": "openbao",
+            "ssh_service_id": 101,
+            "ssh_service_revision": "2026-09-22T12:00:00Z",
+            "ssh_identity_id": 102,
+            "ssh_identity_revision": "2026-09-22T11:00:00Z",
+            "ssh_credential_uuid": "11111111-1111-4111-8111-111111111111",
+            "ssh_credential_type": "ssh-keypair",
+            "ssh_kv_version": 7,
+            "ssh_principal": contract.RPC_PRINCIPAL,
+            "ssh_method": "key",
+            "ssh_host": "10.0.30.32",
+            "ssh_port": 22,
+            "ssh_known_hosts_sha256": "a" * 64,
+            "ssh_policy_ref": DNS_SSH_POLICY,
+        },
+        contract.SSH_SNAPSHOT_SCHEMA,
+    )
 
 
 def _dns_ssh_snapshot() -> dict[str, object]:

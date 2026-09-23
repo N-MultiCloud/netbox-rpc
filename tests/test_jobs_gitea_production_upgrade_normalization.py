@@ -1562,6 +1562,199 @@ class _FakeDeviceServiceManager:
         return _FakeDeviceServiceQuery(matches)
 
 
+class _FakeOpenBaoEndpointQuery(list):
+    def select_related(self, *args):
+        return self
+
+
+class _FakeOpenBaoEndpointManager:
+    def __init__(self, endpoints):
+        self.endpoints = endpoints
+
+    def filter(self, **kwargs):
+        return _FakeOpenBaoEndpointQuery(
+            endpoint
+            for endpoint in self.endpoints
+            if all(getattr(endpoint, key) == value for key, value in kwargs.items())
+        )
+
+
+def _openbao_endpoint(**overrides):
+    identity = SimpleNamespace(
+        pk=1904,
+        last_updated=datetime(2026, 9, 22, 11, tzinfo=timezone.utc),
+        uuid="11111111-1111-4111-8111-111111111111",
+        credential_type="ssh-keypair",
+        live_kv_version=7,
+        kv_version=6,
+        username="runner-admin",
+        status="active",
+    )
+    values = {
+        "pk": 1903,
+        "last_updated": datetime(2026, 9, 22, 12, tzinfo=timezone.utc),
+        "assigned_object_type_id": 99,
+        "assigned_object_id": 604,
+        "service_type": "ssh",
+        "host": "10.0.30.241",
+        "port": 22,
+        "options": {},
+        "credential": identity,
+        "ssh_known_hosts_entry": _known_hosts_entry("10.0.30.241"),
+        "ssh_strict_host_key_checking": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _install_openbao_model_stub(monkeypatch, endpoints):
+    package = types.ModuleType("netbox_openbao")
+    models = types.ModuleType("netbox_openbao.models")
+    models.ServiceEndpoint = type(
+        "ServiceEndpoint",
+        (),
+        {"objects": _FakeOpenBaoEndpointManager(endpoints)},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_openbao", package)
+    monkeypatch.setitem(sys.modules, "netbox_openbao.models", models)
+
+
+def test_openbao_ssh_snapshot_is_revision_and_version_bound(
+    jobs_module, monkeypatch
+) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    sys.modules[
+        "netbox_network.models"
+    ].DeviceService.objects = _FakeDeviceServiceManager()
+    sys.modules[
+        "netbox_network.models"
+    ].DeviceService.objects.service.assigned_object_id = 170
+    sys.modules[
+        "netbox_network.models"
+    ].DeviceService.objects.runner_service.assigned_object_id = 170
+    _install_openbao_model_stub(monkeypatch, [_openbao_endpoint()])
+
+    snapshot = normalization._resolve_locked_ssh_identity(
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        expected_host="10.0.30.241",
+        policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+    )
+
+    assert snapshot == {
+        "ssh_storage_backend": "openbao",
+        "ssh_service_id": 1903,
+        "ssh_service_revision": "2026-09-22T12:00:00Z",
+        "ssh_identity_id": 1904,
+        "ssh_identity_revision": "2026-09-22T11:00:00Z",
+        "ssh_credential_uuid": "11111111-1111-4111-8111-111111111111",
+        "ssh_credential_type": "ssh-keypair",
+        "ssh_kv_version": 7,
+        "ssh_principal": "runner-admin",
+        "ssh_method": "key",
+        "ssh_host": "10.0.30.241",
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": hashlib.sha256(
+            _known_hosts_entry("10.0.30.241").encode()
+        ).hexdigest(),
+        "ssh_policy_ref": "target-owned-ssh:virtualization.virtualmachine:604",
+    }
+
+
+def test_openbao_ssh_snapshot_does_not_require_netbox_network(
+    jobs_module, monkeypatch
+) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    monkeypatch.delitem(sys.modules, "netbox_network.models")
+    monkeypatch.delitem(sys.modules, "netbox_network")
+    _install_openbao_model_stub(monkeypatch, [_openbao_endpoint()])
+
+    snapshot = normalization._resolve_locked_ssh_identity(
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        expected_host="10.0.30.241",
+        policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+    )
+
+    assert snapshot["ssh_storage_backend"] == "openbao"
+
+
+def test_openbao_ssh_snapshot_falls_back_to_observed_kv_version(
+    jobs_module, monkeypatch
+) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    manager = _FakeDeviceServiceManager()
+    manager.service.assigned_object_id = 170
+    manager.runner_service.assigned_object_id = 170
+    sys.modules["netbox_network.models"].DeviceService.objects = manager
+    endpoint = _openbao_endpoint()
+    endpoint.credential.live_kv_version = None
+    _install_openbao_model_stub(monkeypatch, [endpoint])
+
+    snapshot = normalization._resolve_locked_ssh_identity(
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        expected_host="10.0.30.241",
+        policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+    )
+
+    assert snapshot["ssh_kv_version"] == 6
+
+
+@pytest.mark.parametrize(
+    "failure", ["ambiguous", "disabled", "missing", "inactive", "version"]
+)
+def test_openbao_ssh_snapshot_fails_closed(jobs_module, monkeypatch, failure) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    manager = _FakeDeviceServiceManager()
+    manager.service.assigned_object_id = 170
+    manager.runner_service.assigned_object_id = 170
+    sys.modules["netbox_network.models"].DeviceService.objects = manager
+    endpoint = _openbao_endpoint()
+    endpoints = [endpoint]
+    if failure == "ambiguous":
+        endpoints.append(_openbao_endpoint(pk=1905))
+    elif failure == "disabled":
+        endpoint.options = {"enabled": False}
+    elif failure == "missing":
+        endpoint.credential = None
+    elif failure == "inactive":
+        endpoint.credential.status = "retired"
+    else:
+        endpoint.credential.live_kv_version = None
+        endpoint.credential.kv_version = None
+    _install_openbao_model_stub(monkeypatch, endpoints)
+
+    with pytest.raises(jobs_module.RPCExecutionError) as caught:
+        normalization._resolve_locked_ssh_identity(
+            assigned_object_type_id=99,
+            assigned_object_id=604,
+            expected_host="10.0.30.241",
+            policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+        )
+    assert caught.value.code == "RPC_TARGET_INVALID"
+
+
+def test_legacy_ssh_snapshot_wins_over_openbao(jobs_module, monkeypatch) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    endpoint_manager = MagicMock()
+    package = types.ModuleType("netbox_openbao")
+    models = types.ModuleType("netbox_openbao.models")
+    models.ServiceEndpoint = type("ServiceEndpoint", (), {"objects": endpoint_manager})
+    monkeypatch.setitem(sys.modules, "netbox_openbao", package)
+    monkeypatch.setitem(sys.modules, "netbox_openbao.models", models)
+
+    snapshot = normalization._resolve_locked_ssh_identity(
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        expected_host="10.0.30.241",
+        policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+    )
+
+    assert snapshot["ssh_storage_backend"] == "local"
+    endpoint_manager.filter.assert_not_called()
+
+
 def _org_ci_runner_execution(*, operation: str = "provision") -> SimpleNamespace:
     params: dict[str, object] = {
         "operation": operation,
@@ -1829,3 +2022,65 @@ def test_org_ci_runner_absolute_deadline_closes_a_trickle_response(
 
     assert projected["result"]["stage"] == "indeterminate"
     response.close.assert_called_once_with()
+
+
+def test_openbao_plain_password_credential_uses_password_method(jobs_module) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    assert normalization._openbao_ssh_method("password") == "password"
+    assert normalization._openbao_ssh_method("ssh-password") == "password"
+    assert normalization._openbao_ssh_method("ssh-keypair") == "key"
+
+
+def test_disabled_legacy_ssh_service_does_not_shadow_openbao(
+    jobs_module, monkeypatch
+) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    manager = _FakeDeviceServiceManager()
+    manager.runner_service.enabled = False
+    sys.modules["netbox_network.models"].DeviceService.objects = manager
+    _install_openbao_model_stub(monkeypatch, [_openbao_endpoint()])
+
+    snapshot = normalization._resolve_locked_ssh_identity(
+        assigned_object_type_id=99,
+        assigned_object_id=604,
+        expected_host="10.0.30.241",
+        policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+    )
+
+    assert snapshot["ssh_storage_backend"] == "openbao"
+
+
+def test_two_enabled_legacy_ssh_services_fail_closed(jobs_module, monkeypatch) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    manager = _FakeDeviceServiceManager()
+    manager.service.assigned_object_id = 604
+    sys.modules["netbox_network.models"].DeviceService.objects = manager
+    _install_openbao_model_stub(monkeypatch, [_openbao_endpoint()])
+
+    with pytest.raises(jobs_module.RPCExecutionError):
+        normalization._resolve_locked_ssh_identity(
+            assigned_object_type_id=99,
+            assigned_object_id=604,
+            expected_host="10.0.30.241",
+            policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+        )
+
+
+def test_openbao_ambiguity_check_sees_every_candidate(jobs_module, monkeypatch) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    sys.modules["netbox_network.models"].DeviceService.objects = _FakeDeviceServiceManager()
+    sys.modules["netbox_network.models"].DeviceService.objects.runner_service.enabled = False
+    disabled = [
+        _openbao_endpoint(pk=2000 + index, options={"enabled": False}) for index in range(3)
+    ]
+    _install_openbao_model_stub(
+        monkeypatch, [*disabled, _openbao_endpoint(), _openbao_endpoint(pk=1999)]
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError):
+        normalization._resolve_locked_ssh_identity(
+            assigned_object_type_id=99,
+            assigned_object_id=604,
+            expected_host="10.0.30.241",
+            policy_ref="target-owned-ssh:virtualization.virtualmachine:604",
+        )
