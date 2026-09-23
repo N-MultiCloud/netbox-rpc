@@ -6,6 +6,7 @@ import hashlib
 import json
 import posixpath
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 from pathlib import PurePosixPath
@@ -77,6 +78,8 @@ from ..constants import (
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
     NETBOX_PLUGIN_INSTALL,
+    NETBOX_OPENBAO_IMPORT_APPLY,
+    NETBOX_OPENBAO_IMPORT_DRY_RUN,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NGINX_1_CONFIG_DEPLOY,
@@ -706,7 +709,20 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     ):
         normalized = _normalize_gitea_docker_runner_execution(execution)
     else:
-        normalized = _dispatch_normalize_execution_params(execution)
+        # Table-driven dispatch for procedures whose normalizer needs no extra
+        # per-branch logic. Register new 1:1 (or shared) procedure-name ->
+        # normalizer entries in ``_TABLE_NORMALIZERS`` instead of adding
+        # another branch to ``_dispatch_normalize_execution_params()`` — that
+        # function's own cyclomatic complexity is already far above the
+        # review threshold (radon F, well over 25 at commit 4862f1b), and
+        # checking the table here, before ever calling the dispatcher, keeps
+        # the dispatcher itself from growing with each newly registered
+        # procedure.
+        table_normalizer = _TABLE_NORMALIZERS.get(execution.procedure.name)
+        if table_normalizer is not None:
+            normalized = table_normalizer(execution, execution.target_display)
+        else:
+            normalized = _dispatch_normalize_execution_params(execution)
     _apply_driver_pipeline_overrides(execution, normalized)
     _apply_target_object_context(execution, normalized)
     from ..credential_contract import apply_credential_fingerprint
@@ -5894,6 +5910,152 @@ def _normalize_staging_backend_token_rotation_execution(
     }
 
     return normalized
+
+
+_OPENBAO_IMPORT_ENVIRONMENTS = ("staging", "production")
+
+
+def _openbao_import_target_device_id(environment: str) -> int:
+    """Resolve the operator-configured device id bound to ``environment``.
+
+    Requires ``PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"]`` to be
+    an explicit mapping of both ``"staging"`` and ``"production"`` to positive
+    integer ``dcim.device`` ids (the same id may appear for both keys when
+    staging and production NetBox share one host). Absent, malformed, or
+    partially configured settings fail closed -- this is a required
+    precondition, not a convenience default, so a procedure never targets a
+    device the operator never bound to that environment.
+    """
+    try:
+        from django.conf import settings
+    except ImportError as exc:
+        raise RPCExecutionError(
+            "netbox-openbao import requires Django settings to resolve "
+            "openbao_import_targets.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    try:
+        plugin_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
+        targets = (plugin_config.get("netbox_rpc") or {}).get("openbao_import_targets")
+    except Exception as exc:  # noqa: BLE001 - any settings-access failure fails closed
+        raise RPCExecutionError(
+            "netbox-openbao import requires a valid openbao_import_targets "
+            "plugin setting.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if not isinstance(targets, dict) or set(targets) != set(_OPENBAO_IMPORT_ENVIRONMENTS):
+        raise RPCExecutionError(
+            "netbox-openbao import requires "
+            "PLUGINS_CONFIG['netbox_rpc']['openbao_import_targets'] to be "
+            "configured with exactly the 'staging' and 'production' keys.",
+            code="RPC_TARGET_INVALID",
+        )
+    device_id = targets.get(environment)
+    if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 1:
+        raise RPCExecutionError(
+            "netbox-openbao import requires a positive integer device id "
+            f"configured for environment {environment!r}.",
+            code="RPC_TARGET_INVALID",
+        )
+    return device_id
+
+
+def _normalize_openbao_import_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the closed ``environment`` enum for the audited netbox-openbao
+    credential importer.
+
+    The caller supplies no path, flag, or command text. ``environment`` is the
+    only accepted parameter and is mapped server-side (in netbox-rpc-backend)
+    to a fixed NetBox root and venv python; this normalizer only validates the
+    enum and binds the assigned target object into the fingerprint so an
+    approved run cannot be redirected to a different device.
+    """
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "The netbox-openbao credential importer requires a dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+    ):
+        raise RPCExecutionError(
+            "The netbox-openbao credential importer requires an existing "
+            "viewable dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "netbox-openbao import params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(set(params) - {"environment"})
+    if unexpected:
+        raise RPCExecutionError(
+            "netbox-openbao import accepts only 'environment'; "
+            f"unexpected field(s): {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+    environment = params.get("environment")
+    if environment not in _OPENBAO_IMPORT_ENVIRONMENTS:
+        raise RPCExecutionError(
+            "netbox-openbao import requires environment in "
+            f"{_OPENBAO_IMPORT_ENVIRONMENTS!r}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    configured_target_device_id = _openbao_import_target_device_id(environment)
+    if assigned_object_id != configured_target_device_id:
+        raise RPCExecutionError(
+            "netbox-openbao import environment "
+            f"{environment!r} is bound to a different configured device; "
+            "the execution target must equal "
+            "PLUGINS_CONFIG['netbox_rpc']['openbao_import_targets'] "
+            f"[{environment!r}].",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    return {
+        "target": target,
+        "environment": environment,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "environment": environment,
+            "assigned_object_id": assigned_object_id,
+            "configured_target_device_id": configured_target_device_id,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+
+# Table-driven normalizer registry consulted once at the top of
+# ``_dispatch_normalize_execution_params``. Register a new procedure name
+# here (pointing at a shared or dedicated normalizer, both accepting
+# ``(execution, target)``) instead of adding another branch to that
+# function's already very large ``if``/``elif`` chain.
+_TABLE_NORMALIZERS: dict[
+    str, Callable[[RPCExecution, str], dict[str, Any]]
+] = {
+    NETBOX_OPENBAO_IMPORT_DRY_RUN: _normalize_openbao_import_execution,
+    NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
+}
 
 
 def _normalize_dns_staging_deploy_execution(

@@ -186,6 +186,24 @@ The procedure catalog is intentionally narrow:
   are part of the immutable approval snapshot. Migration reversal deletes the seed
   when it has no executions; if execution history protects it, reversal keeps
   the row and command history but forces `enabled=False`.
+- `service.netbox.openbao_import.dry_run` (read, no approval) and
+  `service.netbox.openbao_import.apply` (destructive, two-person approval) —
+  audited execution of netbox-openbao's `openbao_import_nms_credentials`
+  management command on the staging or production NetBox host. Both target an
+  existing, requester-viewable `dcim.device` and accept only a closed
+  `environment` enum (`staging`/`production`); the backend maps it to a fixed
+  NetBox root, venv python, and management-command invocation with no
+  caller-supplied path, flag, or command text. Results are closed to `ok`,
+  constant `procedure`, `target`, `environment`, bounded `summary` per-source
+  counts (never row content or secret material), and the
+  `execute`/`complete`/`indeterminate` stage; any post-dispatch outcome other
+  than a clean, fully-parsed exit is reported as indeterminate. Reconcile with
+  a fresh `dry_run` before retrying an indeterminate `apply`. Requires the
+  operator-configured plugin setting
+  `PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"] = {"staging": <device
+  id>, "production": <device id>}`; both procedures refuse with
+  `RPC_TARGET_INVALID` when the setting is absent/malformed or the target
+  device does not equal the configured id for the chosen environment.
 - `service.netbox.staging.deploy_dns_pair` — destructive, two-person deployment
   of one reviewed lowercase 40-hex commit to the staging NetBox DNS plugin and
   dns-api sidecar pair. It is fixed to the existing, requester-viewable

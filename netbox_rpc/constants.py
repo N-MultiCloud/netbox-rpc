@@ -121,6 +121,22 @@ NETBOX_STAGING_ROTATE_BACKEND_TOKEN_HANDLER = (
 NETBOX_STAGING_DEPLOY_DNS_PAIR = "service.netbox.staging.deploy_dns_pair"
 NETBOX_STAGING_DEPLOY_DNS_PAIR_HANDLER = NETBOX_STAGING_DEPLOY_DNS_PAIR
 
+# Audited netbox-openbao credential importer on a NetBox host. The caller
+# supplies only a closed `environment` enum; the backend maps it server-side
+# to a fixed NetBox root, venv python, and management command invocation.
+# `dry_run` is read/no-approval; `apply` is destructive/approval-required with
+# a distinct requester/approver and a signed accept-once lease.
+NETBOX_OPENBAO_IMPORT_DRY_RUN = "service.netbox.openbao_import.dry_run"
+NETBOX_OPENBAO_IMPORT_DRY_RUN_HANDLER = NETBOX_OPENBAO_IMPORT_DRY_RUN
+NETBOX_OPENBAO_IMPORT_APPLY = "service.netbox.openbao_import.apply"
+NETBOX_OPENBAO_IMPORT_APPLY_HANDLER = NETBOX_OPENBAO_IMPORT_APPLY
+NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES = frozenset(
+    {
+        NETBOX_OPENBAO_IMPORT_DRY_RUN,
+        NETBOX_OPENBAO_IMPORT_APPLY,
+    }
+)
+
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
 # versions, official artifact digest, and target-owned credential policy are
 # server-normalized and signed; the caller supplies no params.
@@ -384,6 +400,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_RECOVER,
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
+        NETBOX_OPENBAO_IMPORT_APPLY,
     }
 )
 

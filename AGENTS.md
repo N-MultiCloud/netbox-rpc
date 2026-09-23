@@ -2338,6 +2338,77 @@ can't, the row is reported under "needs manual assignment" and left
 unchanged, rather than guessing. See the command's module docstring for the
 full rationale.
 
+## Running the netbox-openbao Credential Importer (#326)
+
+`service.netbox.openbao_import.dry_run` (read, no approval) and
+`service.netbox.openbao_import.apply` (destructive, `approval_required=True`,
+two-person `PROTECTED_APPROVAL_PROCEDURE_NAMES` member) are seeded by
+migration `0096`. They are the audited, host-side counterpart to
+`rpc_remap_credentials_to_openbao`: running netbox-openbao's own
+`openbao_import_nms_credentials` management command directly over SSH is
+forbidden by estate policy, so this pair is the only sanctioned way to run it
+on the staging or production NetBox host.
+
+Both target `dcim.device` only, an existing/viewable device
+(`_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` member -- `create_execution()`
+restricts the assigned object to the requester before the row is written),
+and accept exactly one caller parameter: a closed `environment` enum
+(`staging` | `production`). No path, flag, or command text is accepted. The
+backend maps `environment` server-side to a fixed NetBox root
+(`/opt/netbox-staging` or `/opt/netbox`) and that root's venv python, then
+runs `<root>/venv/bin/python <root>/netbox/manage.py
+openbao_import_nms_credentials` (`apply`) or the same invocation plus
+`--dry-run` (`dry_run`) as the appropriate service account, over strict-host-key
+SSH through the target-owned service, with no transport fallback.
+
+**Environment is not enough to pick a target -- the operator must bind it
+explicitly (round-2 #326 review fix).** `netbox_rpc.domain.normalization
+._openbao_import_target_device_id()` requires the plugin setting
+`PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"]` to be an explicit
+mapping of both `"staging"` and `"production"` to a positive integer
+`dcim.device` id (the same id may appear under both keys when staging and
+production NetBox share one host). The setting is **required**, not a
+convenience default: it is absent from every deployment until an operator
+configures it, and both procedures refuse with `RPC_TARGET_INVALID` while it
+is unset, malformed, missing either key, or has an extra key. The normalizer
+then requires the execution's own `assigned_object_id` to equal the
+configured id for the chosen `environment` -- a caller cannot point `staging`
+at a device only configured for `production`, or at any other device -- and
+binds the configured id into
+`command_fingerprint.configured_target_device_id` so netbox-rpc-backend can
+independently re-verify the same binding before resolving SSH credentials or
+creating a remote process (see `netbox-rpc-backend` AGENTS.md
+§"netbox-openbao credential importer").
+
+The importer's own stdout is either a per-model `"<app.Model>: would inspect
+N row(s)"` line set (`--dry-run`) or, on a real run, a single trailing JSON
+`id_map` document (`{"<app.Model>": {"<source_pk>": <new_pk>, ...}}`). The
+backend must parse only the command's own bounded summary lines/counts --
+never persist or return row content, credential payloads, or any other raw
+output. `dry_run` counts are the reported "would inspect" row counts;
+`apply` counts are `len()` of each `id_map` sub-mapping. Both are reported in
+the closed result's `summary` object, one non-negative integer per source
+model (`device_credential`, `device_service`, `user_ssh_key`,
+`proxmox_binding`, `cloud_vm_credential`, `observability_secret`). Any
+outcome after the backend starts the remote process other than a clean,
+fully-parsed exit -- a nonzero exit, a truncated/malformed summary, a
+transport loss, or a timeout -- must be reported as the closed
+`ok=false, stage="indeterminate", summary=null` tuple; do not guess a partial
+`summary`. The importer itself only copies rows into netbox-openbao and never
+deletes a source row, so an indeterminate `apply` is safe to re-run after a
+follow-up `dry_run` reconciles the observed state, but agents must not assume
+that automatically -- reconcile first.
+
+Both handlers are `EXEMPT_HANDLER_RATIONALE` entries (backend-orchestrated:
+environment-to-root mapping and stdout summary parsing have no faithful
+fixed-argv representation) with one representative command row each. Like
+every other `PROTECTED_APPROVAL_PROCEDURE_NAMES` member, `apply` requires a
+distinct requester/approver, an immutable approval snapshot, and a signed
+one-time dispatch lease before the backend is ever called; never create or
+approve it autonomously. Present the exact target device and environment to
+the operator before dispatching either procedure, and run `dry_run` before
+every `apply`.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in
@@ -2347,9 +2418,25 @@ normalizer, executions will fail at runtime with
 `RPC_PROCEDURE_NOT_NORMALIZABLE`.
 
 - Add the procedure name constant to `constants.py`.
-- Add the normalizer branch to `_dispatch_normalize_execution_params()` in
-  `netbox_rpc.domain.normalization` (the public `normalize_execution_params()`
-  wraps it and `jobs.py` re-exports it).
+- If the normalizer needs no extra per-branch logic beyond the fixed
+  `(execution, target)` call signature, register it in the module-level
+  `_TABLE_NORMALIZERS` dict (right after the normalizer function it points
+  at) instead of adding another `if procedure_name == ...` branch to
+  `_dispatch_normalize_execution_params()`. The table lookup itself lives in
+  the *caller*, `normalize_execution_params()` — not inside the dispatcher —
+  so a table-eligible procedure never adds any code to the dispatcher at all:
+  `normalize_execution_params()` checks `_TABLE_NORMALIZERS` first and calls
+  `_dispatch_normalize_execution_params()` only on a miss. This keeps the
+  dispatcher's own cyclomatic complexity (radon `F (120)` at commit `4862f1b`,
+  already far above the ≤15 target and the 25 hard-block line) from growing
+  with every newly registered table-eligible procedure, and — round-3 #326
+  review fix — restores it to that exact `4862f1b` baseline rather than
+  letting the table mechanism itself add one branch each release. Only fall
+  back to a branch inside the dispatcher when the dispatch needs to
+  inspect/transform something before calling the normalizer (see the existing
+  `UBUNTU_24_JOURNAL_TAIL` branch for an example of why that's sometimes
+  necessary) — that class of addition still grows the dispatcher and has no
+  mitigation beyond this file's pre-existing complexity-gate waiver ledger.
 - Update this file and `README.md` to document the new procedure.
 
 ## Transport Driver & Output Parser Selection

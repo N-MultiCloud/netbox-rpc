@@ -122,6 +122,12 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "service.netbox.staging.rotate_backend_token"
     )
     constants.NETBOX_STAGING_DEPLOY_DNS_PAIR = "service.netbox.staging.deploy_dns_pair"
+    constants.NETBOX_OPENBAO_IMPORT_DRY_RUN = "service.netbox.openbao_import.dry_run"
+    constants.NETBOX_OPENBAO_IMPORT_APPLY = "service.netbox.openbao_import.apply"
+    constants.NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES = {
+        constants.NETBOX_OPENBAO_IMPORT_DRY_RUN,
+        constants.NETBOX_OPENBAO_IMPORT_APPLY,
+    }
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
@@ -171,6 +177,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.GITEA_USER_CI_RUNNER_RECOVER,
         constants.GITEA_ORG_CI_RUNNER_RECOVER,
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+        constants.NETBOX_OPENBAO_IMPORT_APPLY,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
@@ -3164,3 +3171,329 @@ def test_execute_only_caller_cannot_stop_or_disable_openbao(
         command_handlers.create_execution(serializer=serializer, user=user)
 
     assert serializer.saved is False
+
+
+# --- service.netbox.openbao_import.apply protected-contract regression (#326) ---
+#
+# Round-1 adversarial review found NETBOX_OPENBAO_IMPORT_APPLY was registered
+# in PROTECTED_APPROVAL_PROCEDURE_NAMES but missing from _PROTECTED_CONTRACTS/
+# _PROTECTED_APPROVAL_REASON/_PROTECTED_REJECTION_REASON/_PROTECTED_LABELS, so
+# creation crashed inside _protected_contract() with a ValueError instead of
+# requesting two-person approval.
+
+
+def test_openbao_import_apply_is_registered_in_every_protected_map(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure_name = "service.netbox.openbao_import.apply"
+
+    assert procedure_name in command_handlers.PROTECTED_APPROVAL_PROCEDURE_NAMES
+    # This is the exact regression: _protected_contract() must not raise for
+    # a name that PROTECTED_APPROVAL_PROCEDURE_NAMES claims is protected.
+    contract = command_handlers._protected_contract(procedure_name)
+    assert contract.PROCEDURE_NAME == procedure_name
+    assert procedure_name in command_handlers._PROTECTED_APPROVAL_REASON
+    assert procedure_name in command_handlers._PROTECTED_REJECTION_REASON
+    assert procedure_name in command_handlers._PROTECTED_LABELS
+
+    # _require_concrete_protected_backend_id() calls _protected_contract()
+    # internally; assert the full call succeeds (no ValueError) for a
+    # concrete positive backend id.
+    assert (
+        command_handlers._require_concrete_protected_backend_id(7, procedure_name)
+        == 7
+    )
+
+
+def test_openbao_import_apply_creation_requests_protected_two_person_approval(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=326,
+        name="service.netbox.openbao_import.apply",
+        handler_id="service.netbox.openbao_import.apply",
+        enabled=True,
+        approval_required=True,
+        params_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["environment"],
+            "properties": {"environment": {"type": "string", "enum": ["staging", "production"]}},
+        },
+        timeout_seconds=900,
+    )
+    params = {"environment": "staging"}
+    execution = SimpleNamespace(pk=32600, procedure=procedure, params=params)
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": params}
+        initial_data = {
+            "procedure_id": procedure.name,
+            "assigned_object_type": "dcim.device",
+            "assigned_object_id": 900,
+            "params": params,
+        }
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            execution.requested_by = kwargs["requested_by"]
+            execution.requested_by_id = kwargs["requested_by"].pk
+            execution.backend_id = kwargs["backend"]
+            return execution
+
+    transitions: list[tuple[object, ...]] = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            pytest.fail("openbao import apply must not queue before distinct approval")
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: 1,
+    )
+    scoped_actions: list[str] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda candidate, user, action: scoped_actions.append(action),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="c" * 64),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: pytest.fail(
+            "openbao import apply must not enqueue before distinct approval"
+        ),
+    )
+    user = SimpleNamespace(pk=32601, has_perm=lambda permission: True)
+
+    created = command_handlers.create_execution(serializer=Serializer(), user=user)
+
+    assert created is execution
+    assert scoped_actions == ["execute"]
+    assert transitions == [
+        ("request", user.pk),
+        ("request_approval", "c" * 64, user.pk),
+    ]
+
+
+def test_openbao_import_apply_approve_by_distinct_actor_queues_and_dispatches(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure_name = "service.netbox.openbao_import.apply"
+    procedure = SimpleNamespace(
+        pk=326, name=procedure_name, handler_id=procedure_name, timeout_seconds=900
+    )
+    locked = SimpleNamespace(
+        pk=32602,
+        procedure=procedure,
+        backend_id=1,
+        params={},
+        refresh_from_db=lambda: None,
+    )
+    execution = SimpleNamespace(
+        pk=32602,
+        procedure=procedure,
+        procedure_id=procedure.pk,
+        refresh_from_db=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        command_handlers, "_require_approval_authorization", lambda ex, user: None
+    )
+    scoped_actions: list[str] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda candidate, user, action: scoped_actions.append(action),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda candidate: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_approved_backend_target_before_io",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_approval_protected_payload",
+        lambda *args, **kwargs: {"procedure_id": procedure.pk},
+    )
+    approve_calls: list[dict] = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is locked
+
+        def approve(self, **kwargs):
+            approve_calls.append(kwargs)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+
+    class Manager:
+        def select_for_update(self, of=()):
+            return self
+
+        def select_related(self, *args, **kwargs):
+            return self
+
+        def get(self, pk):
+            assert pk == execution.pk
+            return locked
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = SimpleNamespace(
+        objects=Manager(),
+        TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY="_timeout_seconds_snapshot",
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    enqueued: list[dict] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda locked_execution, *, user, timeout_seconds_snapshot: enqueued.append(
+            {
+                "execution": locked_execution,
+                "user": user,
+                "timeout_seconds_snapshot": timeout_seconds_snapshot,
+            }
+        ),
+    )
+    user = SimpleNamespace(pk=1, has_perm=lambda permission: True)
+
+    result = command_handlers.approve_execution(execution, user, reason="")
+
+    assert result is locked
+    assert scoped_actions == ["approve"]
+    # This is the second half of the regression: approval must reach the
+    # aggregate using _PROTECTED_APPROVAL_REASON[procedure_name] rather than
+    # raising KeyError before dispatch.
+    assert approve_calls == [
+        {
+            "approver_id": user.pk,
+            "current_protected": {"procedure_id": procedure.pk},
+            "reason": "Approved audited netbox-openbao credential import.",
+            "queue_after_approval": True,
+        }
+    ]
+    assert enqueued and enqueued[0]["execution"] is locked
+
+
+def test_openbao_import_apply_reject_uses_fixed_reason_no_operator_note(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    procedure_name = "service.netbox.openbao_import.apply"
+    procedure = SimpleNamespace(name=procedure_name)
+    execution = SimpleNamespace(procedure=procedure, refresh_from_db=lambda: None)
+
+    monkeypatch.setattr(
+        command_handlers, "_require_approval_authorization", lambda ex, user: None
+    )
+    scoped_actions: list[str] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda candidate, user, action: scoped_actions.append(action),
+    )
+    reject_calls: list[dict] = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is execution
+
+        def reject(self, **kwargs):
+            reject_calls.append(kwargs)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    user = SimpleNamespace(pk=2, has_perm=lambda permission: True)
+
+    # An operator-supplied reason is rejected outright for a protected
+    # procedure (fixed bounded audit reason only).
+    with pytest.raises(ValidationError):
+        command_handlers.reject_execution(execution, user, reason="please stop")
+
+    result = command_handlers.reject_execution(execution, user, reason="")
+
+    assert result is execution
+    assert scoped_actions == ["approve"]
+    # This is the KeyError regression check for _PROTECTED_REJECTION_REASON.
+    assert reject_calls == [
+        {
+            "rejecter_id": user.pk,
+            "reason": "Rejected audited netbox-openbao credential import.",
+        }
+    ]

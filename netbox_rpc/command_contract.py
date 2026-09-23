@@ -403,6 +403,26 @@ EXEMPT_HANDLER_RATIONALE.update(
         )
     }
 )
+# The netbox-openbao credential importer maps the closed `environment` enum
+# server-side to a fixed NetBox root, venv python, and management-command
+# invocation, and parses only the command's bounded summary counts out of its
+# stdout. Neither step has a faithful one-row fixed-argv representation.
+EXEMPT_HANDLER_RATIONALE.update(
+    {
+        "service.netbox.openbao_import.dry_run": (
+            "Backend maps the closed environment enum to a fixed NetBox root "
+            "and venv python, runs the importer management command with "
+            "--dry-run, and parses only its bounded summary counts."
+        ),
+        "service.netbox.openbao_import.apply": (
+            "Backend maps the closed environment enum to a fixed NetBox root "
+            "and venv python, runs the importer management command, and "
+            "parses only its bounded summary counts; no row content or "
+            "secret material is ever returned."
+        ),
+    }
+)
+
 EXEMPT_HANDLER_IDS = frozenset(EXEMPT_HANDLER_RATIONALE)
 
 

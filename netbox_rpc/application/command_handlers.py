@@ -18,6 +18,7 @@ from .. import gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
+from .. import openbao_import_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
@@ -35,6 +36,8 @@ from ..constants import (
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_USER_CI_RUNNER_RECOVER,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    NETBOX_OPENBAO_IMPORT_APPLY,
+    NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
@@ -82,6 +85,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_PROVISION,
         *GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
         *GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
+        *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
     }
 )
 _OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
@@ -126,6 +130,12 @@ _GITEA_ORG_CI_RUNNER_RECOVER_APPROVAL_REASON = "Approved audited task-network re
 _GITEA_ORG_CI_RUNNER_RECOVER_REJECTION_REASON = "Rejected audited task-network reclamation for the fixed organization Gitea CI runner."
 _AKVORADO_INSTALL_APPROVAL_REASON = "Approved audited Debian 13 Akvorado bootstrap."
 _AKVORADO_INSTALL_REJECTION_REASON = "Rejected audited Debian 13 Akvorado bootstrap."
+_OPENBAO_IMPORT_APPLY_APPROVAL_REASON = (
+    "Approved audited netbox-openbao credential import."
+)
+_OPENBAO_IMPORT_APPLY_REJECTION_REASON = (
+    "Rejected audited netbox-openbao credential import."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -136,6 +146,7 @@ _PROTECTED_APPROVAL_REASON = {
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_APPROVAL_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_APPROVAL_REASON,
+    NETBOX_OPENBAO_IMPORT_APPLY: _OPENBAO_IMPORT_APPLY_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -146,6 +157,7 @@ _PROTECTED_REJECTION_REASON = {
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_REJECTION_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_REJECTION_REASON,
+    NETBOX_OPENBAO_IMPORT_APPLY: _OPENBAO_IMPORT_APPLY_REJECTION_REASON,
 }
 
 _PROTECTED_CONTRACTS = {
@@ -157,6 +169,7 @@ _PROTECTED_CONTRACTS = {
     GITEA_USER_CI_RUNNER_RECOVER: gitea_docker_runner_contract,
     GITEA_ORG_CI_RUNNER_RECOVER: gitea_org_docker_runner_recovery_contract,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: akvorado_contract,
+    NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -167,6 +180,7 @@ _PROTECTED_LABELS = {
     GITEA_USER_CI_RUNNER_RECOVER: "Gitea user CI runner recovery",
     GITEA_ORG_CI_RUNNER_RECOVER: "Gitea organization CI runner network recovery",
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "Debian 13 Akvorado bootstrap",
+    NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {
