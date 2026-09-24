@@ -6046,7 +6046,11 @@ def _normalize_openbao_import_execution(
             "netbox-openbao import params must be an object.",
             code="RPC_PARAM_INVALID",
         )
-    unexpected = sorted(set(params) - {"environment"})
+    # Internal keys the platform itself records on every execution are
+    # allowed; nothing caller-controlled beyond `environment` is.
+    unexpected = sorted(
+        set(params) - {"environment", "_intent", "_intent_name", "_timeout_seconds_snapshot"}
+    )
     if unexpected:
         raise RPCExecutionError(
             "netbox-openbao import accepts only 'environment'; "

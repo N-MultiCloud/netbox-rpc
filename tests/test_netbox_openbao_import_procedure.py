@@ -293,6 +293,16 @@ def test_normalizer_rejects_unexpected_params(jobs_module) -> None:
     assert excinfo.value.code == "RPC_PARAM_INVALID"
 
 
+def test_normalizer_accepts_platform_internal_keys(jobs_module) -> None:
+    execution = _execution(
+        {"environment": "staging", "_timeout_seconds_snapshot": 900, "_intent": None}
+    )
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["environment"] == "staging"
+
+
 def test_normalizer_requires_a_dcim_device_target(jobs_module) -> None:
     execution = _execution(
         {"environment": "staging"},
