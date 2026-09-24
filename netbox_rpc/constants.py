@@ -156,6 +156,28 @@ RPC_TARGET_BINDING_SLUG_CHOICES = (
     (RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST, "N-MultiCloud deploy host"),
 )
 
+# Audited recovery for issue #605: `deploy-app nms-backend[-staging]` refuses
+# when the active release marker names a Docker image that was pruned.
+# `check` (read, no approval) reports the marker/running image state;
+# `reconcile` (destructive, approval-required) rewrites the marker to the
+# running container's image ref, and only then. Both run fixed argv
+# `/opt/nmulticloud/deploy/bin/reconcile-release-marker {app} --check|--apply`
+# on the RPCTargetBinding-bound deploy host; the caller supplies only the
+# closed `app` enum.
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK = "service.nmulticloud.deploy.release_marker_check"
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK_HANDLER = NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE = "service.nmulticloud.deploy.release_marker_reconcile"
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE_HANDLER = (
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE
+)
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_APPS = ("nms-backend-staging", "nms-backend")
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES = frozenset(
+    {
+        NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
+        NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
+    }
+)
+
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
 # versions, official artifact digest, and target-owned credential policy are
 # server-normalized and signed; the caller supplies no params.
@@ -420,6 +442,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
         NETBOX_OPENBAO_IMPORT_APPLY,
+        NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     }
 )
 

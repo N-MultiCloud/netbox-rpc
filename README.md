@@ -207,6 +207,23 @@ The procedure catalog is intentionally narrow:
   staging and production NetBox share one host); both procedures refuse with
   `RPC_TARGET_INVALID` when no binding exists for the environment or the
   execution's target device does not equal the bound device.
+- `service.nmulticloud.deploy.release_marker_check` (read, no approval) and
+  `service.nmulticloud.deploy.release_marker_reconcile` (destructive,
+  two-person approval) — issue #605: audited recovery when
+  `deploy-app nms-backend[-staging]` refuses because the active release
+  marker names a Docker image that no longer exists. Both target an
+  existing, requester-viewable `dcim.device` and accept only a closed `app`
+  enum (`nms-backend-staging`/`nms-backend`); the backend runs the fixed argv
+  `/opt/nmulticloud/deploy/bin/reconcile-release-marker <app> --check|--apply`
+  over AsyncSSH and parses only its closed key=value report. `check` results
+  report `current_ref`/`current_image`/`running_ref`/`running_image`;
+  `reconcile` results report `before_ref`/`after_ref` and only rewrite the
+  marker when the marker's own image is missing and the running container's
+  image exists with a full 40-hex tag — it never builds, pulls, or prunes.
+  Any post-dispatch outcome other than a clean, fully-parsed exit is reported
+  as indeterminate; run `check` before every `reconcile`. Both share the
+  single `RPCTargetBinding` slug `nmulticloud-deploy-host` (both apps run on
+  the same host, unlike the per-environment openbao-import slugs above).
 - `service.netbox.staging.deploy_dns_pair` — destructive, two-person deployment
   of one reviewed lowercase 40-hex commit to the staging NetBox DNS plugin and
   dns-api sidecar pair. It is fixed to the existing, requester-viewable

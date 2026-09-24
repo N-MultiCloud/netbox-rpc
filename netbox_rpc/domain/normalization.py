@@ -86,6 +86,9 @@ from ..constants import (
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
     NGINX_1_ROLLBACK,
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_APPS,
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     OOKLA_PROCEDURE_NAMES,
     OPENBAO_1_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
@@ -100,6 +103,7 @@ from ..constants import (
     PTERODACTYL_WINGS_LOGS,
     PTERODACTYL_WINGS_RESTART,
     PTERODACTYL_WINGS_STATUS,
+    RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING,
     SAMBA_1_CONFIG_DEPLOY,
@@ -6096,6 +6100,139 @@ def _normalize_openbao_import_execution(
     }
 
 
+def _release_marker_target_binding() -> tuple[int, int, str]:
+    """Resolve the ``RPCTargetBinding`` row for the deploy host slot.
+
+    Returns ``(device_id, binding_id, binding_revision)``, reusing the same
+    fail-closed shape as ``_openbao_import_target_binding``: a missing
+    binding or any query failure raises ``RPC_TARGET_INVALID`` rather than
+    silently picking a device.
+    """
+    try:
+        from ..models import RPCTargetBinding
+    except ImportError as exc:
+        raise RPCExecutionError(
+            "the release-marker procedures require netbox_rpc.models to "
+            "resolve the target binding.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    slug = RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST
+    try:
+        binding = RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+    except Exception as exc:
+        raise RPCExecutionError(
+            f"the release-marker procedures could not resolve the {slug!r} "
+            "target binding.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if binding is None:
+        raise RPCExecutionError(
+            f"the release-marker procedures require an RPCTargetBinding "
+            f"with slug {slug!r}.",
+            code="RPC_TARGET_INVALID",
+        )
+    device_id = getattr(binding, "device_id", None)
+    if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 1:
+        raise RPCExecutionError(
+            f"release-marker target binding {slug!r} has no valid device.",
+            code="RPC_TARGET_INVALID",
+        )
+    binding_id = getattr(binding, "pk", None)
+    if isinstance(binding_id, bool) or not isinstance(binding_id, int) or binding_id < 1:
+        raise RPCExecutionError(
+            f"release-marker target binding {slug!r} has no valid id.",
+            code="RPC_TARGET_INVALID",
+        )
+    return device_id, binding_id, _rpc_target_binding_revision(binding, slug)
+
+
+def _normalize_release_marker_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the closed ``app`` enum for the issue-#605 release-marker
+    check/reconcile procedures.
+
+    The caller supplies no path, flag, or command text -- only ``app``. The
+    execution's ``dcim.device`` target must equal the single device bound to
+    ``RPCTargetBinding`` slug ``nmulticloud-deploy-host``; the binding id and
+    its ``last_updated`` revision are bound into ``command_fingerprint`` so
+    netbox-rpc-backend can independently re-verify the same binding, twice,
+    before running the fixed-argv helper.
+    """
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "the release-marker procedures require a dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+    ):
+        raise RPCExecutionError(
+            "the release-marker procedures require an existing viewable "
+            "dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "release-marker params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(set(params) - {"app"})
+    if unexpected:
+        raise RPCExecutionError(
+            "release-marker procedures accept only 'app'; unexpected "
+            f"field(s): {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+    app = params.get("app")
+    if app not in NMULTICLOUD_DEPLOY_RELEASE_MARKER_APPS:
+        raise RPCExecutionError(
+            "release-marker procedures require app in "
+            f"{NMULTICLOUD_DEPLOY_RELEASE_MARKER_APPS!r}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    binding_device_id, target_binding_id, target_binding_revision = (
+        _release_marker_target_binding()
+    )
+    if assigned_object_id != binding_device_id:
+        raise RPCExecutionError(
+            "the release-marker procedures' execution target must equal "
+            "the device on RPCTargetBinding slug "
+            f"{RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST!r}.",
+            code="RPC_TARGET_INVALID",
+        )
+
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    return {
+        "target": target,
+        "app": app,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "app": app,
+            "assigned_object_id": assigned_object_id,
+            "target_binding_id": target_binding_id,
+            "target_binding_revision": target_binding_revision,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+
 # Table-driven normalizer registry consulted once at the top of
 # ``_dispatch_normalize_execution_params``. Register a new procedure name
 # here (pointing at a shared or dedicated normalizer, both accepting
@@ -6106,6 +6243,8 @@ _TABLE_NORMALIZERS: dict[
 ] = {
     NETBOX_OPENBAO_IMPORT_DRY_RUN: _normalize_openbao_import_execution,
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: _normalize_release_marker_execution,
 }
 
 

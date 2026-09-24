@@ -2455,6 +2455,61 @@ approve it autonomously. Present the exact target device and environment to
 the operator before dispatching either procedure, and run `dry_run` before
 every `apply`.
 
+## Recovering a Release Marker with No Recoverable Image (#605)
+
+`service.nmulticloud.deploy.release_marker_check` (read, no approval) and
+`service.nmulticloud.deploy.release_marker_reconcile` (destructive,
+`approval_required=True`, `PROTECTED_APPROVAL_PROCEDURE_NAMES` member) are
+seeded by migration `0098`. They recover from `deploy-app` refusing an
+`nms-backend`/`nms-backend-staging` deploy when the active release marker
+names a Docker image that no longer exists (pruned, or never tagged because a
+build was cancelled after the container started but before the marker was
+written) -- see `deploy/README.md` in `nmulticloud-context` for the operator
+runbook.
+
+Both target `dcim.device` only, an existing/viewable device
+(`_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES` member), and accept exactly one
+caller parameter: a closed `app` enum (`nms-backend-staging` | `nms-backend`).
+Unlike the netbox-openbao importer, the target does not vary per `app` --
+both apps run on the same deploy host, so both procedures reuse a single
+`RPCTargetBinding` slug, `nmulticloud-deploy-host` (the slug this model's
+docstring names as its second, deliberately generic consumer). The backend
+maps `app` server-side to the fixed argv
+`/opt/nmulticloud/deploy/bin/reconcile-release-marker <app> --check|--apply`
+and runs it over strict-host-key AsyncSSH through the target-owned service,
+with no transport fallback. Device 44's SSH principal is `root` (see the
+netbox-openbao importer section above), so the backend's root-owned helper
+invocation needs no additional sudoers rule on the shared host.
+
+Unlike `_openbao_import_target_binding()`, which selects a slug per
+`environment`, `_release_marker_target_binding()` always resolves the single
+`nmulticloud-deploy-host` slug regardless of `app`, then requires the
+execution's own `assigned_object_id` to equal the binding's `device_id` --
+the same fail-closed `RPC_TARGET_INVALID` shape (missing binding, query
+failure, or device mismatch) as the importer. `target_binding_id` and
+`target_binding_revision` are bound into `command_fingerprint`, so they flow
+through the same immutable approval snapshot and signed dispatch lease as
+everything else the fingerprint covers; netbox-rpc-backend independently
+re-reads the same `RPCTargetBinding` row twice -- once before lease
+consumption, once immediately before the remote process starts -- mirroring
+the importer's `#326` round-4 fix exactly.
+
+Unlike the importer, both procedures here have a faithful one-row fixed-argv
+representation (`reconcile-release-marker {app} --check|--apply`), so neither
+is an `EXEMPT_HANDLER_RATIONALE` entry; `netbox_rpc/release_marker_contract.py`
+holds the immutable runtime contract for `reconcile` only (mirroring
+`openbao_import_contract.py`, which also covers only its destructive `apply`).
+The helper's own `--check`/`--apply` output is a bounded, closed key=value
+report; the backend parses only that closed set into the result schema's
+`current_ref`/`current_image`/`running_ref`/`running_image` (check) or
+`before_ref`/`after_ref` (reconcile) fields -- never free-form helper stdout.
+As with every other protected procedure, any post-start non-clean outcome
+(nonzero exit, malformed report, transport loss, timeout) is reported as the
+closed `ok=false, stage="indeterminate"` tuple, since the marker may already
+have been rewritten before the failure. Never create or approve `reconcile`
+autonomously; present the exact target device and `app` to the operator
+before dispatching either procedure, and run `check` before every `reconcile`.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in

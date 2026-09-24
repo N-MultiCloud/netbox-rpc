@@ -128,6 +128,16 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.NETBOX_OPENBAO_IMPORT_DRY_RUN,
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
     }
+    constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK = (
+        "service.nmulticloud.deploy.release_marker_check"
+    )
+    constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE = (
+        "service.nmulticloud.deploy.release_marker_reconcile"
+    )
+    constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES = {
+        constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
+        constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
+    }
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
@@ -178,6 +188,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.GITEA_ORG_CI_RUNNER_RECOVER,
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
+        constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
