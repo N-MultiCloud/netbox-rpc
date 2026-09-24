@@ -5,6 +5,7 @@ from . import views  # noqa: F401 — imports @register_model_view decorators
 
 _MODEL_ROUTES = (
     ("rpcbackend", "backends"),
+    ("rpctargetbinding", "target-bindings"),
     ("rpcprocedure", "procedures"),
     ("rpcintent", "intents"),
     ("rpclinuxserviceallowlist", "linux-service-allowlist"),

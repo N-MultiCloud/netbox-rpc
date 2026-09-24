@@ -20,6 +20,7 @@ from .command_contract import (
     token_has_balanced_placeholders,
     token_is_safe,
 )
+from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
 from .command_templating import (
     CAPTURE_KIND_CHOICES,
     RENDER_JINJA,
@@ -241,6 +242,55 @@ class RPCBackend(NetBoxModel):
         if not self.auth_token:
             return {}
         return {self.auth_header_name: self.auth_token}
+
+
+class RPCTargetBinding(NetBoxModel):
+    """Named binding of a fixed procedure slot to exactly one ``dcim.Device``.
+
+    Replaces two earlier, weaker binding mechanisms found during #326 review:
+    a ``PLUGINS_CONFIG`` setting (unauditable, no NetBox-API edit path) and a
+    generic NetBox tag (auditable, but any ``dcim.change_device`` holder could
+    move it -- the tag itself is not object-permission-scoped to this use).
+    This model is an ordinary NetBox object: standard
+    ``view``/``add``/``change``/``delete_rpctargetbinding`` permissions mean
+    only an operator explicitly granted ``change_rpctargetbinding`` can move
+    a binding, and every change is NetBox-changelog audited like any other
+    object edit.
+
+    ``slug`` is a closed choice (`RPC_TARGET_BINDING_SLUG_CHOICES` in
+    `constants.py`) rather than a free string, so a binding always names one
+    of the procedure slots this plugin knows about; register new slots there,
+    not by relaxing this field. Deliberately generic (not
+    netbox-openbao-specific): `service.nmulticloud.deploy.release_marker_*`
+    (issue #605) reuses this exact model/API for its own deploy-host slot.
+    """
+
+    slug = models.SlugField(
+        max_length=100,
+        unique=True,
+        choices=RPC_TARGET_BINDING_SLUG_CHOICES,
+        help_text="Fixed procedure slot this binding fills. See constants.py for the registry.",
+    )
+    device = models.ForeignKey(
+        to="dcim.Device",
+        on_delete=models.PROTECT,
+        related_name="rpc_target_bindings",
+        help_text="The single device this slot is bound to.",
+    )
+    description = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        app_label = "netbox_rpc"
+        ordering = ("slug",)
+        verbose_name = "RPC Target Binding"
+
+    def __str__(self) -> str:
+        return self.slug
+
+    def get_absolute_url(self) -> str:
+        from django.urls import reverse
+
+        return reverse("plugins:netbox_rpc:rpctargetbinding", args=[self.pk])
 
 
 class RPCProcedure(NetBoxModel):

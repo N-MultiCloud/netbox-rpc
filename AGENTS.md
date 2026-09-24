@@ -2362,23 +2362,69 @@ openbao_import_nms_credentials` (`apply`) or the same invocation plus
 SSH through the target-owned service, with no transport fallback.
 
 **Environment is not enough to pick a target -- the operator must bind it
-explicitly (round-2 #326 review fix).** `netbox_rpc.domain.normalization
-._openbao_import_target_device_id()` requires the plugin setting
-`PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"]` to be an explicit
-mapping of both `"staging"` and `"production"` to a positive integer
-`dcim.device` id (the same id may appear under both keys when staging and
-production NetBox share one host). The setting is **required**, not a
-convenience default: it is absent from every deployment until an operator
-configures it, and both procedures refuse with `RPC_TARGET_INVALID` while it
-is unset, malformed, missing either key, or has an extra key. The normalizer
-then requires the execution's own `assigned_object_id` to equal the
-configured id for the chosen `environment` -- a caller cannot point `staging`
-at a device only configured for `production`, or at any other device -- and
-binds the configured id into
-`command_fingerprint.configured_target_device_id` so netbox-rpc-backend can
-independently re-verify the same binding before resolving SSH credentials or
-creating a remote process (see `netbox-rpc-backend` AGENTS.md
-§"netbox-openbao credential importer").
+explicitly, through a dedicated `RPCTargetBinding` model (round-4 #326 review
+fix).** Round 2 bound this through
+`PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"]`; round 3 replaced
+that with a generic NetBox tag; round 4 replaced the tag because review found
+two highs in it: (1) a generic NetBox tag has no permission of its own, so
+any user holding the ordinary `dcim.change_device` permission could move an
+importer's target -- the "operator-controlled binding" was really controlled
+by whoever could edit any device -- and this backend's "independent"
+re-check read that exact same mutable tag, so it was not actually
+independent of the plugin's own read; (2) resolving the binding once, before
+lease consumption, still left a window where a binding moved between that
+read and remote process creation.
+
+`RPCTargetBinding` (`models.py`) is an ordinary `NetBoxModel`: `slug` (unique,
+closed choice from `RPC_TARGET_BINDING_SLUG_CHOICES` in `constants.py` --
+`netbox-openbao-import-staging`, `netbox-openbao-import-production`, and
+`nmulticloud-deploy-host` for the planned
+`service.nmulticloud.deploy.release_marker_*` procedures, issue #605, which
+reuse this exact model/API rather than inventing their own), `device`
+(`dcim.Device`, `on_delete=PROTECT`), `description`. Standard NetBox model
+permissions (`view_rpctargetbinding`/`add_rpctargetbinding`/
+`change_rpctargetbinding`/`delete_rpctargetbinding`) mean only an operator
+explicitly granted `change_rpctargetbinding` can move a binding --
+`dcim.change_device` alone grants nothing. REST API at
+`/api/plugins/rpc/target-bindings/` (`slug`, `device_id` filters), UI list/
+detail/edit views and navigation under the RPC → Procedures menu, full
+NetBox changelog via `NetBoxModel`. `tests/test_rpc_target_binding_permissions.py`
+statically asserts the viewset is a bare `NetBoxModelViewSet` with no
+`permission_classes` override and no `dcim`/`change_device` reference in its
+body -- the DB-backed proof that a `dcim.change_device`-only user is refused
+and a `change_rpctargetbinding` user succeeds belongs in the integration tier
+(`netbox_rpc/tests/`), which needs a real NetBox + PostgreSQL database.
+
+`netbox_rpc.domain.normalization._openbao_import_target_binding()` queries
+`RPCTargetBinding.objects.select_related("device").filter(slug=<slug>).first()`
+for the environment's fixed slug and requires a row to exist; a missing
+binding or any query failure fails closed with `RPC_TARGET_INVALID` before
+any further normalization. The normalizer then requires the execution's own
+`assigned_object_id` to equal the binding's `device_id` for the chosen
+`environment` -- a caller cannot point `staging` at a device bound only for
+`production`, or at any other device -- and binds `target_binding_id` (the
+binding row's pk) and `target_binding_revision` (its canonical UTC
+`last_updated`, via the same `Z`-suffixed formatter used for every other
+target-owned revision in this module) into `command_fingerprint`, replacing
+round 3's `configured_target_device_id`. Because the binding id and revision
+are part of the command fingerprint, they flow through the same immutable
+approval snapshot and signed dispatch lease as everything else the fingerprint
+covers -- no separate snapshot field was needed. netbox-rpc-backend
+independently re-reads the same `RPCTargetBinding` row through its own
+authenticated NetBox session **twice**: once before lease consumption (closing
+window (1) above) and again immediately before the remote process starts,
+after credential resolution (closing window (2)) -- see `netbox-rpc-backend`
+AGENTS.md §"netbox-openbao credential importer".
+
+**Verified operator precondition for the shared host (device 44).** Device
+44's SSH principal is `root`, so the backend's `sudo -n -u netbox <manage.py
+invocation>` argv needs no sudoers rule on that host -- root can already
+invoke `sudo -u netbox` without one. This is recorded here because it is the
+concrete evidence that closes the "how does the backend actually drop
+privilege to run as the `netbox` service account" question for the currently
+deployed shared staging/production host; a differently-provisioned host whose
+SSH principal is not `root` needs an explicit `netbox-rpc-backend`-side
+sudoers rule instead.
 
 The importer's own stdout is either a per-model `"<app.Model>: would inspect
 N row(s)"` line set (`--dry-run`) or, on a real run, a single trailing JSON

@@ -10,7 +10,27 @@ from .models import (
     RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RPCTargetBinding,
 )
+
+
+class RPCTargetBindingTable(NetBoxTable):
+    slug = tables.Column(linkify=True)
+    device = tables.Column(linkify=True)
+
+    class Meta(NetBoxTable.Meta):
+        model = RPCTargetBinding
+        fields = (
+            "pk",
+            "id",
+            "slug",
+            "device",
+            "description",
+            "tags",
+            "created",
+            "last_updated",
+        )
+        default_columns = ("slug", "device", "description")
 
 
 class RPCBackendTable(NetBoxTable):

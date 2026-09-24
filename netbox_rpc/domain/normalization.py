@@ -77,9 +77,9 @@ from ..constants import (
     MINECRAFT_PAPERMC_INSTALL,
     MINECRAFT_PLUGIN_INSTALL_URL,
     MINECRAFT_VIAVERSION_INSTALL,
-    NETBOX_PLUGIN_INSTALL,
     NETBOX_OPENBAO_IMPORT_APPLY,
     NETBOX_OPENBAO_IMPORT_DRY_RUN,
+    NETBOX_PLUGIN_INSTALL,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NGINX_1_CONFIG_DEPLOY,
@@ -100,6 +100,8 @@ from ..constants import (
     PTERODACTYL_WINGS_LOGS,
     PTERODACTYL_WINGS_RESTART,
     PTERODACTYL_WINGS_STATUS,
+    RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
+    RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING,
     SAMBA_1_CONFIG_DEPLOY,
     SAMBA_1_CONFIG_ROLLBACK,
     SAMBA_1_GROUP_ADD_MEMBERS,
@@ -5914,50 +5916,93 @@ def _normalize_staging_backend_token_rotation_execution(
 
 _OPENBAO_IMPORT_ENVIRONMENTS = ("staging", "production")
 
+# RPCTargetBinding.slug per environment. A generic NetBox tag (round 3) let
+# any dcim.change_device holder move the binding, and this backend's
+# "independent" re-check read that same mutable tag -- not actually
+# independent. RPCTargetBinding is a dedicated NetBoxModel with its own
+# view/add/change/delete_rpctargetbinding permissions, so only an operator
+# explicitly granted change_rpctargetbinding can move one (round-4 #326
+# review fix; see AGENTS.md § "Running the netbox-openbao Credential
+# Importer").
+_OPENBAO_IMPORT_BINDING_SLUGS = {
+    "staging": RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING,
+    "production": RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
+}
 
-def _openbao_import_target_device_id(environment: str) -> int:
-    """Resolve the operator-configured device id bound to ``environment``.
 
-    Requires ``PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"]`` to be
-    an explicit mapping of both ``"staging"`` and ``"production"`` to positive
-    integer ``dcim.device`` ids (the same id may appear for both keys when
-    staging and production NetBox share one host). Absent, malformed, or
-    partially configured settings fail closed -- this is a required
-    precondition, not a convenience default, so a procedure never targets a
-    device the operator never bound to that environment.
+def _openbao_import_target_binding(environment: str) -> tuple[int, int, str]:
+    """Resolve the ``RPCTargetBinding`` row for ``environment``.
+
+    Returns ``(device_id, binding_id, binding_revision)``. Requires exactly
+    one ``RPCTargetBinding`` row for the environment's fixed slug; a missing
+    binding or any query failure fails closed with ``RPC_TARGET_INVALID`` --
+    this is a required precondition, not a convenience default, so a
+    procedure never targets a device the operator never explicitly bound.
     """
     try:
-        from django.conf import settings
+        from ..models import RPCTargetBinding
     except ImportError as exc:
         raise RPCExecutionError(
-            "netbox-openbao import requires Django settings to resolve "
-            "openbao_import_targets.",
+            "netbox-openbao import requires netbox_rpc.models to resolve "
+            "the target binding.",
             code="RPC_TARGET_INVALID",
         ) from exc
+    slug = _OPENBAO_IMPORT_BINDING_SLUGS[environment]
     try:
-        plugin_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
-        targets = (plugin_config.get("netbox_rpc") or {}).get("openbao_import_targets")
-    except Exception as exc:  # noqa: BLE001 - any settings-access failure fails closed
+        binding = RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+    except Exception as exc:
         raise RPCExecutionError(
-            "netbox-openbao import requires a valid openbao_import_targets "
-            "plugin setting.",
+            f"netbox-openbao import could not resolve the {slug!r} target binding.",
             code="RPC_TARGET_INVALID",
         ) from exc
-    if not isinstance(targets, dict) or set(targets) != set(_OPENBAO_IMPORT_ENVIRONMENTS):
+    if binding is None:
         raise RPCExecutionError(
-            "netbox-openbao import requires "
-            "PLUGINS_CONFIG['netbox_rpc']['openbao_import_targets'] to be "
-            "configured with exactly the 'staging' and 'production' keys.",
+            f"netbox-openbao import requires an RPCTargetBinding with slug {slug!r}.",
             code="RPC_TARGET_INVALID",
         )
-    device_id = targets.get(environment)
+    device_id = getattr(binding, "device_id", None)
     if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 1:
         raise RPCExecutionError(
-            "netbox-openbao import requires a positive integer device id "
-            f"configured for environment {environment!r}.",
+            f"netbox-openbao import target binding {slug!r} has no valid device.",
             code="RPC_TARGET_INVALID",
         )
-    return device_id
+    binding_id = getattr(binding, "pk", None)
+    if isinstance(binding_id, bool) or not isinstance(binding_id, int) or binding_id < 1:
+        raise RPCExecutionError(
+            f"netbox-openbao import target binding {slug!r} has no valid id.",
+            code="RPC_TARGET_INVALID",
+        )
+    return device_id, binding_id, _rpc_target_binding_revision(binding, slug)
+
+
+def _rpc_target_binding_revision(binding: object, slug: str) -> str:
+    """Canonical UTC ISO-8601 (``Z``-suffixed) ``last_updated`` revision string.
+
+    Mirrors the formatter used for every other target-owned revision binding
+    in this module (e.g. ``_model_revision`` for the Gitea production
+    upgrade's SSH service/credential revisions).
+    """
+    revision = getattr(binding, "last_updated", None)
+    if revision is None or not hasattr(revision, "isoformat"):
+        raise RPCExecutionError(
+            f"netbox-openbao import target binding {slug!r} requires a stable revision.",
+            code="RPC_TARGET_INVALID",
+        )
+    try:
+        if revision.tzinfo is None or revision.utcoffset() is None:
+            raise ValueError("naive revision")
+        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace("+00:00", "Z")
+    except (AttributeError, ValueError, OverflowError) as exc:
+        raise RPCExecutionError(
+            f"netbox-openbao import target binding {slug!r} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if not rendered or len(rendered) > 64:
+        raise RPCExecutionError(
+            f"netbox-openbao import target binding {slug!r} revision is invalid.",
+            code="RPC_TARGET_INVALID",
+        )
+    return rendered
 
 
 def _normalize_openbao_import_execution(
@@ -6016,14 +6061,15 @@ def _normalize_openbao_import_execution(
             code="RPC_PARAM_INVALID",
         )
 
-    configured_target_device_id = _openbao_import_target_device_id(environment)
-    if assigned_object_id != configured_target_device_id:
+    binding_device_id, target_binding_id, target_binding_revision = (
+        _openbao_import_target_binding(environment)
+    )
+    if assigned_object_id != binding_device_id:
         raise RPCExecutionError(
             "netbox-openbao import environment "
-            f"{environment!r} is bound to a different configured device; "
-            "the execution target must equal "
-            "PLUGINS_CONFIG['netbox_rpc']['openbao_import_targets'] "
-            f"[{environment!r}].",
+            f"{environment!r} is bound to a different device; the execution "
+            "target must equal the device on RPCTargetBinding slug "
+            f"{_OPENBAO_IMPORT_BINDING_SLUGS[environment]!r}.",
             code="RPC_TARGET_INVALID",
         )
 
@@ -6039,7 +6085,8 @@ def _normalize_openbao_import_execution(
             "handler_id": execution.procedure.handler_id,
             "environment": environment,
             "assigned_object_id": assigned_object_id,
-            "configured_target_device_id": configured_target_device_id,
+            "target_binding_id": target_binding_id,
+            "target_binding_revision": target_binding_revision,
             "target_object_sha256": _hash_json(target_object),
         },
     }

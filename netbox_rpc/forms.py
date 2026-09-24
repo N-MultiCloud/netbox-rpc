@@ -1,6 +1,7 @@
 from typing import Protocol, cast
 
 from django import forms
+from dcim.models import Device
 from ipam.models import IPAddress
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
 from utilities.forms.fields import (
@@ -9,6 +10,7 @@ from utilities.forms.fields import (
     DynamicModelMultipleChoiceField,
 )
 
+from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
 from .models import (
     RPCBackend,
     RPCExecution,
@@ -19,6 +21,7 @@ from .models import (
     RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RPCTargetBinding,
     RpcPluginSettings,
 )
 
@@ -114,6 +117,20 @@ class RPCBackendForm(NetBoxModelForm):
             "executor_identity",
             "tags",
             "comments",
+        )
+
+
+class RPCTargetBindingForm(NetBoxModelForm):
+    slug = forms.ChoiceField(choices=RPC_TARGET_BINDING_SLUG_CHOICES)
+    device = DynamicModelChoiceField(queryset=Device.objects.all())
+
+    class Meta:
+        model = RPCTargetBinding
+        fields = (
+            "slug",
+            "device",
+            "description",
+            "tags",
         )
 
 
@@ -381,6 +398,19 @@ class RPCProcedureFilterForm(NetBoxModelFilterSetForm):
 class RPCBackendFilterForm(NetBoxModelFilterSetForm):
     model = RPCBackend
     name = forms.CharField(required=False)
+
+
+class RPCTargetBindingFilterForm(NetBoxModelFilterSetForm):
+    model = RPCTargetBinding
+    slug = forms.ChoiceField(
+        choices=[("", "---------")] + list(RPC_TARGET_BINDING_SLUG_CHOICES),
+        required=False,
+    )
+    device_id = DynamicModelChoiceField(
+        queryset=Device.objects.all(),
+        required=False,
+        label="Device",
+    )
 
 
 class RPCProcedureCommandFilterForm(NetBoxModelFilterSetForm):

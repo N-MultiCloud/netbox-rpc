@@ -7,6 +7,7 @@ app_name = "netbox_rpc"
 router = NetBoxRouter()
 router.register("settings", views.RpcPluginSettingsViewSet)
 router.register("backends", views.RPCBackendViewSet)
+router.register("target-bindings", views.RPCTargetBindingViewSet)
 router.register("procedures", views.RPCProcedureViewSet)
 router.register("procedure-commands", views.RPCProcedureCommandViewSet)
 router.register("intents", views.RPCIntentViewSet)

@@ -198,12 +198,15 @@ The procedure catalog is intentionally narrow:
   counts (never row content or secret material), and the
   `execute`/`complete`/`indeterminate` stage; any post-dispatch outcome other
   than a clean, fully-parsed exit is reported as indeterminate. Reconcile with
-  a fresh `dry_run` before retrying an indeterminate `apply`. Requires the
-  operator-configured plugin setting
-  `PLUGINS_CONFIG["netbox_rpc"]["openbao_import_targets"] = {"staging": <device
-  id>, "production": <device id>}`; both procedures refuse with
-  `RPC_TARGET_INVALID` when the setting is absent/malformed or the target
-  device does not equal the configured id for the chosen environment.
+  a fresh `dry_run` before retrying an indeterminate `apply`. Requires an
+  `RPCTargetBinding` row (`slug=netbox-openbao-import-staging` or
+  `netbox-openbao-import-production`) whose `device` equals the execution's
+  target — a dedicated model with its own `change_rpctargetbinding`
+  permission (create/edit via `/api/plugins/rpc/target-bindings/` or the
+  RPC → Target Bindings UI; the same device may hold both slot bindings when
+  staging and production NetBox share one host); both procedures refuse with
+  `RPC_TARGET_INVALID` when no binding exists for the environment or the
+  execution's target device does not equal the bound device.
 - `service.netbox.staging.deploy_dns_pair` — destructive, two-person deployment
   of one reviewed lowercase 40-hex commit to the staging NetBox DNS plugin and
   dns-api sidecar pair. It is fixed to the existing, requester-viewable

@@ -61,6 +61,41 @@ class RPCBackendBulkDeleteView(generic.BulkDeleteView):
     table = tables.RPCBackendTable
 
 
+# ── RPCTargetBinding ─────────────────────────────────────────────────────────
+
+
+@register_model_view(models.RPCTargetBinding, "list", path="", detail=False)
+class RPCTargetBindingListView(generic.ObjectListView):
+    queryset = models.RPCTargetBinding.objects.select_related("device")
+    table = tables.RPCTargetBindingTable
+    filterset = filtersets.RPCTargetBindingFilterSet
+    filterset_form = forms.RPCTargetBindingFilterForm
+    actions = LIST_ACTIONS
+
+
+@register_model_view(models.RPCTargetBinding)
+class RPCTargetBindingView(generic.ObjectView):
+    queryset = models.RPCTargetBinding.objects.select_related("device")
+
+
+@register_model_view(models.RPCTargetBinding, "add", detail=False)
+@register_model_view(models.RPCTargetBinding, "edit")
+class RPCTargetBindingEditView(generic.ObjectEditView):
+    queryset = models.RPCTargetBinding.objects.all()
+    form = forms.RPCTargetBindingForm
+
+
+@register_model_view(models.RPCTargetBinding, "delete")
+class RPCTargetBindingDeleteView(generic.ObjectDeleteView):
+    queryset = models.RPCTargetBinding.objects.all()
+
+
+@register_model_view(models.RPCTargetBinding, "bulk_delete", path="delete", detail=False)
+class RPCTargetBindingBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.RPCTargetBinding.objects.all()
+    table = tables.RPCTargetBindingTable
+
+
 # ── RPCProcedure ─────────────────────────────────────────────────────────────
 
 

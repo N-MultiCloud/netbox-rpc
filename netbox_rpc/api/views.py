@@ -36,6 +36,7 @@ from .serializers import (
     RPCExecutionSerializer,
     RPCProcedureCommandSerializer,
     RPCProcedureSerializer,
+    RPCTargetBindingSerializer,
     RpcPluginSettingsSerializer,
 )
 
@@ -62,6 +63,23 @@ class RPCBackendViewSet(NetBoxModelViewSet):
     queryset = models.RPCBackend.objects.prefetch_related("tags")
     serializer_class = RPCBackendSerializer
     filterset_class = filtersets.RPCBackendFilterSet
+
+
+class RPCTargetBindingViewSet(NetBoxModelViewSet):
+    """CRUD for RPCTargetBinding (#326 round 4: dedicated model, not a tag).
+
+    Uses the standard NetBoxModelViewSet permission machinery — a caller
+    needs the explicit ``netbox_rpc.change_rpctargetbinding`` permission to
+    write, ``view_rpctargetbinding`` to read. ``dcim.change_device`` alone
+    grants neither. Supports ``?slug=<slug>`` filtering (see
+    ``filtersets.RPCTargetBindingFilterSet``) for the exact-one-result query
+    both netbox-rpc's own normalizer and netbox-rpc-backend's independent
+    re-check use.
+    """
+
+    queryset = models.RPCTargetBinding.objects.select_related("device").prefetch_related("tags")
+    serializer_class = RPCTargetBindingSerializer
+    filterset_class = filtersets.RPCTargetBindingFilterSet
 
 
 class RPCProcedureViewSet(NetBoxModelViewSet):

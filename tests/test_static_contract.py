@@ -1138,10 +1138,11 @@ def test_plugin_migrations_retain_upgrade_anchors() -> None:
         for line in source.splitlines()
         if line.strip().startswith(("('extras',", '("extras",'))
     ]
-    # 8 after the RPCProcedureCommand metadata repair added 0086. Raising this number
-    # is meant to be deliberate: the assertion below is what actually
-    # matters, and every entry retains the historical upgrade anchor.
-    assert len(extras_dependencies) == 8
+    # 9 after RPCTargetBinding (0097, #326 round 4) added another anchored
+    # migration. Raising this number is meant to be deliberate: the assertion
+    # below is what actually matters, and every entry retains the historical
+    # upgrade anchor.
+    assert len(extras_dependencies) == 9
     assert all("0134_owner" in dependency for dependency in extras_dependencies)
 
     for name in (

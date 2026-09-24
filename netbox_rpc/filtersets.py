@@ -10,6 +10,7 @@ from .models import (
     RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RPCTargetBinding,
 )
 
 
@@ -19,6 +20,15 @@ class RPCBackendFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = RPCBackend
         fields = ("name",)
+
+
+class RPCTargetBindingFilterSet(NetBoxModelFilterSet):
+    slug = django_filters.CharFilter()
+    device_id = django_filters.NumberFilter(field_name="device_id")
+
+    class Meta:
+        model = RPCTargetBinding
+        fields = ("slug", "device_id")
 
 
 class RPCProcedureFilterSet(NetBoxModelFilterSet):

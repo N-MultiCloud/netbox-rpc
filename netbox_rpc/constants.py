@@ -137,6 +137,25 @@ NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# ``RPCTargetBinding.slug`` closed choices (#326 round 4 review). A binding
+# names the exactly-one dcim.Device a procedure's target is bound to -- the
+# dedicated-model replacement for the round-3 NetBox-tag approach, which a
+# generic dcim.change_device holder could repoint. Only a user explicitly
+# granted netbox_rpc.change_rpctargetbinding can move a binding.
+#
+# Register new slugs here (not ad hoc) so every procedure family that needs a
+# fixed-target binding shares one auditable, generically reusable model and
+# permission. `service.nmulticloud.deploy.release_marker_*` (issue #605) reuses
+# this exact model/API; keep both generic rather than netbox-openbao-specific.
+RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING = "netbox-openbao-import-staging"
+RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION = "netbox-openbao-import-production"
+RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST = "nmulticloud-deploy-host"
+RPC_TARGET_BINDING_SLUG_CHOICES = (
+    (RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING, "netbox-openbao import (staging)"),
+    (RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION, "netbox-openbao import (production)"),
+    (RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST, "N-MultiCloud deploy host"),
+)
+
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
 # versions, official artifact digest, and target-owned credential policy are
 # server-normalized and signed; the caller supplies no params.

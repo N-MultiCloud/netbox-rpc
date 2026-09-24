@@ -17,6 +17,7 @@ from ..models import (
     RPCNetBoxPluginAllowlist,
     RPCProcedure,
     RPCProcedureCommand,
+    RPCTargetBinding,
     RpcPluginSettings,
 )
 
@@ -82,6 +83,28 @@ class RPCBackendSerializer(NetBoxModelSerializer):
             "last_updated",
         )
         brief_fields = ("id", "url", "display", "name", "base_url")
+
+
+class RPCTargetBindingSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rpc-api:rpctargetbinding-detail",
+    )
+
+    class Meta:
+        model = RPCTargetBinding
+        fields = (
+            "id",
+            "url",
+            "display",
+            "slug",
+            "device",
+            "description",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "slug", "device")
 
 
 class RPCProcedureCommandSerializer(NetBoxModelSerializer):

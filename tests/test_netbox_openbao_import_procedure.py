@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -127,14 +128,52 @@ def _execution(
     )
 
 
-_DEFAULT_OPENBAO_IMPORT_TARGETS = {"staging": 32, "production": 32}
+class _FakeBinding:
+    def __init__(self, pk: int, device_id: int, last_updated) -> None:
+        self.pk = pk
+        self.device_id = device_id
+        self.last_updated = last_updated
+
+
+class _FakeBindingQuerySet:
+    def __init__(self, binding: _FakeBinding | None) -> None:
+        self._binding = binding
+
+    def first(self) -> _FakeBinding | None:
+        return self._binding
+
+
+class _FakeBindingManager:
+    def __init__(self, bindings_by_slug: dict[str, _FakeBinding | None], *, raise_on_query: bool) -> None:
+        self._bindings_by_slug = bindings_by_slug
+        self._raise_on_query = raise_on_query
+
+    def select_related(self, *_args: object, **_kwargs: object) -> _FakeBindingManager:
+        return self
+
+    def filter(self, **kwargs: object) -> _FakeBindingQuerySet:
+        if self._raise_on_query:
+            raise RuntimeError("simulated NetBox target-binding query failure")
+        slug = kwargs.get("slug")
+        return _FakeBindingQuerySet(self._bindings_by_slug.get(slug))
+
+
+_DEFAULT_LAST_UPDATED = datetime(2026, 1, 1, tzinfo=UTC)
+
+# Default fixture: device 32 is bound for both staging and production (the
+# same device may be bound for both environments when staging and production
+# NetBox share one host).
+_DEFAULT_BINDINGS = {
+    "netbox-openbao-import-staging": _FakeBinding(1, 32, _DEFAULT_LAST_UPDATED),
+    "netbox-openbao-import-production": _FakeBinding(2, 32, _DEFAULT_LAST_UPDATED),
+}
 
 
 def _install_import_stubs(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    openbao_import_targets: object = _DEFAULT_OPENBAO_IMPORT_TARGETS,
-    omit_plugin_config: bool = False,
+    bindings_by_slug: dict[str, _FakeBinding | None] = _DEFAULT_BINDINGS,
+    raise_on_device_query: bool = False,
 ) -> None:
     netbox = types.ModuleType("netbox")
     netbox_plugins = types.ModuleType("netbox.plugins")
@@ -159,10 +198,7 @@ def _install_import_stubs(
     django_db = types.ModuleType("django.db")
     django_db.IntegrityError = type("IntegrityError", (Exception,), {})
     django_conf = types.ModuleType("django.conf")
-    plugins_config = (
-        {} if omit_plugin_config else {"netbox_rpc": {"openbao_import_targets": openbao_import_targets}}
-    )
-    django_conf.settings = SimpleNamespace(PLUGINS_CONFIG=plugins_config)
+    django_conf.settings = SimpleNamespace(PLUGINS_CONFIG={})
     django_utils = types.ModuleType("django.utils")
     django_timezone = types.ModuleType("django.utils.timezone")
     django_timezone.now = MagicMock(return_value=None)
@@ -177,6 +213,11 @@ def _install_import_stubs(
     )
     netbox_rpc_models.RPCExecution = type("RPCExecution", (), {})
     netbox_rpc_models.RPCExecutionEvent = type("RPCExecutionEvent", (), {})
+    netbox_rpc_models.RPCTargetBinding = type(
+        "RPCTargetBinding",
+        (),
+        {"objects": _FakeBindingManager(bindings_by_slug, raise_on_query=raise_on_device_query)},
+    )
 
     requests_mod = types.ModuleType("requests")
     requests_mod.post = MagicMock()
@@ -281,52 +322,31 @@ def test_apply_normalizer_binds_the_apply_handler_id(jobs_module) -> None:
     assert normalized["command_fingerprint"]["handler_id"] == APPLY_ID
 
 
-# --- environment -> configured target device id binding (round-2, #326) ---
+# --- environment -> RPCTargetBinding device binding (round-4, #326) ---
 
 
-def test_normalizer_binds_the_configured_target_device_id_into_the_fingerprint(
+def test_normalizer_binds_the_target_binding_id_and_revision_into_the_fingerprint(
     jobs_module,
 ) -> None:
     execution = _execution({"environment": "staging"})
 
     normalized = jobs_module.normalize_execution_params(execution)
 
-    assert normalized["command_fingerprint"]["configured_target_device_id"] == 32
-    assert normalized["command_fingerprint"]["assigned_object_id"] == 32
+    fingerprint = normalized["command_fingerprint"]
+    assert fingerprint["target_binding_id"] == 1
+    assert fingerprint["target_binding_revision"] == "2026-01-01T00:00:00Z"
+    assert fingerprint["assigned_object_id"] == 32
+    assert "configured_target_device_id" not in fingerprint
 
 
-def test_normalizer_refuses_when_openbao_import_targets_setting_is_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    jobs_module = _import_jobs_module(monkeypatch, omit_plugin_config=True)
-    execution = _execution({"environment": "staging"})
-
-    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
-        jobs_module.normalize_execution_params(execution)
-
-    assert excinfo.value.code == "RPC_TARGET_INVALID"
-
-
-def test_normalizer_refuses_when_openbao_import_targets_is_missing_a_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    jobs_module = _import_jobs_module(
-        monkeypatch, openbao_import_targets={"staging": 32}
-    )
-    execution = _execution({"environment": "staging"})
-
-    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
-        jobs_module.normalize_execution_params(execution)
-
-    assert excinfo.value.code == "RPC_TARGET_INVALID"
-
-
-def test_normalizer_refuses_when_openbao_import_targets_has_an_extra_key(
+def test_normalizer_refuses_when_no_binding_exists_for_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     jobs_module = _import_jobs_module(
         monkeypatch,
-        openbao_import_targets={"staging": 32, "production": 32, "canary": 32},
+        bindings_by_slug={
+            "netbox-openbao-import-production": _FakeBinding(2, 32, _DEFAULT_LAST_UPDATED),
+        },
     )
     execution = _execution({"environment": "staging"})
 
@@ -336,10 +356,10 @@ def test_normalizer_refuses_when_openbao_import_targets_has_an_extra_key(
     assert excinfo.value.code == "RPC_TARGET_INVALID"
 
 
-def test_normalizer_refuses_when_openbao_import_targets_is_not_a_dict(
+def test_normalizer_refuses_when_the_binding_query_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    jobs_module = _import_jobs_module(monkeypatch, openbao_import_targets="32")
+    jobs_module = _import_jobs_module(monkeypatch, raise_on_device_query=True)
     execution = _execution({"environment": "staging"})
 
     with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
@@ -348,42 +368,18 @@ def test_normalizer_refuses_when_openbao_import_targets_is_not_a_dict(
     assert excinfo.value.code == "RPC_TARGET_INVALID"
 
 
-def test_normalizer_refuses_a_non_positive_configured_device_id(
+def test_normalizer_refuses_when_target_device_does_not_match_the_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The staging binding's device is 900; the execution's assigned device is
+    # 32 (the _execution() default) -- must refuse before any further
+    # normalization.
     jobs_module = _import_jobs_module(
-        monkeypatch, openbao_import_targets={"staging": 0, "production": 32}
-    )
-    execution = _execution({"environment": "staging"})
-
-    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
-        jobs_module.normalize_execution_params(execution)
-
-    assert excinfo.value.code == "RPC_TARGET_INVALID"
-
-
-def test_normalizer_refuses_a_boolean_configured_device_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    jobs_module = _import_jobs_module(
-        monkeypatch, openbao_import_targets={"staging": True, "production": 32}
-    )
-    execution = _execution({"environment": "staging"})
-
-    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
-        jobs_module.normalize_execution_params(execution)
-
-    assert excinfo.value.code == "RPC_TARGET_INVALID"
-
-
-def test_normalizer_refuses_when_target_device_does_not_match_configured_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Configured target for staging is device 900; the execution's assigned
-    # device is 32 (the _execution() default) -- must refuse before any
-    # further normalization.
-    jobs_module = _import_jobs_module(
-        monkeypatch, openbao_import_targets={"staging": 900, "production": 32}
+        monkeypatch,
+        bindings_by_slug={
+            "netbox-openbao-import-staging": _FakeBinding(1, 900, _DEFAULT_LAST_UPDATED),
+            "netbox-openbao-import-production": _FakeBinding(2, 32, _DEFAULT_LAST_UPDATED),
+        },
     )
     execution = _execution({"environment": "staging"})
 
@@ -396,10 +392,14 @@ def test_normalizer_refuses_when_target_device_does_not_match_configured_id(
 def test_normalizer_allows_the_same_device_id_for_both_environments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Staging and production NetBox may share one host: the same device id
-    # under both keys must be accepted for either environment.
+    # Staging and production NetBox may share one host: the same device may
+    # be bound for both environments, and either must accept it.
     jobs_module = _import_jobs_module(
-        monkeypatch, openbao_import_targets={"staging": 32, "production": 32}
+        monkeypatch,
+        bindings_by_slug={
+            "netbox-openbao-import-staging": _FakeBinding(1, 32, _DEFAULT_LAST_UPDATED),
+            "netbox-openbao-import-production": _FakeBinding(2, 32, _DEFAULT_LAST_UPDATED),
+        },
     )
 
     staging = jobs_module.normalize_execution_params(_execution({"environment": "staging"}))
@@ -407,5 +407,5 @@ def test_normalizer_allows_the_same_device_id_for_both_environments(
         _execution({"environment": "production"})
     )
 
-    assert staging["command_fingerprint"]["configured_target_device_id"] == 32
-    assert production["command_fingerprint"]["configured_target_device_id"] == 32
+    assert staging["command_fingerprint"]["target_binding_id"] == 1
+    assert production["command_fingerprint"]["target_binding_id"] == 2
