@@ -128,7 +128,7 @@ _CHECK_DEFAULTS = {
     "description": (
         "Report the active release marker's image state and the running "
         "container's image state for nms-backend or nms-backend-staging, "
-        "without changing anything (issue #605)."
+        "without changing anything."
     ),
 }
 
@@ -150,7 +150,7 @@ _RECONCILE_DEFAULTS = {
         "Rewrite the active nms-backend/nms-backend-staging release marker "
         "to the running container's image ref, but only when the marker's "
         "own image is missing and the running image exists with a full "
-        "40-hex tag (issue #605). Never builds, pulls, or prunes an image."
+        "40-hex tag. Never builds, pulls, or prunes an image."
     ),
 }
 
