@@ -87,7 +87,8 @@ RESULT_SCHEMA = {
         "procedure": {"const": HANDLER_ID},
         "target": {"type": "string", "maxLength": 255},
         "environment": {"type": "string", "enum": ["staging", "production"]},
-        "summary": {"type": ["object", "null"], **_SUMMARY_SCHEMA},
+        # A failed run reports summary null; a successful one the object.
+        "summary": {"anyOf": [{"type": "null"}, _SUMMARY_SCHEMA]},
         "stage": {
             "type": "string",
             "enum": ["execute", "complete", "indeterminate"],

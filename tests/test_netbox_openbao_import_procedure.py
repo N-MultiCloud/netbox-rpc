@@ -419,3 +419,97 @@ def test_normalizer_allows_the_same_device_id_for_both_environments(
 
     assert staging["command_fingerprint"]["target_binding_id"] == 1
     assert production["command_fingerprint"]["target_binding_id"] == 2
+
+
+def test_result_schema_accepts_a_null_summary_for_failed_runs() -> None:
+    import jsonschema
+
+    from netbox_rpc import openbao_import_contract as contract
+
+    failed = {
+        "ok": False,
+        "procedure": contract.HANDLER_ID,
+        "target": "nmc-prod-207",
+        "environment": "staging",
+        "summary": None,
+        "stage": "execute",
+    }
+    jsonschema.validate(failed, contract.RESULT_SCHEMA)
+    complete = {
+        **failed,
+        "ok": True,
+        "stage": "complete",
+        "summary": {
+            key: 1
+            for key in (
+                "device_credential",
+                "device_service",
+                "user_ssh_key",
+                "proxmox_binding",
+                "cloud_vm_credential",
+                "observability_secret",
+            )
+        },
+    }
+    jsonschema.validate(complete, contract.RESULT_SCHEMA)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**complete, "summary": None}, contract.RESULT_SCHEMA)
+
+
+def test_migration_0099_rewrites_only_the_broken_summary(monkeypatch) -> None:
+    import importlib
+    import sys
+    import types
+
+    django = types.ModuleType("django")
+    django_db = types.ModuleType("django.db")
+    django_db.migrations = types.SimpleNamespace(
+        Migration=object, RunPython=lambda *args, **kwargs: None
+    )
+    django.db = django_db
+    monkeypatch.setitem(sys.modules, "django", django)
+    monkeypatch.setitem(sys.modules, "django.db", django_db)
+    monkeypatch.delitem(
+        sys.modules,
+        "netbox_rpc.migrations.0099_fix_openbao_import_nullable_summary",
+        raising=False,
+    )
+    migration = importlib.import_module(
+        "netbox_rpc.migrations.0099_fix_openbao_import_nullable_summary"
+    )
+
+    class Row:
+        def __init__(self, schema):
+            self.result_schema = schema
+            self.saved = False
+
+        def save(self, update_fields):
+            self.saved = True
+
+    broken = Row({"properties": {"summary": migration._BROKEN_SUMMARY}})
+    modified = Row({"properties": {"summary": {"type": "object"}}})
+
+    class Manager:
+        def __init__(self, row):
+            self.row = row
+
+        def filter(self, name):
+            return self
+
+        def first(self):
+            return self.row
+
+    class Apps:
+        def __init__(self, row):
+            self.row = row
+
+        def get_model(self, app, model):
+            return type("RPCProcedure", (), {"objects": Manager(self.row)})
+
+    migration.forwards(Apps(broken), None)
+    assert broken.result_schema["properties"]["summary"] == migration._FIXED_SUMMARY
+    assert broken.saved
+    migration.backwards(Apps(broken), None)
+    assert broken.result_schema["properties"]["summary"] == migration._BROKEN_SUMMARY
+    with pytest.raises(RuntimeError):
+        migration.forwards(Apps(modified), None)
