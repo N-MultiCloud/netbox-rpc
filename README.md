@@ -206,7 +206,11 @@ The procedure catalog is intentionally narrow:
   RPC → Target Bindings UI; the same device may hold both slot bindings when
   staging and production NetBox share one host); both procedures refuse with
   `RPC_TARGET_INVALID` when no binding exists for the environment or the
-  execution's target device does not equal the bound device.
+  execution's target device does not equal the bound device. Both catalog
+  timeouts are 1,200 seconds: the backend owns a 1,050-second outer route
+  budget, leaving a bounded 150-second margin for request handling,
+  cancellation, and persistence of the closed terminal result. Queue residence
+  is bounded separately by the execution lease and is not part of this margin.
 - `service.nmulticloud.deploy.release_marker_check` (read, no approval) and
   `service.nmulticloud.deploy.release_marker_reconcile` (destructive,
   two-person approval) — issue #605: audited recovery when

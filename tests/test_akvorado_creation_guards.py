@@ -3234,7 +3234,7 @@ def test_openbao_import_apply_creation_requests_protected_two_person_approval(
             "required": ["environment"],
             "properties": {"environment": {"type": "string", "enum": ["staging", "production"]}},
         },
-        timeout_seconds=900,
+        timeout_seconds=1200,
     )
     params = {"environment": "staging"}
     execution = SimpleNamespace(pk=32600, procedure=procedure, params=params)
@@ -3347,7 +3347,7 @@ def test_openbao_import_apply_approve_by_distinct_actor_queues_and_dispatches(
     command_handlers, _, _ = command_handlers_module
     procedure_name = "service.netbox.openbao_import.apply"
     procedure = SimpleNamespace(
-        pk=326, name=procedure_name, handler_id=procedure_name, timeout_seconds=900
+        pk=326, name=procedure_name, handler_id=procedure_name, timeout_seconds=1200
     )
     locked = SimpleNamespace(
         pk=32602,

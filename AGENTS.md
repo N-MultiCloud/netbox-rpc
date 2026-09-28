@@ -2361,6 +2361,14 @@ openbao_import_nms_credentials` (`apply`) or the same invocation plus
 `--dry-run` (`dry_run`) as the appropriate service account, over strict-host-key
 SSH through the target-owned service, with no transport fallback.
 
+Both catalog rows use `timeout_seconds=1200`: the backend's outer route budget
+is 1,050 seconds and the remaining 150 seconds are the explicit bounded margin
+for request handling, cancellation, and result persistence. Queue residence is
+bounded separately by the execution lease and is not part of this margin. Keep
+the protected apply runtime contract aligned with this value; a shorter catalog
+or runtime timeout can cancel a valid route before its closed terminal result
+is persisted.
+
 **Environment is not enough to pick a target -- the operator must bind it
 explicitly, through a dedicated `RPCTargetBinding` model (round-4 #326 review
 fix).** Round 2 bound this through

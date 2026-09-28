@@ -295,7 +295,7 @@ def test_normalizer_rejects_unexpected_params(jobs_module) -> None:
 
 def test_normalizer_accepts_platform_internal_keys(jobs_module) -> None:
     execution = _execution(
-        {"environment": "staging", "_timeout_seconds_snapshot": 900, "_intent": None}
+        {"environment": "staging", "_timeout_seconds_snapshot": 1200, "_intent": None}
     )
 
     normalized = jobs_module.normalize_execution_params(execution)
