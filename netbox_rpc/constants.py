@@ -1828,7 +1828,7 @@ INITIAL_PROCEDURES = (
     {
         "name": UBUNTU_24_RESTART_SERVICE,
         "handler_id": UBUNTU_24_RESTART_SERVICE_HANDLER,
-        "target_models": ["dcim.device"],
+        "target_models": ["dcim.device", "virtualization.virtualmachine"],
         "effect": "write",
         "timeout_seconds": 45,
         "approval_required": False,
