@@ -938,6 +938,291 @@ def test_gitea_upgrade_active_policy_and_credential_reference_are_exact(
 @pytest.mark.parametrize(
     "procedure_name",
     [
+        "service.gitea.actions_runner.diagnose_org_ci_runner",
+        "service.gitea.actions_runner.recover_org_ci_runner",
+    ],
+)
+def test_gitea_org_runner_recovery_protected_policy_is_exact(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    procedure_name: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    contract = command_handlers.gitea_org_docker_runner_recovery_contract
+    expected_policy = contract.PROCEDURE_POLICIES[procedure_name]
+
+    class Commands:
+        def all(self):
+            return self
+
+        def order_by(self, _field):
+            return [
+                SimpleNamespace(**row)
+                for row in contract.COMMAND_CONTRACTS[procedure_name]
+            ]
+
+    def procedure(policy, *, result_schema=None):
+        return SimpleNamespace(
+            **policy,
+            params_schema=contract.PARAMS_SCHEMA,
+            result_schema=(
+                contract.RESULT_SCHEMAS[procedure_name]
+                if result_schema is None
+                else result_schema
+            ),
+            commands=Commands(),
+        )
+
+    canonical = procedure(expected_policy)
+
+    assert command_handlers._protected_procedure_policy(
+        canonical,
+        contract_name=contract.RECOVER_PROCEDURE_NAME,
+    ) == expected_policy
+    command_handlers._require_protected_procedure_policy(
+        canonical,
+        expected_name=contract.RECOVER_PROCEDURE_NAME,
+    )
+
+    with monkeypatch.context() as patch:
+        patch.setitem(
+            contract.SEMANTIC_CAPABILITY_SHA256,
+            procedure_name,
+            "f" * 64,
+        )
+        with pytest.raises(ValidationError):
+            command_handlers._require_protected_procedure_policy(
+                canonical,
+                expected_name=contract.RECOVER_PROCEDURE_NAME,
+            )
+
+    drifted_policy = {**expected_policy, "timeout_seconds": 1}
+    with pytest.raises(ValidationError):
+        command_handlers._require_protected_procedure_policy(
+            procedure(drifted_policy),
+            expected_name=contract.RECOVER_PROCEDURE_NAME,
+        )
+
+    other_procedure_name = (
+        contract.RECOVER_PROCEDURE_NAME
+        if procedure_name == contract.DIAGNOSE_PROCEDURE_NAME
+        else contract.DIAGNOSE_PROCEDURE_NAME
+    )
+    with pytest.raises(ValidationError):
+        command_handlers._require_protected_procedure_policy(
+            procedure(
+                expected_policy,
+                result_schema=contract.RESULT_SCHEMAS[other_procedure_name],
+            ),
+            expected_name=contract.RECOVER_PROCEDURE_NAME,
+        )
+
+
+@pytest.mark.parametrize(
+    "procedure_name",
+    [
+        "service.gitea.actions_runner.diagnose_org_ci_runner",
+        "service.gitea.actions_runner.recover_org_ci_runner",
+    ],
+)
+def test_gitea_org_runner_create_execution_uses_real_admission_path(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    procedure_name: str,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    contract = command_handlers.gitea_org_docker_runner_recovery_contract
+
+    class Commands:
+        def all(self):
+            return self
+
+        def order_by(self, _field):
+            return [
+                SimpleNamespace(**row)
+                for row in contract.COMMAND_CONTRACTS[procedure_name]
+            ]
+
+    procedure = SimpleNamespace(
+        pk=604,
+        **contract.PROCEDURE_POLICIES[procedure_name],
+        params_schema=contract.PARAMS_SCHEMA,
+        result_schema=contract.RESULT_SCHEMAS[procedure_name],
+        commands=Commands(),
+    )
+    execution = SimpleNamespace(pk=6040, procedure=procedure, params={})
+
+    class Serializer:
+        validated_data = {"procedure": procedure, "params": {}}
+        initial_data = {
+            "procedure_id": procedure_name,
+            "assigned_object_type": "virtualization.virtualmachine",
+            "assigned_object_id": contract.TARGET_OBJECT_ID,
+            "params": {},
+        }
+        saved = False
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            self.saved = True
+            execution.requested_by = kwargs["requested_by"]
+            execution.requested_by_id = kwargs["requested_by"].pk
+            execution.backend_id = kwargs["backend"]
+            return execution
+
+    transitions: list[tuple[object, ...]] = []
+
+    class Aggregate:
+        def __init__(self, aggregate_execution):
+            assert aggregate_execution is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            transitions.append(("queue",))
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: contract.BACKEND_ID,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_creation_shape",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_gitea_runner_assigned_object",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_verify_backend_capability",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure_name}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="a" * 64),
+    )
+    enqueued: list[object] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda candidate, **kwargs: enqueued.append(candidate),
+    )
+    serializer = Serializer()
+    user = SimpleNamespace(pk=6041, has_perm=lambda permission: True)
+
+    assert command_handlers.create_execution(serializer=serializer, user=user) is execution
+    assert serializer.saved is True
+    if procedure_name == contract.RECOVER_PROCEDURE_NAME:
+        assert transitions == [
+            ("request", user.pk),
+            ("request_approval", "a" * 64, user.pk),
+        ]
+        assert enqueued == []
+    else:
+        assert transitions == [("queue",)]
+        assert enqueued == [execution]
+
+
+@pytest.mark.parametrize("drift", ["semantic", "policy"])
+def test_gitea_org_runner_recovery_admission_rejects_drift_before_save(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    contract = command_handlers.gitea_org_docker_runner_recovery_contract
+    procedure_name = contract.RECOVER_PROCEDURE_NAME
+
+    class Commands:
+        def all(self):
+            return self
+
+        def order_by(self, _field):
+            return [
+                SimpleNamespace(**row)
+                for row in contract.COMMAND_CONTRACTS[procedure_name]
+            ]
+
+    policy = dict(contract.PROCEDURE_POLICIES[procedure_name])
+    if drift == "policy":
+        policy["timeout_seconds"] = 1
+    procedure = SimpleNamespace(
+        **policy,
+        params_schema=contract.PARAMS_SCHEMA,
+        result_schema=contract.RESULT_SCHEMAS[procedure_name],
+        commands=Commands(),
+    )
+    serializer = _CreationSerializer(procedure, {})
+    enqueued: list[object] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda user: contract.BACKEND_ID,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda candidate, **kwargs: enqueued.append(candidate),
+    )
+    if drift == "semantic":
+        monkeypatch.setitem(
+            contract.SEMANTIC_CAPABILITY_SHA256,
+            procedure_name,
+            "f" * 64,
+        )
+
+    with pytest.raises(ValidationError):
+        command_handlers.create_execution(
+            serializer=serializer,
+            user=SimpleNamespace(pk=6041, has_perm=lambda permission: True),
+        )
+
+    assert serializer.saved is False
+    assert enqueued == []
+
+
+@pytest.mark.parametrize(
+    "procedure_name",
+    [
         "service.gitea.production.upgrade_1_27_1",
         "service.gitea.runner.register",
         "service.gitea.actions_runner.provision_org_ci_runner",

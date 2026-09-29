@@ -933,10 +933,18 @@ def _require_protected_procedure_policy(
         procedure,
         contract_name=contract_name,
     )
+    expected_policy = getattr(contract, "PROCEDURE_POLICIES", {}).get(
+        procedure_name,
+        contract.PROCEDURE_POLICY,
+    )
+    expected_result_schema = getattr(contract, "RESULT_SCHEMAS", {}).get(
+        procedure_name,
+        getattr(contract, "RESULT_SCHEMA", None),
+    )
     if (
-        actual_policy != contract.PROCEDURE_POLICY
+        actual_policy != expected_policy
         or getattr(procedure, "params_schema", None) != contract.PARAMS_SCHEMA
-        or getattr(procedure, "result_schema", None) != contract.RESULT_SCHEMA
+        or getattr(procedure, "result_schema", None) != expected_result_schema
     ):
         raise drf_serializers.ValidationError(
             {
@@ -1001,6 +1009,10 @@ def _protected_procedure_policy(
         "SEMANTIC_CAPABILITY_SHA256",
         None,
     )
+    if isinstance(semantic_contract_sha256, dict):
+        semantic_contract_sha256 = semantic_contract_sha256.get(
+            str(getattr(procedure, "name", "") or "")
+        )
     if semantic_contract_sha256 is not None:
         policy["semantic_contract_sha256"] = semantic_contract_sha256
     # Opt-in, like semantic_contract_sha256 above: only contracts that actually
