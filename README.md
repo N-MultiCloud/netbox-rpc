@@ -78,6 +78,8 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_tls`
 - `os.linux.ubuntu.24.ookla.check_firewall`
 - `os.linux.ubuntu.24.upgrade_26.{analyze_preupgrade,save_preupgrade_state,run_upgrade,verify_postupgrade}`
+- `os.linux.ubuntu.26.samba_ad_dc.{preflight,provision,verify}` (enabled; capability-gated and
+  `provision` is two-person protected; see the Samba AD DC bootstrap section below)
 - `os.linux.ubuntu.24.{restart,status,start,stop,reload,enable,disable}_service`
   and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`
   (`influxdb.service`, OSS 2), `influxdb3-core` (`influxdb3-core.service`,
@@ -980,6 +982,64 @@ Bootstrap preserves any existing
 `/opt/nmulticloud/deploy/compose/akvorado/akvorado.yaml`; customize the initial
 placeholder ASN, networks, classifiers, and SNMP community afterward with the
 existing approval-gated `service.akvorado.1.config_deploy` procedure.
+
+### `os.linux.ubuntu.26.samba_ad_dc.*` — fresh-VM Samba AD DC bootstrap
+
+Migration `0103` seeds three procedures that convert the reviewed operator
+installer for a fresh Ubuntu Server 26.04 LTS VM into the audited catalog. They
+create the **first domain controller of a new AD domain**, a private encrypted
+SMB3 share, a restricted nftables host firewall and Fail2ban jails. This is not
+a migration, repair, additional-DC join or rerunnable installer, and there is no
+domain rollback: recovery is a restore of the VM snapshot taken before the run.
+
+| Procedure | Effect | Approval | Timeout | Purpose |
+|---|---|---|---|---|
+| `preflight` | read | no | 120s | Report OS, systemd, clean-VM, package, static-IPv4, Netplan, firewall, cloud-init and SSH-port readiness, plus suggested `provision` values. |
+| `provision` | **destructive** | **yes** | 3600s | Create the domain, share, firewall and Fail2ban. Not rerunnable. |
+| `verify` | read | no | 180s | Credential-free service, `dbcheck`, SYSVOL ACL, DNS SRV, chrony, nftables and Fail2ban health report. |
+
+All three target `dcim.device` or `virtualization.virtualmachine`, and the SSH
+destination is derived from the assigned object; `provision` accepts **no**
+`rpc_ssh_*` override, so the execution runs against the object named in the
+request and the normalized payload and fingerprint bind its content type and ID
+(`preflight` and `verify` accept the shared optional overrides). `provision` is on
+the **protected two-person approval path** (like `install_akvorado` and the
+Proxmox OCI pull): creation stays `pending_approval` with an immutable snapshot
+until a distinct approver with an object-scoped approve permission decides, and
+dispatch carries a signed one-time lease (dry runs included, since
+`approval_required` is procedure-level). Its complete catalog policy and both
+schemas are pinned by `netbox_rpc.samba_ad_dc_protected_contract`. `provision`
+takes a closed parameter set (`domain`, `netbios`, `hostname`, `ip`, `forwarder`,
+`client_networks`, `ntp_servers`, `timezone`, `share_name`, `share_path`,
+`ssh_ports`, `ssh_networks`, `ban_exempt_networks`, five Fail2ban bounds,
+`legacy_netbios`, `freeze_cloud_init`, `dry_run`, `admin_credential_pk`) that
+mirrors every validator of the installer. Every value is re-validated by the
+pure-domain normalizer (`netbox_rpc.samba_ad_dc_contract`), which rejects unknown
+parameters, emits every resolved default so the payload and fingerprint hold concrete values,
+and canonicalizes `domain` (lower), `netbios` (upper) and `hostname` (lower).
+`dry_run` defaults to **true**; a live run additionally requires
+`admin_credential_pk` and a non-empty `ssh_ports`/`ssh_networks` allowlist that
+must cover the executing SSH session.
+
+**No password, anywhere.** The new domain Administrator password is referenced
+only by `admin_credential_pk` (a `netbox-nms` `DeviceCredential` id) and is
+resolved by the execution backend at run time. No params schema or result schema
+declares a password or hash, `_PASSWORD_BEARING_HANDLER_IDS` deliberately does
+not list these handlers because there is nothing to scrub, and error messages
+never echo a submitted value.
+
+The rows are seeded **enabled** and transport-pinned to AsyncSSH (the installer is
+uploaded over stdin and the firewall proof needs a second SSH connection), with no
+separate code gate; they require an exact backend capability at admission,
+availability, approval and worker claim, so they stay undispatchable until the
+paired backend advertises the handlers.
+Each has one `backend-orchestrated` representative command row and is a
+documented command-contract exemption. Every free-form result string carries an
+explicit `maxLength` (`log_tail` 65536; nested `detail` strings 1024, which the
+handler must clamp because only wide overrides above 4096 are relaxed). See
+[`docs/ubuntu-26-samba-ad-dc-bootstrap-runbook.md`](docs/ubuntu-26-samba-ad-dc-bootstrap-runbook.md)
+for prerequisites, the preflight -> dry run -> approval -> provision -> verify
+workflow, what changes on the host, and failure handling.
 
 ### `service.akvorado.1.*` — Akvorado flow-collector config and stack lifecycle
 

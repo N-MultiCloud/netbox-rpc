@@ -90,6 +90,22 @@ command behavior changes.
 > disabled and accepts no caller parameters; see
 > `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
 > signed-lease, activation, and rollback contract.
+> `os.linux.ubuntu.26.samba_ad_dc.provision` is destructive, is on the protected
+> two-person approval path (creation stays `pending_approval`; a distinct approver
+> and a signed one-time lease are required, dry runs included), and must never be
+> created, approved, or dispatched autonomously. It creates the first DC
+> of a NEW Active Directory domain, applies a restricted nftables firewall that
+> can lock out SSH, and is **not rerunnable**: there is no domain rollback and
+> recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight`
+> first, then `provision` with `dry_run=true` (the default), and confirm with the
+> operator the exact target, the plan, a disposable or freshly snapshotted VM with
+> console access, and the `ssh_ports`/`ssh_networks` allowlist before any live
+> run. It accepts no `rpc_ssh_*` override and no password: the Administrator
+> password is supplied only as an `admin_credential_pk` `DeviceCredential`
+> reference (not object-scoped, issue #203), and must never appear in params,
+> notes, logs, or results. Seeded enabled; it stays undispatchable until the
+> paired backend advertises its exact capability. See
+> `docs/ubuntu-26-samba-ad-dc-bootstrap-runbook.md`.
 > `service.gitea.runner.register` has the same autonomous-action prohibition.
 > It is seeded and code-gated disabled, accepts only an exact lifecycle
 > operation plus reviewed scope, binds runner VM 399 and Gitea VM 170, and

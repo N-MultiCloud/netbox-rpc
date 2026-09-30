@@ -515,6 +515,11 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         # OCI pull is a protected operation and therefore fails closed when
         # the selected backend does not advertise its exact handler contract.
         constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        # Ubuntu 26.04 Samba AD DC bootstrap: destructive domain creation, so
+        # the exact backend capability is mandatory, never graceful.
+        "os.linux.ubuntu.26.samba_ad_dc.preflight",
+        "os.linux.ubuntu.26.samba_ad_dc.provision",
+        "os.linux.ubuntu.26.samba_ad_dc.verify",
         constants.PROXBOX_API_RELEASE_IMAGES_INSPECT,
         constants.PROXBOX_API_RELEASE_IMAGES_RECOVER,
     }

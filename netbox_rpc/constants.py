@@ -438,8 +438,27 @@ OPENBAO_1_PROVISION_NETBOX_APPROLE = "service.openbao.1.provision_netbox_approle
 LINUX_PROXMOX_OCI_REGISTRY_PULL = "os.linux.proxmox.oci_registry_pull"
 LINUX_PROXMOX_OCI_REGISTRY_PULL_HANDLER = "os.linux_proxmox.oci_registry_pull"
 
+# Ubuntu 26.04 LTS Samba Active Directory Domain Controller bootstrap. Handler IDs
+# equal the procedure names. ``provision`` creates a NEW domain, is destructive,
+# approval-gated and not rerunnable; ``preflight`` and ``verify`` are read-only.
+# Migration 0103 seeds the rows enabled; every admission, listing and worker claim
+# fails closed until the selected backend advertises a matching capability
+# (EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES). ``provision`` is also a protected
+# two-person procedure (PROTECTED_APPROVAL_PROCEDURE_NAMES).
+UBUNTU_26_SAMBA_AD_DC_PREFLIGHT = "os.linux.ubuntu.26.samba_ad_dc.preflight"
+UBUNTU_26_SAMBA_AD_DC_PROVISION = "os.linux.ubuntu.26.samba_ad_dc.provision"
+UBUNTU_26_SAMBA_AD_DC_VERIFY = "os.linux.ubuntu.26.samba_ad_dc.verify"
+UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES = frozenset(
+    {
+        UBUNTU_26_SAMBA_AD_DC_PREFLIGHT,
+        UBUNTU_26_SAMBA_AD_DC_PROVISION,
+        UBUNTU_26_SAMBA_AD_DC_VERIFY,
+    }
+)
+
 EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
     AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+    | UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
     | {
         NETBOX_STAGING_DEPLOY_DNS_PAIR,
         GITEA_PRODUCTION_UPGRADE_1_27_1,
@@ -469,6 +488,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         NETBOX_OPENBAO_IMPORT_APPLY,
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        UBUNTU_26_SAMBA_AD_DC_PROVISION,
         PROXBOX_API_RELEASE_IMAGES_RECOVER,
     }
 )

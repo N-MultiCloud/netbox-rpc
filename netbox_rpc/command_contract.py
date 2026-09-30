@@ -423,6 +423,33 @@ EXEMPT_HANDLER_RATIONALE.update(
     }
 )
 
+# The Ubuntu 26.04 Samba AD DC bootstrap uploads one reviewed, hash-pinned
+# installer program to a root-only path and runs it with fixed argv; settings
+# travel as a single JSON document on its stdin. None of the three procedures
+# has a faithful one-row fixed-argv representation, and no caller text ever
+# reaches a shell or an argv token.
+EXEMPT_HANDLER_RATIONALE.update(
+    {
+        "os.linux.ubuntu.26.samba_ad_dc.preflight": (
+            "Runs the reviewed installer program in check-only mode and returns "
+            "structured verdicts; the read-only probes are several dependent "
+            "checks, not one fixed argv invocation, and nothing is mutated."
+        ),
+        "os.linux.ubuntu.26.samba_ad_dc.provision": (
+            "Uploads the hash-pinned installer program, installs Samba AD DC "
+            "packages, provisions a new domain, applies the host firewall with "
+            "a second-connection proof, and verifies the result. The staged, "
+            "non-rerunnable sequencing and stdin-delivered credential cannot be "
+            "represented safely as one public argv."
+        ),
+        "os.linux.ubuntu.26.samba_ad_dc.verify": (
+            "Runs credential-free post-install health probes (services, "
+            "testparm, dbcheck, DNS SRV records, chrony, nftables, Fail2ban) "
+            "and returns one bounded structured report."
+        ),
+    }
+)
+
 EXEMPT_HANDLER_IDS = frozenset(EXEMPT_HANDLER_RATIONALE)
 
 

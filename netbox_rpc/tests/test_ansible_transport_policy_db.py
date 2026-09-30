@@ -32,6 +32,18 @@ CURRENT_PINNED_PROCEDURES = (
         "os.linux.ubuntu.24.upgrade_26.run_upgrade",
     ),
     (
+        "os.linux.ubuntu.26.samba_ad_dc.preflight",
+        "os.linux.ubuntu.26.samba_ad_dc.preflight",
+    ),
+    (
+        "os.linux.ubuntu.26.samba_ad_dc.provision",
+        "os.linux.ubuntu.26.samba_ad_dc.provision",
+    ),
+    (
+        "os.linux.ubuntu.26.samba_ad_dc.verify",
+        "os.linux.ubuntu.26.samba_ad_dc.verify",
+    ),
+    (
         "service.gitea.actions_runner.provision_org_ci_runner",
         "service.gitea.actions_runner.provision_org_ci_runner",
     ),
@@ -81,7 +93,7 @@ class AnsibleFirstPolicySeedTests(TestCase):
         """Mutation guard: pinning everything would silently disable the policy.
 
         Migration 0075 introduced the first two pins. Later reviewed migrations
-        added four procedures whose transport is also contractually fixed. The
+        added seven procedures whose transport is also contractually fixed. The
         fresh database must contain exactly that complete declared set.
         """
 

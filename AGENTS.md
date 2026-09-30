@@ -513,6 +513,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
+| `os.linux.ubuntu.26.samba_ad_dc.provision` | Creates the FIRST DC of a NEW Active Directory domain on a fresh VM and is **not rerunnable**; there is no domain rollback and recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight` first, then `provision` with `dry_run=true` (the default; it also needs a distinct approver) and show the operator the full plan and rendered configuration. Confirm the exact target VM or device, that a disposable or freshly snapshotted VM with console access exists, the `ssh_ports`/`ssh_networks` allowlist (a wrong value can lock out SSH when the nftables firewall is applied), the client networks and forwarder, and the `share_path`. The Administrator password is supplied only as an `admin_credential_pk` reference to a `netbox-nms` `DeviceCredential`; never request, generate, print or store the password itself and never put it in params, notes or logs. Never enable, create, approve or dispatch autonomously. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 | `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 | `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
@@ -1936,6 +1937,79 @@ pending approval or distinct-actor check.
   shell strings. The v1 intent action does not serialize RQ execution; operators
   must run and gate each procedure individually using
   `docs/ubuntu-24-to-26-upgrade-runbook.md`.
+- **Ubuntu 26.04 Samba AD DC bootstrap** (`os.linux.ubuntu.26.samba_ad_dc.{preflight,provision,verify}`,
+  migration `0103`, issue #345) converts a reviewed operator installer for a fresh
+  Ubuntu Server 26.04 LTS VM into the audited catalog. All three target
+  `dcim.device` and `virtualization.virtualmachine`; handler IDs equal the
+  procedure names; each has one `backend-orchestrated` representative command row
+  and is a documented `EXEMPT_HANDLER_RATIONALE` entry.
+  - `preflight` (read, 120s) and `verify` (read, 180s) accept only the shared
+    `rpc_ssh_*` overrides. `provision` (`effect="destructive"`,
+    `approval_required=True`, 3600s) creates the first DC of a NEW domain and is
+    **not rerunnable**: there is no domain rollback and recovery is a VM snapshot
+    restore. Never enable, create, approve or dispatch it autonomously.
+  - `provision` accepts **no** `rpc_ssh_*` override (the same #203 rationale as
+    the InfluxDB and Akvorado installers): the SSH destination is derived from the
+    assigned object, so the execution runs against the object named in the request.
+    It is in `PROTECTED_APPROVAL_PROCEDURE_NAMES` (like `install_akvorado` and the
+    OCI pull): creation records `ExecutionRequested` then `ApprovalRequested`,
+    persists an immutable non-secret approval snapshot, returns
+    `pending_approval` and never enqueues (dry runs included); a distinct approver
+    with an object-scoped approve permission decides with a fixed phrase; a signed
+    one-time lease is required; no backend progress events are accepted and the
+    outer and nested `ok` must agree. `netbox_rpc/samba_ad_dc_protected_contract.py`
+    pins the full catalog policy, both schemas and the command row and must stay
+    byte-identical to migration `0103` (tests compare them); it is registered in
+    the four protected maps in `command_handlers.py`. `preflight` and `verify` stay
+    unprotected reads. Not frozen into the snapshot (known limitations): the
+    target's `DeviceService`/credential revision, and `admin_credential_pk` is a
+    plain `DeviceCredential` id not object-scoped to the requester (#203); the
+    newer `credential_references` regime is a follow-up.
+    Admission requires that object to exist and be viewable
+    (`_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES`), and the normalizer emits
+    `target_object` plus `target_content_type`/`target_object_id` in the
+    fingerprint.
+  - **No password, anywhere.** The domain Administrator password is referenced
+    only by `admin_credential_pk` (a `netbox-nms` `DeviceCredential` id, required
+    when `dry_run` is false) and is resolved by the backend at run time. Do
+    **not** add these handler IDs to `_PASSWORD_BEARING_HANDLER_IDS` (there is no
+    password to scrub) and never add a `password`/hash/command parameter.
+    `tests/test_jobs_ubuntu_26_samba_ad_dc_normalization.py` asserts the scrub set
+    is unchanged and that no normalized or fingerprint key is password-shaped.
+  - The pure-domain contract lives in `netbox_rpc/samba_ad_dc_contract.py` (stdlib
+    only) and mirrors every installer validator; it is never looser than the
+    installer and stricter only for spellings with no safe canonical form
+    (netmask notation, scoped IPv6, non-ASCII letters). The normalizer
+    (`_normalize_ubuntu_26_samba_ad_dc_execution`) rejects unknown parameters
+    (tolerating `_intent`, `_intent_name`, `_timeout_seconds_snapshot`), uses
+    strict type checks (a string `"false"` is never a boolean), emits every
+    resolved default, canonicalizes `domain`/`hostname` (lower) and `netbios`
+    (upper), and requires `admin_credential_pk`, a non-empty `ssh_ports` and a
+    non-empty `ssh_networks` for a live run. `dry_run` defaults to true.
+  - Seeded **enabled** (as `0093` seeded the OCI pull), `transport_driver="asyncssh"`,
+    `transport_pinned=True` (the installer is delivered over stdin and the
+    firewall proof needs a second AsyncSSH connection; a fallback re-dispatch of a
+    non-rerunnable installer is the hazard `0075` describes for `run_upgrade`),
+    with **no** hard-coded code gate, and listed in
+    `EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES` so an absent or mismatched
+    backend capability is a hard failure at admission, listing, approval and
+    claim. The feature works as soon as the paired backend advertises the
+    handlers. Do not edit `0103` after release. The seed refuses to overwrite
+    drifted rows and its reverse only disables.
+  - Every free-form result string has an explicit `maxLength`; `log_tail` is 65536
+    and the handler must clamp it below that. Nested strings (`checks[].detail`
+    1024, `error` 2048) are not relaxed by the event store, so an oversized value
+    fails closed as `RPC_RESULT_SCHEMA_MISMATCH` rather than being truncated.
+    The result objects are deliberately open (no `additionalProperties: false`):
+    a finished domain controller must not be reported as failed because of an
+    undeclared key, and the handler never holds a password to leak. A failed
+    `provision` result must carry `rerunnable=false` and `stage`, a live success
+    (`ok` and not `dry_run`) must carry `stage="complete"`, `firewall.confirmed=true`,
+    non-empty `checks` and `installer_sha256`, and a dry-run success `plan` and
+    `stage` (all schema-enforced). Creation is refused while another open
+    provision exists for the same target (`_require_no_concurrent_samba_provision`).
+    The Samba family is routed through `_TABLE_NORMALIZERS`, not the dispatcher.
+  See `docs/ubuntu-26-samba-ad-dc-bootstrap-runbook.md`.
 - `nmap-scan` is seeded by migration `0045` as a **read-only**
   (`effect="read"`, `approval_required=False`, 120s) SSH-backed diagnostic
   procedure. Handler ID: `os.linux.nmap.scan`. It targets

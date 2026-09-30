@@ -18,6 +18,7 @@ import yaml
 
 from .. import gitea_docker_runner_contract, gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
+from .. import samba_ad_dc_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
@@ -136,6 +137,8 @@ from ..constants import (
     UBUNTU_24_START_SERVICE,
     UBUNTU_24_STATUS_SERVICE,
     UBUNTU_24_STOP_SERVICE,
+    UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES,
+    UBUNTU_26_SAMBA_AD_DC_PROVISION,
     UBUNTU_UPGRADE_26_PROCEDURE_NAMES,
     UBUNTU_UPGRADE_26_RUN_UPGRADE,
     UBUNTU_UPGRADE_26_SAVE_PREUPGRADE_STATE,
@@ -4937,6 +4940,124 @@ def _normalize_ubuntu_upgrade_26_execution(
     return normalized
 
 
+_SAMBA_AD_DC_TARGET_MODEL_LABELS = frozenset(
+    {"dcim.device", "virtualization.virtualmachine"}
+)
+
+
+def _samba_ad_dc_target_object(execution: RPCExecution) -> tuple[str, int]:
+    """Return the assigned object's ``(content_type, object_id)`` or fail closed.
+
+    The SSH destination is derived from this object by the execution backend, so
+    an approval must bind the exact object that will be executed against.
+    """
+
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    app_label = str(getattr(assigned_object_type, "app_label", "") or "")
+    model = str(getattr(assigned_object_type, "model", "") or "")
+    object_id = getattr(execution, "assigned_object_id", None)
+    content_type = f"{app_label}.{model}"
+    if (
+        target_model not in _SAMBA_AD_DC_TARGET_MODEL_LABELS
+        or content_type != target_model
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+    ):
+        raise RPCExecutionError(
+            "Ubuntu 26.04 Samba AD DC procedures require an existing assigned "
+            "dcim.device or virtualization.virtualmachine.",
+            code="RPC_TARGET_INVALID",
+        )
+    return content_type, object_id
+
+
+def _samba_ad_dc_reject_forbidden_ssh_overrides(
+    params: dict[str, Any], procedure_name: str
+) -> None:
+    supplied = sorted(set(params) & samba_ad_dc_contract.SSH_OVERRIDE_PARAM_KEYS)
+    if supplied:
+        raise RPCExecutionError(
+            "Caller-supplied SSH overrides are not accepted for "
+            f"{procedure_name}: {', '.join(supplied)}. The execution backend "
+            "resolves host, port, credential and known-host policy from the "
+            "execution's assigned NetBox object, so the execution always runs "
+            "against the object named in the request.",
+            code="RPC_PARAM_INVALID",
+        )
+
+
+def _samba_ad_dc_reject_unknown_params(
+    params: dict[str, Any], procedure_name: str
+) -> None:
+    unexpected = samba_ad_dc_contract.unknown_params(
+        params, samba_ad_dc_contract.SSH_OVERRIDE_PARAM_KEYS
+    )
+    if unexpected:
+        raise RPCExecutionError(
+            f"Unsupported parameters for {procedure_name}: {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+
+
+def _apply_samba_ad_dc_provision_settings(
+    normalized: dict[str, Any], params: dict[str, Any]
+) -> None:
+    try:
+        settings = samba_ad_dc_contract.resolve_provision_settings(params)
+    except samba_ad_dc_contract.SambaParamError as exc:
+        raise RPCExecutionError(str(exc), code="RPC_PARAM_INVALID") from None
+    for key, value in settings.items():
+        # Independent copies so a later mutation of one mapping cannot alter the
+        # other; the fingerprint carries only non-secret, resolved settings.
+        normalized[key] = value
+        normalized["command_fingerprint"][key] = (
+            list(value) if isinstance(value, list) else value
+        )
+
+
+def _normalize_ubuntu_26_samba_ad_dc_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Normalize the Ubuntu 26.04 Samba AD DC preflight/provision/verify family.
+
+    No procedure accepts, hashes or forwards a password: ``provision`` carries
+    the domain Administrator password only as the non-secret
+    ``admin_credential_pk`` reference, which the execution backend resolves at run
+    time. ``provision`` also refuses every ``rpc_ssh_*`` override; the read-only
+    procedures accept them like the other Ubuntu procedures.
+    """
+
+    params = execution.params or {}
+    procedure_name = execution.procedure.name
+    if procedure_name not in UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES:
+        raise RPCExecutionError(
+            f"Procedure {procedure_name!r} has no NetBox normalizer.",
+            code="RPC_PROCEDURE_NOT_NORMALIZABLE",
+        )
+    content_type, object_id = _samba_ad_dc_target_object(execution)
+    normalized: dict[str, Any] = {
+        "target": target,
+        "target_object": {"content_type": content_type, "object_id": object_id},
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            "target_content_type": content_type,
+            "target_object_id": object_id,
+        },
+    }
+    if procedure_name == UBUNTU_26_SAMBA_AD_DC_PROVISION:
+        _samba_ad_dc_reject_forbidden_ssh_overrides(params, procedure_name)
+        _apply_samba_ad_dc_provision_settings(normalized, params)
+        return normalized
+
+    _samba_ad_dc_reject_unknown_params(params, procedure_name)
+    _copy_optional_ssh_overrides(params, normalized)
+    return normalized
+
+
 def _normalize_linux_agent_install_execution(
     execution: RPCExecution,
     target: str,
@@ -6298,6 +6419,10 @@ _TABLE_NORMALIZERS: dict[
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: _normalize_release_marker_execution,
+    **{
+        name: _normalize_ubuntu_26_samba_ad_dc_execution
+        for name in UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
+    },
     PROXBOX_API_RELEASE_IMAGES_INSPECT: _normalize_proxbox_api_release_images_execution,
     PROXBOX_API_RELEASE_IMAGES_RECOVER: _normalize_proxbox_api_release_images_execution,
 }

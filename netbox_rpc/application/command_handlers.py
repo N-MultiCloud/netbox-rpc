@@ -21,6 +21,7 @@ from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
 from .. import proxmox_oci_pull_contract
 from .. import release_marker_contract
+from .. import samba_ad_dc_protected_contract
 from .. import proxbox_api_release_images_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
@@ -47,6 +48,8 @@ from ..constants import (
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
+    UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES,
+    UBUNTU_26_SAMBA_AD_DC_PROVISION,
 )
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
@@ -78,14 +81,17 @@ _PASSWORD_BEARING_HANDLER_IDS = frozenset(
     }
 )
 
-# Procedure families whose SSH target is derived exclusively from the execution's
-# assigned NetBox object, so the object must exist AND be viewable by the
-# requester at admission time. Neither family accepts an rpc_ssh_* override, which
-# is exactly why the assigned object has to be authorization-checked here.
+# Procedure families whose SSH target is derived from the execution's assigned
+# NetBox object, so the object must exist AND be viewable by the requester at
+# admission time. Most families accept no rpc_ssh_* override, which is exactly why
+# the assigned object has to be authorization-checked here; the Ubuntu 26.04 Samba
+# AD DC read procedures accept the shared overrides but their protected
+# ``provision`` accepts none.
 _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     AKVORADO_1_PROCEDURE_NAMES
     | AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
     | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+    | UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
     | {
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
@@ -157,6 +163,12 @@ _RELEASE_MARKER_RECONCILE_REJECTION_REASON = (
 )
 _PROXMOX_OCI_PULL_APPROVAL_REASON = "Approved audited Proxmox OCI registry pull."
 _PROXMOX_OCI_PULL_REJECTION_REASON = "Rejected audited Proxmox OCI registry pull."
+_SAMBA_AD_DC_PROVISION_APPROVAL_REASON = (
+    "Approved audited Ubuntu 26.04 Samba AD DC provision."
+)
+_SAMBA_AD_DC_PROVISION_REJECTION_REASON = (
+    "Rejected audited Ubuntu 26.04 Samba AD DC provision."
+)
 _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON = (
     "Approved audited recovery of retained proxbox-api release images."
 )
@@ -178,6 +190,7 @@ _PROTECTED_APPROVAL_REASON = {
         _RELEASE_MARKER_RECONCILE_APPROVAL_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_APPROVAL_REASON,
+    UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_APPROVAL_REASON,
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON
     ),
@@ -196,6 +209,7 @@ _PROTECTED_REJECTION_REASON = {
         _RELEASE_MARKER_RECONCILE_REJECTION_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_REJECTION_REASON,
+    UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_REJECTION_REASON,
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON
     ),
@@ -213,6 +227,7 @@ _PROTECTED_CONTRACTS = {
     NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
     LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
+    UBUNTU_26_SAMBA_AD_DC_PROVISION: samba_ad_dc_protected_contract,
     proxbox_api_release_images_contract.PROCEDURE_NAME: proxbox_api_release_images_contract,
 }
 _PROTECTED_LABELS = {
@@ -227,6 +242,7 @@ _PROTECTED_LABELS = {
     NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: "Release-marker reconcile",
     LINUX_PROXMOX_OCI_REGISTRY_PULL: "Proxmox OCI registry pull",
+    UBUNTU_26_SAMBA_AD_DC_PROVISION: "Ubuntu 26.04 Samba AD DC provision",
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         "Proxbox API retained-image recovery"
     ),
@@ -615,6 +631,7 @@ def create_execution(
         raise drf_serializers.ValidationError({"params": str(exc)}) from exc
 
     with transaction.atomic():
+        _require_no_concurrent_samba_provision(serializer.validated_data, procedure)
         # #166: a normal requester cannot select an arbitrary backend — the
         # authoritative selected backend from RPC settings always wins over any
         # client-supplied ``backend_id``.
@@ -651,6 +668,49 @@ def create_execution(
         timeout_seconds_snapshot=timeout_seconds_snapshot,
     )
     return execution
+
+
+_SAMBA_PROVISION_OPEN_STATUSES = (
+    "requested",
+    "pending_approval",
+    "approved",
+    "queued",
+    "running",
+)
+
+
+def _require_no_concurrent_samba_provision(
+    validated_data: dict[str, Any],
+    procedure: object,
+) -> None:
+    """Refuse a second open ``provision`` for the same target object.
+
+    The bootstrap is not rerunnable, so two non-terminal executions against one
+    target could race each other's package, firewall and domain changes. The
+    procedure row is locked first so concurrent creations serialize on the check.
+    """
+    if getattr(procedure, "name", "") != UBUNTU_26_SAMBA_AD_DC_PROVISION:
+        return
+    from ..models import RPCExecution, RPCProcedure
+
+    RPCProcedure.objects.select_for_update().get(pk=procedure.pk)
+    if RPCExecution.objects.filter(
+        procedure=procedure,
+        assigned_object_type=validated_data.get("assigned_object_type"),
+        assigned_object_id=validated_data.get("assigned_object_id"),
+        status__in=_SAMBA_PROVISION_OPEN_STATUSES,
+    ).exists():
+        raise drf_serializers.ValidationError(
+            {
+                "assigned_object_id": (
+                    "Another Samba AD DC provision for this target is still "
+                    "open (requested, pending approval, approved, queued or "
+                    "running). The bootstrap is not rerunnable; wait for it to "
+                    "finish or be rejected before requesting another."
+                )
+            },
+            code="conflict",
+        )
 
 
 def _enqueue_execution_job(

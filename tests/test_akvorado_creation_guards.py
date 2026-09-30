@@ -118,6 +118,14 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "os.linux.debian.13.preflight_influxdb3_core",
         "os.linux.debian.13.install_influxdb3_core",
     }
+    constants.UBUNTU_26_SAMBA_AD_DC_PROVISION = (
+        "os.linux.ubuntu.26.samba_ad_dc.provision"
+    )
+    constants.UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES = {
+        "os.linux.ubuntu.26.samba_ad_dc.preflight",
+        constants.UBUNTU_26_SAMBA_AD_DC_PROVISION,
+        "os.linux.ubuntu.26.samba_ad_dc.verify",
+    }
     constants.LINUX_PROXMOX_OCI_REGISTRY_PULL = (
         "os.linux.proxmox.oci_registry_pull"
     )
@@ -170,6 +178,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     }
     constants.EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = (
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+        | constants.UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
         | {
             constants.NETBOX_STAGING_DEPLOY_DNS_PAIR,
             constants.GITEA_PRODUCTION_UPGRADE_1_27_1,
@@ -194,6 +203,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        constants.UBUNTU_26_SAMBA_AD_DC_PROVISION,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
@@ -1235,6 +1245,9 @@ def test_gitea_org_runner_recovery_admission_rejects_drift_before_save(
         "os.linux.debian.13.preflight_akvorado",
         "os.linux.debian.13.install_akvorado",
         "os.linux.proxmox.oci_registry_pull",
+        "os.linux.ubuntu.26.samba_ad_dc.preflight",
+        "os.linux.ubuntu.26.samba_ad_dc.provision",
+        "os.linux.ubuntu.26.samba_ad_dc.verify",
     ],
 )
 def test_protected_procedures_require_explicit_compatible_backend_capability(
@@ -4014,3 +4027,298 @@ def test_proxmox_oci_pull_approval_queues_with_distinct_actor_identity(
     ]
     assert enqueued == [locked]
     assert command_handlers._requires_signed_dispatch(locked) is True
+
+
+def test_samba_ad_dc_provision_creation_enters_pending_approval(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure_name = "os.linux.ubuntu.26.samba_ad_dc.provision"
+    procedure = SimpleNamespace(
+        pk=153,
+        name=procedure_name,
+        handler_id="os.linux.ubuntu.26.samba_ad_dc.provision",
+        enabled=True,
+        approval_required=True,
+        params_schema={},
+        timeout_seconds=3600,
+    )
+    params = {
+        "domain": "ad.example.com",
+        "netbios": "EXAMPLE",
+        "hostname": "ad01",
+        "ip": "10.0.30.10",
+        "forwarder": "10.0.30.1",
+        "client_networks": ["10.0.30.0/24"],
+    }
+    execution = SimpleNamespace(pk=550, procedure=procedure, params=params)
+
+    class Serializer:
+        validated_data = {
+            "procedure": procedure,
+            "params": params,
+            "assigned_object_type": "dcim.device",
+            "assigned_object_id": 11,
+        }
+        initial_data = {
+            "procedure_id": 153,
+            "assigned_object_type": "dcim.device",
+            "assigned_object_id": 11,
+            "params": params,
+        }
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            execution.requested_by_id = kwargs["requested_by"].pk
+            execution.backend_id = kwargs["backend"]
+            return execution
+
+    transitions: list[tuple[object, ...]] = []
+
+    class Aggregate:
+        def __init__(self, candidate):
+            assert candidate is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            pytest.fail("Samba AD DC provision must not queue before distinct approval")
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers, "_require_enabled_and_authoritative_backend", lambda user: 1
+    )
+    monkeypatch.setattr(
+        command_handlers, "_require_protected_procedure_policy", lambda candidate: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    target_checks: list[int] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda validated, *args: target_checks.append(validated["assigned_object_id"]),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_no_concurrent_samba_provision",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers, "_verify_backend_capability", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="d" * 64),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: pytest.fail("pending Samba AD DC provision must not enqueue"),
+    )
+    requester = SimpleNamespace(pk=9, has_perm=lambda permission: True)
+
+    assert command_handlers.create_execution(serializer=Serializer(), user=requester) is execution
+    assert target_checks == [11]
+    assert transitions == [
+        ("request", requester.pk),
+        ("request_approval", "d" * 64, requester.pk),
+    ]
+
+
+def test_samba_ad_dc_provision_approval_queues_with_distinct_actor_identity(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=153,
+        name="os.linux.ubuntu.26.samba_ad_dc.provision",
+        handler_id="os.linux.ubuntu.26.samba_ad_dc.provision",
+        timeout_seconds=3600,
+    )
+    locked = SimpleNamespace(
+        pk=551,
+        procedure=procedure,
+        backend_id=1,
+        params={},
+        refresh_from_db=lambda: None,
+    )
+    execution = SimpleNamespace(pk=551, procedure=procedure, procedure_id=153)
+    monkeypatch.setattr(
+        command_handlers, "_require_approval_authorization", lambda *args: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers, "_require_protected_procedure_policy", lambda *args: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_approved_backend_target_before_io",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers, "_verify_backend_capability", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(command_handlers, "normalize_execution_params", lambda value: {})
+    monkeypatch.setattr(
+        command_handlers,
+        "_approval_protected_payload",
+        lambda *args, **kwargs: {"procedure_id": 153},
+    )
+    approvals: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, candidate):
+            assert candidate is locked
+
+        def approve(self, **kwargs):
+            approvals.append(kwargs)
+
+    class Manager:
+        def select_for_update(self, **kwargs):
+            return self
+
+        def select_related(self, *args):
+            return self
+
+        def get(self, *, pk):
+            assert pk == 551
+            return locked
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = SimpleNamespace(
+        objects=Manager(),
+        TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY="_timeout_seconds_snapshot",
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    enqueued: list[object] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda candidate, **kwargs: enqueued.append(candidate),
+    )
+    approver = SimpleNamespace(pk=2, has_perm=lambda permission: True)
+
+    assert command_handlers.approve_execution(execution, approver, reason="") is locked
+    assert approvals == [
+        {
+            "approver_id": 2,
+            "current_protected": {"procedure_id": 153},
+            "reason": "Approved audited Ubuntu 26.04 Samba AD DC provision.",
+            "queue_after_approval": True,
+        }
+    ]
+    assert enqueued == [locked]
+    assert command_handlers._requires_signed_dispatch(locked) is True
+
+
+def _samba_fence_models(monkeypatch: pytest.MonkeyPatch, *, open_rows: bool):
+    calls: dict[str, object] = {"locked": [], "filters": []}
+
+    class Procedures:
+        def select_for_update(self):
+            return self
+
+        def get(self, *, pk):
+            calls["locked"].append(pk)
+
+    class Executions:
+        def filter(self, **kwargs):
+            calls["filters"].append(kwargs)
+            return SimpleNamespace(exists=lambda: open_rows)
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCProcedure = SimpleNamespace(objects=Procedures())
+    models.RPCExecution = SimpleNamespace(objects=Executions())
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    return calls
+
+
+def test_samba_provision_fence_refuses_a_second_open_provision_for_the_target(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    calls = _samba_fence_models(monkeypatch, open_rows=True)
+    procedure = SimpleNamespace(pk=9, name="os.linux.ubuntu.26.samba_ad_dc.provision")
+
+    with pytest.raises(ValidationError) as excinfo:
+        command_handlers._require_no_concurrent_samba_provision(
+            {"assigned_object_type": "ct", "assigned_object_id": 77}, procedure
+        )
+
+    assert "not rerunnable" in str(excinfo.value)
+    assert calls["locked"] == [9]
+    [query] = calls["filters"]
+    assert query["procedure"] is procedure
+    assert query["assigned_object_type"] == "ct"
+    assert query["assigned_object_id"] == 77
+    assert set(query["status__in"]) == {
+        "requested",
+        "pending_approval",
+        "approved",
+        "queued",
+        "running",
+    }
+
+
+def test_samba_provision_fence_allows_the_first_provision(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    _samba_fence_models(monkeypatch, open_rows=False)
+    procedure = SimpleNamespace(pk=9, name="os.linux.ubuntu.26.samba_ad_dc.provision")
+    command_handlers._require_no_concurrent_samba_provision(
+        {"assigned_object_type": "ct", "assigned_object_id": 77}, procedure
+    )
+
+
+def test_samba_provision_fence_ignores_other_procedures(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    calls = _samba_fence_models(monkeypatch, open_rows=True)
+    procedure = SimpleNamespace(pk=3, name="os.linux.ubuntu.26.samba_ad_dc.verify")
+    command_handlers._require_no_concurrent_samba_provision({}, procedure)
+    assert calls == {"locked": [], "filters": []}
