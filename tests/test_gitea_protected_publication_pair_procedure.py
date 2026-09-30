@@ -495,7 +495,7 @@ def _load_enabled_pair_normalizer(monkeypatch: pytest.MonkeyPatch):
     return current, repair, apps, procedures, commands
 
 
-def test_enabled_pair_normalizer_preserves_identity_and_is_reversible(
+def test_enabled_pair_normalizer_preserves_identity_and_default_dark_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
@@ -513,8 +513,44 @@ def test_enabled_pair_normalizer_preserves_identity_and_is_reversible(
     assert [(row.pk, id(row)) for row in procedures.rows] == identities
     assert [(row.pk, id(row)) for row in commands.rows] == command_identities
     repair.reverse(apps, None)
-    assert all(row.enabled is True for row in procedures.rows)
+    assert all(row.enabled is False for row in procedures.rows)
     assert [(row.pk, id(row)) for row in procedures.rows] == identities
+
+
+def test_enabled_pair_normalizer_does_not_enable_pre_disabled_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+    repair.seed(apps, None)
+    repair.reverse(apps, None)
+    assert all(row.enabled is False for row in procedures.rows)
+
+
+def test_enabled_pair_reverse_after_downstream_provenance_rollback_stays_dark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    for procedure in procedures.rows:
+        procedure.enabled = True
+    for command in commands.rows:
+        command.custom_field_data = {}
+    repair.seed(apps, None)
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    normalizer.seed(apps, None)
+    normalizer.reverse(apps, None)
+    repair.reverse(apps, None)
+    assert all(row.enabled is False for row in procedures.rows)
+    assert all(command.custom_field_data == {} for command in commands.rows)
 
 
 @pytest.mark.parametrize("mutation", ["procedure", "command", "partial", "mixed"])

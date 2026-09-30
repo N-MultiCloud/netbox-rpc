@@ -55,13 +55,9 @@ def seed(apps, schema_editor):
 
 
 def reverse(apps, schema_editor):
-    """Restore the exact uniform enabled state when rolling back this repair."""
+    """Validate the safe state without re-enabling protected publication."""
     with transaction.atomic():
-        rows = _validate(apps)
-        if rows and not rows[0].enabled:
-            for procedure in rows:
-                procedure.enabled = True
-                procedure.save(update_fields=["enabled"])
+        _validate(apps)
 
 
 class Migration(migrations.Migration):
