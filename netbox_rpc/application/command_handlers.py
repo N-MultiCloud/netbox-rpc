@@ -16,6 +16,7 @@ from .. import dns_staging_deploy_contract as dns_staging_contract
 from .. import gitea_docker_runner_contract
 from .. import gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
+from .. import gitea_protected_publication_pair_contract as publication_pair_contract
 from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
@@ -51,6 +52,7 @@ from ..constants import (
     UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES,
     UBUNTU_26_SAMBA_AD_DC_PROVISION,
 )
+
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
     RPCExecutionError,
@@ -67,6 +69,13 @@ from ..event_store import mark_execution_failed
 from ..openbao_validation import (
     OpenBaoSecretIngressError,
     validate_openbao_params_for_persistence,
+)
+
+GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES = (
+    publication_pair_contract.PROCEDURE_NAMES
+)
+GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION = (
+    publication_pair_contract.PROVISION_PROCEDURE
 )
 
 # Handler IDs whose params_schema declares a "password" property (issue #160:
@@ -96,6 +105,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
         *GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
+        *GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
         *GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
         *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
         *NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
@@ -175,6 +185,12 @@ _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON = (
 _PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON = (
     "Rejected audited recovery of retained proxbox-api release images."
 )
+_GITEA_PROTECTED_PUBLICATION_PAIR_APPROVAL_REASON = (
+    "Approved audited provisioning of the fixed protected publication-runner pair."
+)
+_GITEA_PROTECTED_PUBLICATION_PAIR_REJECTION_REASON = (
+    "Rejected audited provisioning of the fixed protected publication-runner pair."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -182,6 +198,9 @@ _PROTECTED_APPROVAL_REASON = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_APPROVAL_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_APPROVAL_REASON,
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION: (
+        _GITEA_PROTECTED_PUBLICATION_PAIR_APPROVAL_REASON
+    ),
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_APPROVAL_REASON,
     GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_APPROVAL_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_APPROVAL_REASON,
@@ -201,6 +220,9 @@ _PROTECTED_REJECTION_REASON = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: _GITEA_UPGRADE_REJECTION_REASON,
     GITEA_RUNNER_REGISTER: _GITEA_RUNNER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_PROVISION: _GITEA_ORG_CI_RUNNER_REJECTION_REASON,
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION: (
+        _GITEA_PROTECTED_PUBLICATION_PAIR_REJECTION_REASON
+    ),
     GITEA_USER_CI_RUNNER_RECOVER: _GITEA_USER_CI_RUNNER_RECOVER_REJECTION_REASON,
     GITEA_ORG_CI_RUNNER_RECOVER: _GITEA_ORG_CI_RUNNER_RECOVER_REJECTION_REASON,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _AKVORADO_INSTALL_REJECTION_REASON,
@@ -221,6 +243,7 @@ _PROTECTED_CONTRACTS = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: gitea_contract,
     GITEA_RUNNER_REGISTER: gitea_runner_contract,
     GITEA_ORG_CI_RUNNER_PROVISION: gitea_org_ci_runner_contract,
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION: publication_pair_contract,
     GITEA_USER_CI_RUNNER_RECOVER: gitea_docker_runner_contract,
     GITEA_ORG_CI_RUNNER_RECOVER: gitea_org_docker_runner_recovery_contract,
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: akvorado_contract,
@@ -236,6 +259,9 @@ _PROTECTED_LABELS = {
     GITEA_PRODUCTION_UPGRADE_1_27_1: "Production Gitea upgrade",
     GITEA_RUNNER_REGISTER: "Gitea runner registration",
     GITEA_ORG_CI_RUNNER_PROVISION: "Gitea organization CI runner provisioning",
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION: (
+        "Protected publication runner pair provisioning"
+    ),
     GITEA_USER_CI_RUNNER_RECOVER: "Gitea user CI runner recovery",
     GITEA_ORG_CI_RUNNER_RECOVER: "Gitea organization CI runner network recovery",
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "Debian 13 Akvorado bootstrap",
@@ -259,6 +285,15 @@ _GITEA_RUNNER_TARGET_POLICIES = {
         "object_id": gitea_org_ci_runner_contract.TARGET_OBJECT_ID,
         "validator": validate_gitea_org_ci_runner_target,
         "required_message": "The exact dedicated Gitea CI runner VM is required.",
+    },
+    **{
+        procedure_name: {
+            "content_type": publication_pair_contract.TARGET_OBJECT["content_type"],
+            "object_id": publication_pair_contract.TARGET_OBJECT_ID,
+            "validator": validate_gitea_org_ci_runner_target,
+            "required_message": "The exact dedicated Gitea runner VM is required.",
+        }
+        for procedure_name in GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES
     },
     **{
         procedure_name: {

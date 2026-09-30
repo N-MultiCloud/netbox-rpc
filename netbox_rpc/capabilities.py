@@ -48,6 +48,8 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.production.upgrade_1_27_1",
         "service.gitea.runner.register",
         "service.gitea.actions_runner.provision_org_ci_runner",
+        "service.gitea.actions_runner.protected_pair.prove",
+        "service.gitea.actions_runner.protected_pair.provision",
         "service.gitea.actions_runner.diagnose_user_ci_runner",
         "service.gitea.actions_runner.recover_user_ci_runner",
         "service.gitea.actions_runner.diagnose_org_ci_runner",
@@ -148,6 +150,9 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_org_docker_runner_recovery_contract import (
             SEMANTIC_CONTRACTS as org_docker_runner_contracts,
         )
+        from .gitea_protected_publication_pair_contract import (
+            SEMANTIC_CAPABILITY_EXTENSIONS as publication_pair_contracts,
+        )
         from .gitea_runner_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as runner_contract,
         )
@@ -182,6 +187,16 @@ def derive_command_contract_hash(procedure: Any) -> str:
                 ]
             ),
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
+            "service.gitea.actions_runner.protected_pair.prove": (
+                publication_pair_contracts[
+                    "service.gitea.actions_runner.protected_pair.prove"
+                ]
+            ),
+            "service.gitea.actions_runner.protected_pair.provision": (
+                publication_pair_contracts[
+                    "service.gitea.actions_runner.protected_pair.provision"
+                ]
+            ),
         }[handler_id]
     else:
         from .akvorado_bootstrap_contract import (

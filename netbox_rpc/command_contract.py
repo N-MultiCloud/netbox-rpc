@@ -130,6 +130,18 @@ EXEMPT_HANDLER_RATIONALE = {
         "The sequencing, token delivery, and final Gitea verification cannot be "
         "represented safely as one public argv."
     ),
+    "service.gitea.actions_runner.protected_pair.prove": (
+        "Invokes the fixed content-addressed proof helper for both protected "
+        "publication runners. The backend verifies organization scope, exact "
+        "identities, isolation, and broker separation atomically; no caller "
+        "input can select a role, path, command, label, scope, or credential."
+    ),
+    "service.gitea.actions_runner.protected_pair.provision": (
+        "Invokes the fixed content-addressed provision helper and then proves "
+        "both protected publication runners atomically. Registration material "
+        "and package authority remain backend/root-broker concerns and are "
+        "never represented as caller-selected argv or returned secrets."
+    ),
     "service.gitea.actions_runner.diagnose_user_ci_runner": (
         "Collects bounded structured Docker, runner, resolver, probe, log, and "
         "network evidence for one fixed lane through backend-owned fixed argv."

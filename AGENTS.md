@@ -1561,6 +1561,33 @@ pending approval or distinct-actor check.
   or mutate catalog state. Keep every gate dark until that source boundary
   is bound by another reviewed forward migration. Contract:
   [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
+- Protected publication-pair proof and provisioning are seeded disabled by
+  migration `0103` as
+  `service.gitea.actions_runner.protected_pair.prove` and
+  `service.gitea.actions_runner.protected_pair.provision`. They accept only an
+  empty object and atomically bind the fixed VM 416 validator/builder/publisher
+  set;
+  callers cannot select a role, label, identity, path, scope, credential,
+  network policy, or host command. Provisioning is destructive and uses the
+  protected two-person approval path. Only the separately pinned root broker
+  holds bounded package-write authority and independently reauthorizes the
+  exact protected-main run. No runner receives a package-write credential.
+  The validator has neither build authority nor access to the publisher socket,
+  and all three identities, accounts, processes, workspaces, state roots, and
+  cache roots remain pairwise distinct. Each runner control plane is limited to same-origin
+  Gitea HTTPS, while the candidate build subprocess is networkless and package
+  mutation is broker-socket-only. Keep the catalog rows and the independent code
+  gate dark until the matching backend semantic hashes and quiesced host
+  generation are deployed. Future digest changes require an additive forward
+  migration and coordinated backend update; never edit migration `0103` after
+  release. Migration `0103` records a deterministic migration, procedure, and
+  contract-hash marker on each command. After rollback it reuses retained rows
+  only when that marker and every immutable procedure/command field match;
+  otherwise it refuses the pre-existing name. Treat the
+  backend wire response as secret-protected: accept only its exact five-key
+  envelope with no events, discard backend error detail, validate the closed
+  result schema, and verify actual pairwise role separation independently of
+  claimed proof flags.
 - Samba file-server **read** procedures (`service.samba.1.*`) are seeded by
   migration `0049` (command rows in `0050`). Samba config write/lifecycle
   procedures are seeded by migration `0051` (command rows in `0052`). The twelve

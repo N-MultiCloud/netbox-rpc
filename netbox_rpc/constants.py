@@ -218,6 +218,23 @@ GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Parameter-free, atomic proof and approval-gated provisioning for the two
+# protected publication runners.  Both procedures always operate on the fixed
+# builder/publisher pair so a caller cannot select a role or split the
+# identity/root/crossover checks across executions.
+GITEA_PROTECTED_PUBLICATION_PAIR_PROVE = (
+    "service.gitea.actions_runner.protected_pair.prove"
+)
+GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION = (
+    "service.gitea.actions_runner.protected_pair.provision"
+)
+GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES = frozenset(
+    {
+        GITEA_PROTECTED_PUBLICATION_PAIR_PROVE,
+        GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION,
+    }
+)
+
 # Fixed-contract diagnosis and approval-gated recovery for the user-scoped
 # Docker runner lane. Both accept an exact empty object and are pinned to VM 604.
 GITEA_USER_CI_RUNNER_DIAGNOSE = "service.gitea.actions_runner.diagnose_user_ci_runner"
@@ -464,6 +481,8 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        GITEA_PROTECTED_PUBLICATION_PAIR_PROVE,
+        GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION,
         GITEA_USER_CI_RUNNER_DIAGNOSE,
         GITEA_USER_CI_RUNNER_RECOVER,
         GITEA_ORG_CI_RUNNER_DIAGNOSE,
@@ -481,6 +500,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         GITEA_PRODUCTION_UPGRADE_1_27_1,
         GITEA_RUNNER_REGISTER,
         GITEA_ORG_CI_RUNNER_PROVISION,
+        GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION,
         GITEA_USER_CI_RUNNER_RECOVER,
         GITEA_ORG_CI_RUNNER_RECOVER,
         AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,

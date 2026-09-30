@@ -313,6 +313,7 @@ class _BackendTransportKind(Enum):
     GITEA_UPGRADE = "gitea-upgrade"
     GITEA_RUNNER = "gitea-runner"
     GITEA_ORG_CI_RUNNER = "gitea-org-ci-runner"
+    GITEA_PROTECTED_PUBLICATION_PAIR = "gitea-protected-publication-pair"
     GITEA_DOCKER_RUNNER = "gitea-docker-runner"
     DNS_STAGING_DEPLOY = "dns-staging-deploy"
     AKVORADO_INSTALL = "akvorado-install"
@@ -323,6 +324,12 @@ _PROCEDURE_TRANSPORT_KINDS = {
     "service.gitea.runner.register": _BackendTransportKind.GITEA_RUNNER,
     "service.gitea.actions_runner.provision_org_ci_runner": (
         _BackendTransportKind.GITEA_ORG_CI_RUNNER
+    ),
+    "service.gitea.actions_runner.protected_pair.prove": (
+        _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR
+    ),
+    "service.gitea.actions_runner.protected_pair.provision": (
+        _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR
     ),
     "service.gitea.actions_runner.diagnose_user_ci_runner": (
         _BackendTransportKind.GITEA_DOCKER_RUNNER
@@ -347,6 +354,7 @@ _SECRET_PROTECTED_TRANSPORTS = frozenset(
         _BackendTransportKind.GITEA_RUNNER,
         _BackendTransportKind.GITEA_ORG_CI_RUNNER,
         _BackendTransportKind.GITEA_DOCKER_RUNNER,
+        _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR,
         _BackendTransportKind.DNS_STAGING_DEPLOY,
     }
 )
@@ -357,6 +365,7 @@ _STREAMED_TRANSPORTS = frozenset(
         _BackendTransportKind.GITEA_DOCKER_RUNNER,
         _BackendTransportKind.DNS_STAGING_DEPLOY,
         _BackendTransportKind.AKVORADO_INSTALL,
+        _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR,
     }
 )
 _CONNECT_FAILURE_STAGES = {
@@ -491,6 +500,15 @@ def _protected_response_limits(
             max(float(policy.timeout_seconds) + 10, 30),
             contract.BACKEND_RESPONSE_MAX_BYTES,
         )
+    elif policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR:
+        from . import gitea_protected_publication_pair_contract as contract
+
+        return (
+            contract.ROUTE_BUDGET_SECONDS[
+                str(getattr(policy.execution.procedure, "name", "") or "")
+            ],
+            contract.BACKEND_RESPONSE_MAX_BYTES,
+        )
     else:
         return None
     return contract.ROUTE_BUDGET_SECONDS, contract.BACKEND_RESPONSE_MAX_BYTES
@@ -511,7 +529,11 @@ def _build_backend_request_plan(
         "verify": target.verify_ssl,
         "timeout": (10, max(policy.timeout_seconds + 10, 30)),
     }
-    if policy.secret_protected or policy.kind is _BackendTransportKind.AKVORADO_INSTALL:
+    if (
+        policy.secret_protected
+        or policy.kind is _BackendTransportKind.AKVORADO_INSTALL
+        or policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR
+    ):
         request_kwargs["allow_redirects"] = False
     limits = _protected_response_limits(policy)
     if limits is None:
@@ -577,6 +599,8 @@ def _closed_backend_transport_failure(
         return _gitea_transport_failure_response(stage=stage)
     if policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
         return _gitea_docker_runner_transport_failure_response(policy)
+    if policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR:
+        return _protected_publication_pair_transport_failure_response(policy)
     raise RuntimeError("generic backend transport has no closed failure envelope")
 
 
@@ -840,6 +864,12 @@ def _normalize_backend_response(
             response,
             data,
         )
+    if policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR:
+        return _normalize_protected_publication_pair_backend_response(
+            policy,
+            response,
+            data,
+        )
     return _normalize_generic_backend_response(response, data)
 
 
@@ -957,6 +987,86 @@ def _gitea_docker_runner_contract(policy: _BackendTransportPolicy) -> Any:
     else:
         from . import gitea_docker_runner_contract as contract
     return contract
+
+
+def _protected_publication_pair_transport_failure_response(
+    policy: _BackendTransportPolicy,
+) -> dict[str, Any]:
+    """Return a fixed envelope without reflecting backend-controlled detail."""
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    return {
+        "ok": False,
+        "result": None,
+        "events": [],
+        "error_code": "RPC_BACKEND_INDETERMINATE",
+        "error_message": (
+            f"{procedure_name} outcome is indeterminate; prove current state before retrying."
+        ),
+    }
+
+
+def _normalize_protected_publication_pair_closed_response(
+    policy: _BackendTransportPolicy,
+    data: object,
+) -> dict[str, Any] | None:
+    """Validate the exact secret-protected envelope and semantic role separation."""
+    from . import gitea_protected_publication_pair_contract as contract
+
+    if not isinstance(data, dict) or set(data) != {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }:
+        return None
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    result = data.get("result")
+    result_schema = contract.RESULT_SCHEMAS.get(procedure_name)
+    fields_are_valid = all(
+        (
+            type(data.get("ok")) is bool,
+            data.get("ok") is True,
+            isinstance(result, dict),
+            data.get("events") == [],
+            data.get("error_code") == "",
+            data.get("error_message") == "",
+            isinstance(result_schema, dict),
+        )
+    )
+    if not fields_are_valid:
+        return None
+    identity_is_valid = all(
+        (
+            result.get("ok") is data["ok"],
+            result.get("procedure") == procedure_name,
+            result.get("target") == contract.TARGET_NAME,
+        )
+    )
+    if not identity_is_valid:
+        return None
+    try:
+        jsonschema.validate(result, result_schema)
+    except jsonschema.ValidationError:
+        return None
+    if not contract.result_semantics_are_valid(result):
+        return None
+    return {"ok": True, "result": result}
+
+
+def _normalize_protected_publication_pair_backend_response(
+    policy: _BackendTransportPolicy,
+    response: requests.Response,
+    data: object,
+) -> dict[str, Any]:
+    normalized = _normalize_protected_publication_pair_closed_response(policy, data)
+    if (
+        normalized is None
+        or not 200 <= response.status_code < 300
+        or not _closed_response_matches_http_status(response, normalized)
+    ):
+        return _protected_publication_pair_transport_failure_response(policy)
+    return normalized
 
 
 def _gitea_docker_runner_snapshot(contract: Any) -> dict[str, Any]:

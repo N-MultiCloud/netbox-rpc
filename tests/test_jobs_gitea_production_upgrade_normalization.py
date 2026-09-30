@@ -5,12 +5,14 @@ import hashlib
 import http.server
 import importlib
 import json
+import runpy
 import signal
 import sys
 import threading
 import time
 import types
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -216,6 +218,86 @@ def test_gitea_docker_runner_response_rejects_events_and_error_text(
         jobs_module._normalize_gitea_docker_runner_closed_response(policy, envelope)
         is None
     )
+
+
+def test_protected_publication_pair_transport_is_secret_closed_and_semantic(
+    jobs_module,
+) -> None:
+    from netbox_rpc import gitea_protected_publication_pair_contract as contract
+
+    procedure_name = contract.PROVE_PROCEDURE
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, timeout_seconds=300),
+        params={},
+        normalized_params={},
+        target_display=contract.TARGET_NAME,
+    )
+    policy = jobs_module._resolve_backend_transport_policy(execution)
+    result_builder = runpy.run_path(
+        str(
+            Path(__file__).with_name(
+                "test_gitea_protected_publication_pair_procedure.py"
+            )
+        )
+    )["_valid_result"]
+    result = result_builder(procedure_name)
+    envelope = {
+        "ok": True,
+        "result": result,
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+
+    assert policy.secret_protected is True
+    assert jobs_module._normalize_protected_publication_pair_closed_response(
+        policy, envelope
+    ) == {"ok": True, "result": result}
+
+    duplicate = deepcopy(envelope)
+    duplicate["result"]["roles"]["validator"]["runner_id"] = duplicate["result"][
+        "roles"
+    ]["builder"]["runner_id"]
+    assert duplicate["result"]["set"]["all_runner_ids_distinct"] is True
+    assert (
+        jobs_module._normalize_protected_publication_pair_closed_response(
+            policy, duplicate
+        )
+        is None
+    )
+
+    failure = jobs_module._protected_publication_pair_transport_failure_response(policy)
+    assert set(failure) == {
+        "ok",
+        "result",
+        "events",
+        "error_code",
+        "error_message",
+    }
+    assert failure["events"] == []
+    assert "backend detail" not in json.dumps(failure)
+
+    malformed = deepcopy(envelope)
+    malformed["events"] = [{"message": "backend detail"}]
+    assert (
+        jobs_module._normalize_protected_publication_pair_closed_response(
+            policy, malformed
+        )
+        is None
+    )
+    non_success = jobs_module._normalize_protected_publication_pair_backend_response(
+        policy,
+        SimpleNamespace(status_code=500),
+        {**envelope, "error_message": "backend detail"},
+    )
+    transport = jobs_module._classify_backend_request_failure(
+        policy,
+        real_requests.exceptions.ConnectionError("backend detail"),
+    )
+    assert non_success == failure
+    assert transport == failure
+    assert "backend detail" not in json.dumps(non_success)
+    assert "backend detail" not in json.dumps(transport)
 
 
 def test_gitea_docker_runner_normalizer_binds_approved_ssh_snapshot(

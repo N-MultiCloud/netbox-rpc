@@ -259,7 +259,8 @@ The protected-procedure registry deliberately activates the full existing
 approval foundation for `service.netbox.staging.rotate_backend_token`,
 `service.netbox.staging.deploy_dns_pair`,
 `service.gitea.production.upgrade_1_27_1`, `service.gitea.runner.register`, and
-`service.gitea.actions_runner.provision_org_ci_runner` only:
+`service.gitea.actions_runner.provision_org_ci_runner` and the default-dark
+`service.gitea.actions_runner.protected_pair.provision` only:
 
 - creation needs execute permission scoped to this exact procedure but cannot
   be self-approved inline; it records an immutable snapshot and

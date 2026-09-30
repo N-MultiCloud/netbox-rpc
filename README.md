@@ -397,6 +397,31 @@ The procedure catalog is intentionally narrow:
   `0084` and `0087` both leave the row disabled, and the catalog/backend gates
   remain closed. See
   [`docs/gitea-org-ci-runner-provision.md`](docs/gitea-org-ci-runner-provision.md).
+- `service.gitea.actions_runner.protected_pair.prove` and
+  `service.gitea.actions_runner.protected_pair.provision` — parameter-free,
+  disabled-by-default contracts for the fixed VM 416 protected publication
+  runner set. Proof is read-only; provisioning is destructive and requires a
+  distinct approver. Both bind the exact `N-MultiCloud` organization scope,
+  singleton `release-validator`, `release-builder`, and `release-publisher`
+  labels, pairwise-distinct runner IDs, process identities, service accounts,
+  work/state/cache roots, and the
+  reviewed host-generation, runtime, helper, sandbox, broker, and policy
+  SHA-256 values. No runner receives package-write credentials; their
+  control planes use same-origin Gitea HTTPS while candidate builds are
+  networkless. The validator has neither build authority nor the publisher
+  socket; only publisher package mutation is broker-socket-only. Irreversible
+  publication authority remains exclusively in the root-owned broker socket,
+  which independently reauthorizes the exact protected-main run and workflow.
+  Migration `0103` seeds both rows disabled, and the independent code gate
+  remains closed until a later reviewed activation release deploys matching
+  catalog, backend, and host contracts. Each command row carries a deterministic
+  migration/procedure/contract-hash provenance marker. A retained row is reused
+  after rollback only when that marker and every immutable procedure and command
+  field match exactly; arbitrary or partial pre-existing lookalikes are refused.
+  Backend responses use a bounded,
+  redirect-free, secret-protected five-key envelope; NetBox discards events and
+  backend error detail, validates the closed result schema, and independently
+  verifies actual cross-role separation before persisting success.
 - `network.device.huawei.router.ne8000.f1a.show_bgp_peer` (handler
   `network.huawei_ne8000_f1a.show_bgp_peer`) — read-only BGP peer status fetch
   from a Huawei NE8000-F1A `dcim.device`. `effect="read"`,

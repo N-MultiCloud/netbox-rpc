@@ -18,6 +18,7 @@ import yaml
 
 from .. import gitea_docker_runner_contract, gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
+from .. import gitea_protected_publication_pair_contract
 from .. import samba_ad_dc_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
@@ -45,6 +46,7 @@ from ..constants import (
     GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_ORG_CI_RUNNER_PROVISION,
     GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
     GITEA_RUNNER_REGISTER,
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
@@ -225,11 +227,40 @@ _GITEA_RUNNER_REGISTER_AVAILABLE = False
 # catalog dispatchable without the paired backend implementation and capability
 # contract. Flip to True only in the same additive rollout that enables the row.
 _GITEA_ORG_CI_RUNNER_AVAILABLE = False
+# The protected publication pair remains unavailable until the reviewed host
+# generation, both content-addressed helpers, and the paired backend semantic
+# capability are deployed and pinned together. Mutable catalog enablement must
+# not bypass this independent code gate.
+_GITEA_PROTECTED_PUBLICATION_PAIR_AVAILABLE = False
 # Migration 0086 deliberately seeds the paired rows disabled with this code gate
 # closed. A later release may flip both only after this seed release is fully
 # deployed, so mixed old/new workers and package rollback cannot expose the
 # installer through the old generic claim path.
 _AKVORADO_BOOTSTRAP_DEBIAN13_AVAILABLE = False
+
+
+def _gitea_runner_code_gate_unavailable_reason(procedure_name: str) -> str | None:
+    if (
+        procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
+        and not _GITEA_ORG_CI_RUNNER_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run yet: no service.gitea.actions_runner.* "
+            "execution handler is deployed in netbox-rpc-backend, so an "
+            "execution could only queue and then fail on an unknown handler. "
+            "Enable it in the coordinated rollout that ships the handler and "
+            "its approved capability contract."
+        )
+    if (
+        procedure_name in GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES
+        and not _GITEA_PROTECTED_PUBLICATION_PAIR_AVAILABLE
+    ):
+        return (
+            f"{procedure_name} cannot run until the fixed protected publication "
+            "runner host generation, content-addressed helpers, and matching "
+            "backend semantic capability are deployed and reviewed."
+        )
+    return None
 
 
 def code_gate_unavailable_reason(procedure_name: str) -> str | None:
@@ -290,17 +321,9 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "Enable it in the coordinated rollout that ships the handlers and "
             "their approved capability contract."
         )
-    if (
-        procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
-        and not _GITEA_ORG_CI_RUNNER_AVAILABLE
-    ):
-        return (
-            f"{procedure_name} cannot run yet: no service.gitea.actions_runner.* "
-            "execution handler is deployed in netbox-rpc-backend, so an "
-            "execution could only queue and then fail on an unknown handler. "
-            "Enable it in the coordinated rollout that ships the handler and "
-            "its approved capability contract."
-        )
+    gitea_runner_reason = _gitea_runner_code_gate_unavailable_reason(procedure_name)
+    if gitea_runner_reason is not None:
+        return gitea_runner_reason
     if (
         procedure_name in AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
         and not _AKVORADO_BOOTSTRAP_DEBIAN13_AVAILABLE
@@ -714,7 +737,9 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     them from ``normalized_params``. Non-default values only are injected, so
     legacy AsyncSSH/raw-output procedures keep a byte-for-byte identical payload.
     """
-    if execution.procedure.name in (
+    if execution.procedure.name in GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES:
+        normalized = _normalize_gitea_protected_publication_pair_execution(execution)
+    elif execution.procedure.name in (
         GITEA_USER_CI_RUNNER_PROCEDURE_NAMES
         | GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES
     ):
@@ -2533,6 +2558,80 @@ def _normalize_gitea_docker_runner_execution(
     }
 
 
+def _normalize_gitea_protected_publication_pair_execution(
+    execution: RPCExecution,
+) -> dict[str, Any]:
+    """Bind the parameter-free atomic pair to VM 416 and its SSH snapshot."""
+
+    contract = gitea_protected_publication_pair_contract
+    procedure_name = execution.procedure.name
+    internal_keys = {"_intent", "_intent_name", "_timeout_seconds_snapshot"}
+    params = execution.params or {}
+    if (
+        procedure_name not in contract.PROCEDURE_NAMES
+        or not isinstance(params, dict)
+        or set(params) - internal_keys
+    ):
+        raise RPCExecutionError(
+            "Protected publication-pair procedures accept no caller parameters.",
+            code="RPC_PARAM_INVALID",
+        )
+    if getattr(execution, "credential_references", None):
+        raise RPCExecutionError(
+            "Protected publication-pair runners are credential-free; publication "
+            "authority remains behind the independently reauthorizing root broker.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    assigned_object_type = getattr(execution, "assigned_object_type", None)
+    content_type = (
+        f"{getattr(assigned_object_type, 'app_label', '')}."
+        f"{getattr(assigned_object_type, 'model', '')}"
+    )
+    target_model = str(getattr(execution, "target_model_label", "") or "")
+    if content_type != target_model:
+        raise RPCExecutionError(
+            "Protected publication-pair target content type is inconsistent.",
+            code="RPC_TARGET_INVALID",
+        )
+    target_metadata = validate_gitea_org_ci_runner_target(
+        getattr(execution, "assigned_object", None),
+        target_model_label=content_type,
+        assigned_object_id=getattr(execution, "assigned_object_id", None),
+        target_display=getattr(execution, "target_display", None),
+    )
+    ssh_snapshot = _resolve_locked_ssh_identity(
+        assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+        assigned_object_id=contract.TARGET_OBJECT_ID,
+        expected_host=contract.TARGET_IPV4_ADDRESS,
+        policy_ref=contract.TARGET_SSH_POLICY_REF,
+    )
+    if ssh_snapshot.get("ssh_principal") != contract.TARGET_SSH_PRINCIPAL:
+        raise RPCExecutionError(
+            "Protected publication-pair SSH principal does not match reviewed policy.",
+            code="RPC_TARGET_INVALID",
+        )
+    return {
+        "target": target_metadata["target"],
+        "target_object": dict(contract.TARGET_OBJECT),
+        "ssh_snapshot": ssh_snapshot,
+        "ssh_policy_ref": contract.TARGET_SSH_POLICY_REF,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            "assigned_object_id": contract.TARGET_OBJECT_ID,
+            "target_object_sha256": contract.TARGET_OBJECT_SHA256,
+            "ssh_snapshot_sha256": _hash_json(ssh_snapshot),
+            "ssh_policy_ref": contract.TARGET_SSH_POLICY_REF,
+            "pair_contract_sha256": contract.PAIR_CONTRACT_SHA256,
+            "host_generation_sha256": contract.HOST_GENERATION_SHA256,
+            "provision_helper_sha256": contract.PROVISION_HELPER_SHA256,
+            "prove_helper_sha256": contract.PROVE_HELPER_SHA256,
+            "build_sandbox_sha256": contract.BUILD_SANDBOX_SHA256,
+        },
+    }
+
+
 def _normalize_gitea_org_ci_runner_provision_execution(
     execution: RPCExecution,
 ) -> dict[str, Any]:
@@ -4207,12 +4306,13 @@ def resolve_openbao_assignment_reference(
     requester = execution.requested_by
     if requester is not None:
         Credential = apps.get_model("netbox_openbao", "Credential")
-        if not Credential.objects.restrict(requester, "view").filter(
-            pk=assignment.credential_id
-        ).exists():
+        if (
+            not Credential.objects.restrict(requester, "view")
+            .filter(pk=assignment.credential_id)
+            .exists()
+        ):
             raise RPCExecutionError(
-                "You do not have permission to view the configured OpenBao "
-                "credential.",
+                "You do not have permission to view the configured OpenBao credential.",
                 code="RPC_OPENBAO_CREDENTIAL_PERMISSION_DENIED",
             )
     return {"rpc_openbao_assignment_id": assignment_id}
@@ -6076,7 +6176,9 @@ def _openbao_import_target_binding(environment: str) -> tuple[int, int, str]:
         ) from exc
     slug = _OPENBAO_IMPORT_BINDING_SLUGS[environment]
     try:
-        binding = RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+        binding = (
+            RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+        )
     except Exception as exc:
         raise RPCExecutionError(
             f"netbox-openbao import could not resolve the {slug!r} target binding.",
@@ -6094,7 +6196,11 @@ def _openbao_import_target_binding(environment: str) -> tuple[int, int, str]:
             code="RPC_TARGET_INVALID",
         )
     binding_id = getattr(binding, "pk", None)
-    if isinstance(binding_id, bool) or not isinstance(binding_id, int) or binding_id < 1:
+    if (
+        isinstance(binding_id, bool)
+        or not isinstance(binding_id, int)
+        or binding_id < 1
+    ):
         raise RPCExecutionError(
             f"netbox-openbao import target binding {slug!r} has no valid id.",
             code="RPC_TARGET_INVALID",
@@ -6118,7 +6224,9 @@ def _rpc_target_binding_revision(binding: object, slug: str) -> str:
     try:
         if revision.tzinfo is None or revision.utcoffset() is None:
             raise ValueError("naive revision")
-        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace("+00:00", "Z")
+        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace(
+            "+00:00", "Z"
+        )
     except (AttributeError, ValueError, OverflowError) as exc:
         raise RPCExecutionError(
             f"netbox-openbao import target binding {slug!r} revision is invalid.",
@@ -6176,7 +6284,8 @@ def _normalize_openbao_import_execution(
     # Internal keys the platform itself records on every execution are
     # allowed; nothing caller-controlled beyond `environment` is.
     unexpected = sorted(
-        set(params) - {"environment", "_intent", "_intent_name", "_timeout_seconds_snapshot"}
+        set(params)
+        - {"environment", "_intent", "_intent_name", "_timeout_seconds_snapshot"}
     )
     if unexpected:
         raise RPCExecutionError(
@@ -6241,7 +6350,9 @@ def _release_marker_target_binding() -> tuple[int, int, str]:
         ) from exc
     slug = RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST
     try:
-        binding = RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+        binding = (
+            RPCTargetBinding.objects.select_related("device").filter(slug=slug).first()
+        )
     except Exception as exc:
         raise RPCExecutionError(
             f"the release-marker procedures could not resolve the {slug!r} "
@@ -6261,7 +6372,11 @@ def _release_marker_target_binding() -> tuple[int, int, str]:
             code="RPC_TARGET_INVALID",
         )
     binding_id = getattr(binding, "pk", None)
-    if isinstance(binding_id, bool) or not isinstance(binding_id, int) or binding_id < 1:
+    if (
+        isinstance(binding_id, bool)
+        or not isinstance(binding_id, int)
+        or binding_id < 1
+    ):
         raise RPCExecutionError(
             f"release-marker target binding {slug!r} has no valid id.",
             code="RPC_TARGET_INVALID",
@@ -6412,9 +6527,7 @@ def _normalize_proxbox_api_release_images_execution(
 # here (pointing at a shared or dedicated normalizer, both accepting
 # ``(execution, target)``) instead of adding another branch to that
 # function's already very large ``if``/``elif`` chain.
-_TABLE_NORMALIZERS: dict[
-    str, Callable[[RPCExecution, str], dict[str, Any]]
-] = {
+_TABLE_NORMALIZERS: dict[str, Callable[[RPCExecution, str], dict[str, Any]]] = {
     NETBOX_OPENBAO_IMPORT_DRY_RUN: _normalize_openbao_import_execution,
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
