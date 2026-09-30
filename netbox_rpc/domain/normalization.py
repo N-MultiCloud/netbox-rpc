@@ -106,6 +106,8 @@ from ..constants import (
     RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING,
+    PROXBOX_API_RELEASE_IMAGES_INSPECT,
+    PROXBOX_API_RELEASE_IMAGES_RECOVER,
     SAMBA_1_CONFIG_DEPLOY,
     SAMBA_1_CONFIG_ROLLBACK,
     SAMBA_1_GROUP_ADD_MEMBERS,
@@ -6233,6 +6235,57 @@ def _normalize_release_marker_execution(
     }
 
 
+def _normalize_proxbox_api_release_images_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Bind parameter-free image recovery to the exact production device."""
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "proxbox-api release-image procedures require a dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+        or getattr(assigned_object, "name", None) != "nmc-prod-207"
+        or target != "nmc-prod-207"
+    ):
+        raise RPCExecutionError(
+            "proxbox-api release-image procedures require device nmc-prod-207.",
+            code="RPC_TARGET_INVALID",
+        )
+    if execution.params not in ({}, None):
+        raise RPCExecutionError(
+            "proxbox-api release-image procedures accept only an empty object.",
+            code="RPC_PARAM_INVALID",
+        )
+    binding_device_id, binding_id, binding_revision = _release_marker_target_binding()
+    if assigned_object_id != binding_device_id:
+        raise RPCExecutionError(
+            "proxbox-api release-image target must equal the device on "
+            f"RPCTargetBinding slug {RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST!r}.",
+            code="RPC_TARGET_INVALID",
+        )
+    target_object = {"content_type": "dcim.device", "object_id": assigned_object_id}
+    return {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "assigned_object_id": assigned_object_id,
+            "target_binding_id": binding_id,
+            "target_binding_revision": binding_revision,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
+
+
 # Table-driven normalizer registry consulted once at the top of
 # ``_dispatch_normalize_execution_params``. Register a new procedure name
 # here (pointing at a shared or dedicated normalizer, both accepting
@@ -6245,6 +6298,8 @@ _TABLE_NORMALIZERS: dict[
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: _normalize_release_marker_execution,
+    PROXBOX_API_RELEASE_IMAGES_INSPECT: _normalize_proxbox_api_release_images_execution,
+    PROXBOX_API_RELEASE_IMAGES_RECOVER: _normalize_proxbox_api_release_images_execution,
 }
 
 

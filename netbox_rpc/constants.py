@@ -152,7 +152,10 @@ RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION = "netbox-openbao-import-produ
 RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST = "nmulticloud-deploy-host"
 RPC_TARGET_BINDING_SLUG_CHOICES = (
     (RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING, "netbox-openbao import (staging)"),
-    (RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION, "netbox-openbao import (production)"),
+    (
+        RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
+        "netbox-openbao import (production)",
+    ),
     (RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST, "N-MultiCloud deploy host"),
 )
 
@@ -164,9 +167,15 @@ RPC_TARGET_BINDING_SLUG_CHOICES = (
 # `/opt/nmulticloud/deploy/bin/reconcile-release-marker {app} --check|--apply`
 # on the RPCTargetBinding-bound deploy host; the caller supplies only the
 # closed `app` enum.
-NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK = "service.nmulticloud.deploy.release_marker_check"
-NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK_HANDLER = NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK
-NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE = "service.nmulticloud.deploy.release_marker_reconcile"
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK = (
+    "service.nmulticloud.deploy.release_marker_check"
+)
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK_HANDLER = (
+    NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK
+)
+NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE = (
+    "service.nmulticloud.deploy.release_marker_reconcile"
+)
 NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE_HANDLER = (
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE
 )
@@ -176,6 +185,17 @@ NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES = frozenset(
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     }
+)
+
+# Parameter-free, deploy-host-bound inspection/recovery for the retained
+# proxbox-api offline-image transaction. Recovery is protected because it
+# pulls the transaction's exact digest-pinned external images and retires the
+# prepared transaction after health checks; neither procedure activates a
+# candidate release.
+PROXBOX_API_RELEASE_IMAGES_INSPECT = "service.proxbox_api.release_images.inspect"
+PROXBOX_API_RELEASE_IMAGES_RECOVER = "service.proxbox_api.release_images.recover"
+PROXBOX_API_RELEASE_IMAGES_PROCEDURE_NAMES = frozenset(
+    {PROXBOX_API_RELEASE_IMAGES_INSPECT, PROXBOX_API_RELEASE_IMAGES_RECOVER}
 )
 
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
@@ -431,6 +451,8 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_RECOVER,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        PROXBOX_API_RELEASE_IMAGES_INSPECT,
+        PROXBOX_API_RELEASE_IMAGES_RECOVER,
     }
 )
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
@@ -447,6 +469,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         NETBOX_OPENBAO_IMPORT_APPLY,
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        PROXBOX_API_RELEASE_IMAGES_RECOVER,
     }
 )
 

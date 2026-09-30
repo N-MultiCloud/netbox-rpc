@@ -21,6 +21,7 @@ from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
 from .. import proxmox_oci_pull_contract
 from .. import release_marker_contract
+from .. import proxbox_api_release_images_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
@@ -93,6 +94,8 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
         *NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        "service.proxbox_api.release_images.inspect",
+        "service.proxbox_api.release_images.recover",
     }
 )
 _OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
@@ -110,8 +113,13 @@ _RPC_JOB_TIMEOUT_HEADROOM_SECONDS = 60
 _RPC_JOB_TIMEOUT_FLOOR_SECONDS = 600
 
 _STAGING_ROTATION_CREATE_FIELDS = frozenset(
-    {"procedure_id", "assigned_object_type", "assigned_object_id", "params",
-     "credential_references"}
+    {
+        "procedure_id",
+        "assigned_object_type",
+        "assigned_object_id",
+        "params",
+        "credential_references",
+    }
 )
 _STAGING_ROTATION_APPROVAL_REASON = "Approved audited staging backend token rotation."
 _STAGING_ROTATION_REJECTION_REASON = "Rejected audited staging backend token rotation."
@@ -143,14 +151,18 @@ _OPENBAO_IMPORT_APPLY_APPROVAL_REASON = (
 _OPENBAO_IMPORT_APPLY_REJECTION_REASON = (
     "Rejected audited netbox-openbao credential import."
 )
-_RELEASE_MARKER_RECONCILE_APPROVAL_REASON = (
-    "Approved audited release-marker reconcile."
-)
+_RELEASE_MARKER_RECONCILE_APPROVAL_REASON = "Approved audited release-marker reconcile."
 _RELEASE_MARKER_RECONCILE_REJECTION_REASON = (
     "Rejected audited release-marker reconcile."
 )
 _PROXMOX_OCI_PULL_APPROVAL_REASON = "Approved audited Proxmox OCI registry pull."
 _PROXMOX_OCI_PULL_REJECTION_REASON = "Rejected audited Proxmox OCI registry pull."
+_PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON = (
+    "Approved audited recovery of retained proxbox-api release images."
+)
+_PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON = (
+    "Rejected audited recovery of retained proxbox-api release images."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -166,6 +178,9 @@ _PROTECTED_APPROVAL_REASON = {
         _RELEASE_MARKER_RECONCILE_APPROVAL_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_APPROVAL_REASON,
+    proxbox_api_release_images_contract.PROCEDURE_NAME: (
+        _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON
+    ),
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -181,6 +196,9 @@ _PROTECTED_REJECTION_REASON = {
         _RELEASE_MARKER_RECONCILE_REJECTION_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_REJECTION_REASON,
+    proxbox_api_release_images_contract.PROCEDURE_NAME: (
+        _PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON
+    ),
 }
 
 _PROTECTED_CONTRACTS = {
@@ -195,6 +213,7 @@ _PROTECTED_CONTRACTS = {
     NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
     LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
+    proxbox_api_release_images_contract.PROCEDURE_NAME: proxbox_api_release_images_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -208,6 +227,9 @@ _PROTECTED_LABELS = {
     NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: "Release-marker reconcile",
     LINUX_PROXMOX_OCI_REGISTRY_PULL: "Proxmox OCI registry pull",
+    proxbox_api_release_images_contract.PROCEDURE_NAME: (
+        "Proxbox API retained-image recovery"
+    ),
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {
@@ -1154,7 +1176,9 @@ def _require_validated_reference_creation_shape(serializer: object) -> None:
     from ..credential_contract import CredentialContractError, validate_named_references
 
     try:
-        references = validate_named_references(serializer.initial_data["credential_references"])
+        references = validate_named_references(
+            serializer.initial_data["credential_references"]
+        )
         if references != serializer.validated_data.get("credential_references"):
             raise CredentialContractError("References were not validated.")
     except CredentialContractError:
@@ -1628,7 +1652,11 @@ def _record_gitea_runner_response(
 
 
 def _reference_execution_guard(
-    execution: object, stage: str, value: object, *, backend_target: object | None = None,
+    execution: object,
+    stage: str,
+    value: object,
+    *,
+    backend_target: object | None = None,
 ) -> None:
     """Load optional reference authority only for reference-bearing executions."""
     if not getattr(execution, "credential_references", None):
@@ -1645,8 +1673,9 @@ def _reference_execution_guard(
 
 
 def _requires_signed_dispatch(execution: object) -> bool:
-    return (execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES
-            or bool(getattr(execution, "credential_references", None)))
+    return execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES or bool(
+        getattr(execution, "credential_references", None)
+    )
 
 
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
@@ -1700,6 +1729,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
 
     try:
         from .. import jobs
+
         _reference_execution_guard(execution, "backend", backend_selector)
 
         try:
@@ -1744,7 +1774,9 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
             )
         _reference_execution_guard(execution, "dispatch", target)
         normalized = normalize_execution_params(execution)
-        _reference_execution_guard(execution, "approval", normalized, backend_target=target)
+        _reference_execution_guard(
+            execution, "approval", normalized, backend_target=target
+        )
         if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
             _require_current_protected_approval(
                 execution,
@@ -1760,10 +1792,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         # execution + current stream version. Graceful: ``None`` when no signing
         # key is configured, so dispatch stays ID-only (byte-for-byte as before).
         lease = _issue_dispatch_lease(execution, aggregate, normalized)
-        if (
-            _requires_signed_dispatch(execution)
-            and lease is None
-        ):
+        if _requires_signed_dispatch(execution) and lease is None:
             raise RPCExecutionError(
                 f"{_protected_label(execution.procedure.name)} requires a signed one-time dispatch lease.",
                 code="RPC_DISPATCH_LEASE_REQUIRED",
@@ -1873,7 +1902,9 @@ def _credential_policy_reference(normalized: dict, execution: object) -> str:
     if getattr(execution, "credential_references", None):
         from ..credential_contract import canonical_hash
 
-        expected = "credential-authority:" + canonical_hash(execution.credential_authority)
+        expected = "credential-authority:" + canonical_hash(
+            execution.credential_authority
+        )
         if authority_policy != expected:
             raise ValueError("Credential policy does not match execution authority.")
         return expected
@@ -1917,7 +1948,9 @@ def _issue_dispatch_lease(
         normalized_params=normalized,
         now=timezone.now(),
         credential_policy=_credential_policy_reference(normalized, execution),
-        trace_id=(getattr(execution, "credential_authority", {}) or {}).get("correlation_id", ""),
+        trace_id=(getattr(execution, "credential_authority", {}) or {}).get(
+            "correlation_id", ""
+        ),
     )
     if lease is None:
         return None

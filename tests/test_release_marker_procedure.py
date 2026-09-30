@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib
 import importlib.util
+import json
 import sys
 import types
 from datetime import UTC, datetime
@@ -18,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "netbox_rpc/migrations/0098_seed_release_marker_procedures.py"
 CHECK_ID = "service.nmulticloud.deploy.release_marker_check"
 RECONCILE_ID = "service.nmulticloud.deploy.release_marker_reconcile"
+PROXBOX_INSPECT_ID = "service.proxbox_api.release_images.inspect"
+PROXBOX_RECOVER_ID = "service.proxbox_api.release_images.recover"
 DEPLOY_HOST_SLUG = "nmulticloud-deploy-host"
 
 
@@ -106,10 +110,7 @@ def test_reconcile_is_registered_as_a_protected_two_person_procedure() -> None:
         CHECK_ID,
         RECONCILE_ID,
     }
-    assert (
-        constants.RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST
-        == DEPLOY_HOST_SLUG
-    )
+    assert constants.RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST == DEPLOY_HOST_SLUG
 
 
 def _load_release_marker_contract_module():
@@ -126,7 +127,9 @@ def _load_release_marker_contract_module():
 def test_reconcile_contract_matches_migration_apply_defaults() -> None:
     contract = _load_release_marker_contract_module()
     defaults_source = MIGRATION.read_text()
-    reconcile_block = defaults_source[defaults_source.index("_RECONCILE_DEFAULTS = {") :]
+    reconcile_block = defaults_source[
+        defaults_source.index("_RECONCILE_DEFAULTS = {") :
+    ]
 
     assert contract.PROCEDURE_NAME == RECONCILE_ID
     assert contract.HANDLER_ID == RECONCILE_ID
@@ -400,9 +403,57 @@ def test_normalizer_refuses_when_target_device_does_not_match_the_binding(
     # normalization.
     jobs_module = _import_jobs_module(
         monkeypatch,
-        bindings_by_slug={DEPLOY_HOST_SLUG: _FakeBinding(3, 900, _DEFAULT_LAST_UPDATED)},
+        bindings_by_slug={
+            DEPLOY_HOST_SLUG: _FakeBinding(3, 900, _DEFAULT_LAST_UPDATED)
+        },
     )
     execution = _execution({"app": "nms-backend-staging"})
+
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(execution)
+
+    assert excinfo.value.code == "RPC_TARGET_INVALID"
+
+
+@pytest.mark.parametrize("handler_id", [PROXBOX_INSPECT_ID, PROXBOX_RECOVER_ID])
+def test_proxbox_image_normalizer_binds_exact_production_device(
+    jobs_module, handler_id: str
+) -> None:
+    execution = _execution({}, handler_id=handler_id)
+    target_object = {"content_type": "dcim.device", "object_id": 44}
+    target_object_sha256 = hashlib.sha256(
+        json.dumps(target_object, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    normalized = jobs_module.normalize_execution_params(execution)
+
+    assert normalized["target"] == "nmc-prod-207"
+    assert normalized["target_object"] == target_object
+    assert normalized["command_fingerprint"] == {
+        "handler_id": handler_id,
+        "assigned_object_id": 44,
+        "target_binding_id": 3,
+        "target_binding_revision": "2026-01-01T00:00:00Z",
+        "target_object_sha256": target_object_sha256,
+    }
+
+
+def test_proxbox_image_normalizer_rejects_params(jobs_module) -> None:
+    execution = _execution(
+        {"image": "attacker-controlled"}, handler_id=PROXBOX_INSPECT_ID
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(execution)
+
+    assert excinfo.value.code == "RPC_PARAM_INVALID"
+
+
+def test_proxbox_image_normalizer_rejects_named_device_not_matching_binding(
+    jobs_module,
+) -> None:
+    execution = _execution({}, handler_id=PROXBOX_INSPECT_ID)
+    execution.assigned_object.name = "renamed-host"
 
     with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
         jobs_module.normalize_execution_params(execution)

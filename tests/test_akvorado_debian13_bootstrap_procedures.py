@@ -515,6 +515,8 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         # OCI pull is a protected operation and therefore fails closed when
         # the selected backend does not advertise its exact handler contract.
         constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        constants.PROXBOX_API_RELEASE_IMAGES_INSPECT,
+        constants.PROXBOX_API_RELEASE_IMAGES_RECOVER,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows

@@ -8,6 +8,17 @@ Protected requests retain immutable two-person approval. Providers must recheck
 the verified lease expiry after their lock waits and immediately before reveal;
 the authority result is not a lifetime extension or a replay receipt.
 
+The parameter-free `service.proxbox_api.release_images.inspect` and
+approval-required `service.proxbox_api.release_images.recover` procedures
+provide audited diagnosis and recovery for the exact retained Proxbox API
+pre-activation transaction on `nmc-prod-207`. The plugin owns their policy,
+approval, execution, event, and history records; callers cannot supply an
+image, registry, path, command, release selector, or SSH route. Both rows are
+seeded disabled. Post-deploy activation requires the existing
+`nmulticloud-deploy-host` `RPCTargetBinding` to reference the exact
+`nmc-prod-207` device, compatible backend capability advertisements, and an
+explicit operator enablement; the migration never enables or repoints them.
+
 Licensed under Apache-2.0 (see `LICENSE`).
 
 `netbox-rpc` is an audited RPC procedure catalog and execution framework for
