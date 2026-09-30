@@ -59,6 +59,7 @@ class _Manager:
 
     def create(self, **values: object):
         row = SimpleNamespace(pk=len(self.rows) + 1, **values)
+        row.save = lambda **_kwargs: None
         self.rows.append(row)
         return row
 
@@ -212,6 +213,34 @@ def test_migration_refuses_preexisting_row_with_spoofed_provenance(
         RuntimeError, match="Refusing to adopt pre-existing protected publication row"
     ):
         migration.seed(apps, None)
+
+
+def test_migration_adopts_exact_pre_rebase_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration, apps, procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    procedure_by_name = {row.name: row for row in procedures.rows}
+    for command in commands.rows:
+        name = command.procedure.name
+        defaults = {
+            field: getattr(procedure_by_name[name], field)
+            for field in migration._PROVE_DEFAULTS
+        }
+        expected_command = migration._command(command.argv[-1])
+        command.custom_field_data = migration._predecessor_provenance_marker(
+            name, defaults, expected_command
+        )
+
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    migration.seed(apps, None)
+
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert len(procedures.rows) == len(commands.rows) == 2
+    for command in commands.rows:
+        assert command.custom_field_data["migration"] == (
+            "0104_seed_protected_publication_pair"
+        )
 
 
 def test_catalog_registry_and_code_gate_are_default_dark() -> None:

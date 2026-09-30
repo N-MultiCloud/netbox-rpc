@@ -341,6 +341,17 @@ def _provenance_marker(name, defaults, command):
     }
 
 
+def _predecessor_provenance_marker(name, defaults, command):
+    """Identify the exact pre-rebase migration contract already deployed."""
+    return {
+        "migration": "0103_seed_protected_publication_pair",
+        "procedure": name,
+        "contract_sha256": _canonical_sha256(
+            {"procedure": defaults, "command": command}
+        ),
+    }
+
+
 def _matches(instance, expected):
     return all(getattr(instance, field) == value for field, value in expected.items())
 
@@ -374,6 +385,21 @@ def seed(apps, schema_editor):
             commands = list(
                 Command.objects.filter(procedure=procedure).order_by("sequence")
             )
+            predecessor_command_defaults = {
+                **expected_command,
+                "custom_field_data": _predecessor_provenance_marker(
+                    name, defaults, expected_command
+                ),
+            }
+            if (
+                _matches(procedure, defaults)
+                and len(commands) == 1
+                and getattr(commands[0], "sequence", None) == 1
+                and _matches(commands[0], predecessor_command_defaults)
+            ):
+                commands[0].custom_field_data = command_defaults["custom_field_data"]
+                commands[0].save(update_fields=["custom_field_data"])
+                continue
             if (
                 not _matches(procedure, defaults)
                 or len(commands) != 1
