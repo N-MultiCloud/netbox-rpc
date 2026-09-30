@@ -341,17 +341,6 @@ def _provenance_marker(name, defaults, command):
     }
 
 
-def _predecessor_provenance_marker(name, defaults, command):
-    """Identify the exact pre-rebase migration contract already deployed."""
-    return {
-        "migration": "0103_seed_protected_publication_pair",
-        "procedure": name,
-        "contract_sha256": _canonical_sha256(
-            {"procedure": defaults, "command": command}
-        ),
-    }
-
-
 def _matches(instance, expected):
     return all(getattr(instance, field) == value for field, value in expected.items())
 
@@ -365,7 +354,6 @@ def seed(apps, schema_editor):
         (_PROVISION, _PROVISION_DEFAULTS, "gitea-protected-publication-pair-provision"),
     )
     with transaction.atomic():
-        observed_mode = None
         for name, defaults, operation in rows:
             procedure = Procedure.objects.filter(name=name).first()
             expected_command = _command(operation)
@@ -376,11 +364,6 @@ def seed(apps, schema_editor):
                 ),
             }
             if procedure is None:
-                if observed_mode not in {None, "new"}:
-                    raise RuntimeError(
-                        "Refusing partial protected publication predecessor state"
-                    )
-                observed_mode = "new"
                 procedure = Procedure.objects.create(name=name, **defaults)
                 Command.objects.create(
                     procedure=procedure,
@@ -391,55 +374,12 @@ def seed(apps, schema_editor):
             commands = list(
                 Command.objects.filter(procedure=procedure).order_by("sequence")
             )
-            predecessor_command_defaults = {
-                **expected_command,
-                "custom_field_data": _predecessor_provenance_marker(
-                    name, defaults, expected_command
-                ),
-            }
-            current_matches = (
-                _matches(procedure, defaults)
-                and len(commands) == 1
-                and getattr(commands[0], "sequence", None) == 1
-                and _matches(commands[0], command_defaults)
-            )
-            predecessor_matches = (
-                _matches(procedure, defaults)
-                and len(commands) == 1
-                and getattr(commands[0], "sequence", None) == 1
-                and _matches(commands[0], predecessor_command_defaults)
-            )
-            unmarked_matches = (
-                _matches(procedure, defaults)
-                and len(commands) == 1
-                and getattr(commands[0], "sequence", None) == 1
-                and _matches(commands[0], expected_command)
-                and getattr(commands[0], "custom_field_data", None) == {}
-            )
-            mode = (
-                "current"
-                if current_matches
-                else (
-                    "predecessor"
-                    if predecessor_matches
-                    else "unmarked" if unmarked_matches else "invalid"
-                )
-            )
-            if observed_mode not in {None, mode}:
-                raise RuntimeError(
-                    "Refusing mixed protected publication predecessor state"
-                )
-            observed_mode = mode
-            if predecessor_matches:
-                commands[0].custom_field_data = command_defaults["custom_field_data"]
-                commands[0].save(update_fields=["custom_field_data"])
-                continue
-            if unmarked_matches:
-                Command.objects.filter(procedure=procedure).update(
-                    custom_field_data=command_defaults["custom_field_data"]
-                )
-                continue
-            if not current_matches:
+            if (
+                not _matches(procedure, defaults)
+                or len(commands) != 1
+                or getattr(commands[0], "sequence", None) != 1
+                or not _matches(commands[0], command_defaults)
+            ):
                 raise RuntimeError(
                     f"Refusing to adopt pre-existing protected publication row {name}"
                 )
