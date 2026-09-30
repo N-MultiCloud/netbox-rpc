@@ -64,7 +64,10 @@ class _Manager:
         return row
 
 
-def _load_migration(monkeypatch: pytest.MonkeyPatch):
+def _load_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str = "0104_seed_protected_publication_pair.py",
+):
     django = types.ModuleType("django")
     django_db = types.ModuleType("django.db")
 
@@ -78,11 +81,17 @@ def _load_migration(monkeypatch: pytest.MonkeyPatch):
     django_db.transaction = SimpleNamespace(atomic=nullcontext)
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
-    path = ROOT / "netbox_rpc/migrations/0104_seed_protected_publication_pair.py"
+    path = ROOT / "netbox_rpc/migrations" / filename
     spec = importlib.util.spec_from_file_location("publication_pair_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if filename == "0104_seed_protected_publication_pair.py":
+        monkeypatch.setitem(
+            sys.modules,
+            "netbox_rpc.migrations.0104_seed_protected_publication_pair",
+            module,
+        )
     monkeypatch.setattr(module.transaction, "atomic", nullcontext)
     procedures = _Manager()
     commands = _Manager(command=True)
@@ -99,7 +108,7 @@ def _load_migration(monkeypatch: pytest.MonkeyPatch):
 def _valid_result(procedure: str) -> dict[str, object]:
     operation = "prove" if procedure == contract.PROVE_PROCEDURE else "provision"
     runner_ids = {"builder": 1, "publisher": 2, "validator": 3}
-    role = lambda name: {  # noqa: E731 - compact independent fixture builder
+    role = lambda name: {
         "runner_id": runner_ids[name],
         "runner_name": f"ci-release-{name}-netbox-rpc-backend",
         "labels": [f"release-{name}"],
@@ -218,9 +227,8 @@ def test_migration_refuses_preexisting_row_with_spoofed_provenance(
 def test_migration_adopts_exact_pre_rebase_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    migration, apps, procedures, commands = _load_migration(monkeypatch)
-    migration.seed(apps, None)
-    procedure_by_name = {row.name: row for row in procedures.rows}
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
     predecessor_markers = {
         contract.PROVE_PROCEDURE: {
             "migration": "0103_seed_protected_publication_pair",
@@ -243,7 +251,10 @@ def test_migration_adopts_exact_pre_rebase_provenance(
 
     identities = [(row.pk, id(row)) for row in procedures.rows]
     command_identities = [(row.pk, id(row)) for row in commands.rows]
-    migration.seed(apps, None)
+    predecessor, _, _, _ = _load_migration(
+        monkeypatch, "0103_adopt_protected_publication_predecessor.py"
+    )
+    predecessor.seed(apps, None)
 
     assert [(row.pk, id(row)) for row in procedures.rows] == identities
     assert [(row.pk, id(row)) for row in commands.rows] == command_identities
@@ -253,6 +264,15 @@ def test_migration_adopts_exact_pre_rebase_provenance(
             "0104_seed_protected_publication_pair"
         )
 
+    predecessor.reverse(apps, None)
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row)) for row in commands.rows] == command_identities
+    for command in commands.rows:
+        assert command.custom_field_data == predecessor_markers[command.procedure.name]
+
+    predecessor.seed(apps, None)
+    current.seed(apps, None)
+
 
 @pytest.mark.parametrize(
     "mutation",
@@ -261,8 +281,8 @@ def test_migration_adopts_exact_pre_rebase_provenance(
 def test_migration_refuses_drifted_pre_rebase_rows(
     monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
-    migration, apps, procedures, commands = _load_migration(monkeypatch)
-    migration.seed(apps, None)
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
     predecessor_hashes = {
         contract.PROVE_PROCEDURE: (
             "769bc782b2455743ce3434798de8978f606c26f3c67919e554ab92bde2028943"
@@ -295,7 +315,10 @@ def test_migration_refuses_drifted_pre_rebase_rows(
         )
 
     with pytest.raises(RuntimeError, match="Refusing .*protected publication"):
-        migration.seed(apps, None)
+        predecessor, _, _, _ = _load_migration(
+            monkeypatch, "0103_adopt_protected_publication_predecessor.py"
+        )
+        predecessor.seed(apps, None)
 
 
 def test_catalog_registry_and_code_gate_are_default_dark() -> None:
