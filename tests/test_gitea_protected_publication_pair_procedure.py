@@ -444,6 +444,23 @@ def test_publication_drift_report_names_fields_without_values(
     assert "sensitive-observed-value" not in message
 
 
+def test_publication_drift_report_does_not_export_unknown_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, reporter, apps, _procedures, commands = _load_publication_drift_report(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    secret = "operator-secret-marker-value"
+    commands.rows[0].custom_field_data = {"credential": secret}
+    with pytest.raises(RuntimeError) as error:
+        reporter.report(apps, None)
+    message = str(error.value)
+    assert "marker_mode=unknown" in message
+    assert secret not in message
+    assert "marker_sha256" not in message
+
+
 @pytest.mark.parametrize("mutation", ["partial", "mixed", "sequence", "extra"])
 def test_publication_drift_report_rejects_unsafe_pair_shapes(
     monkeypatch: pytest.MonkeyPatch, mutation: str

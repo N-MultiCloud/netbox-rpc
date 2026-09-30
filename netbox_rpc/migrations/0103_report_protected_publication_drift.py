@@ -1,8 +1,6 @@
 """Report exact protected-publication row drift before normalization."""
 
-import hashlib
 import importlib
-import json
 
 from django.db import migrations
 
@@ -11,17 +9,6 @@ def _contract():
     return importlib.import_module(
         "netbox_rpc.migrations.0103_normalize_protected_publication_provenance"
     )
-
-
-def _digest(value):
-    payload = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        default=str,
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _field_drift(instance, expected, *, exclude=()):
@@ -72,7 +59,7 @@ def report(apps, schema_editor):
             reports.append(
                 f"{name}:procedure_fields={procedure_drift}:"
                 f"command_fields={command_drift}:sequence={command.sequence}:"
-                f"marker_mode={mode}:marker_sha256={_digest(marker)}"
+                f"marker_mode={mode}"
             )
     if any(present) and not all(present):
         reports.append("pair_state=partial")
