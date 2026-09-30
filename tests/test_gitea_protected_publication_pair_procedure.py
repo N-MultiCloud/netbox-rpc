@@ -302,6 +302,108 @@ def test_migration_adopts_exact_uniform_unmarked_pair(
     )
 
 
+@pytest.mark.parametrize("mode", ["unmarked", "predecessor", "current"])
+def test_migration_normalizes_exact_uniform_provenance(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    predecessor_hashes = {
+        contract.PROVE_PROCEDURE: (
+            "769bc782b2455743ce3434798de8978f606c26f3c67919e554ab92bde2028943"
+        ),
+        contract.PROVISION_PROCEDURE: (
+            "ecc792a599e791babff150fe41a8949f359bd830edd7375fbe96648efaeca1e3"
+        ),
+    }
+    if mode != "current":
+        for command in commands.rows:
+            command.custom_field_data = (
+                {}
+                if mode == "unmarked"
+                else {
+                    "migration": "0103_seed_protected_publication_pair",
+                    "procedure": command.procedure.name,
+                    "contract_sha256": predecessor_hashes[command.procedure.name],
+                }
+            )
+
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    command_identities = [(row.pk, id(row)) for row in commands.rows]
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    normalizer.seed(apps, None)
+
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row)) for row in commands.rows] == command_identities
+    assert all(command.custom_field_data == {} for command in commands.rows)
+
+
+def test_migration_refuses_mixed_normalizable_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, _procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    commands.rows[0].custom_field_data = {}
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    with pytest.raises(RuntimeError, match="Refusing to normalize"):
+        normalizer.seed(apps, None)
+
+
+@pytest.mark.parametrize(
+    "mutation", ["procedure", "command", "extra", "missing", "sequence", "partial"]
+)
+def test_normalizer_refuses_drifted_or_partial_pair(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+    if mutation == "procedure":
+        procedures.rows[0].description = "drift"
+    elif mutation == "command":
+        commands.rows[0].argv = ["backend-orchestrated", "drift"]
+    elif mutation == "extra":
+        duplicate = SimpleNamespace(**vars(commands.rows[0]))
+        duplicate.pk = 99
+        commands.rows.append(duplicate)
+    elif mutation == "missing":
+        commands.rows.pop(0)
+    elif mutation == "sequence":
+        commands.rows[0].sequence = 2
+    else:
+        removed = procedures.rows.pop(0)
+        commands.rows = [row for row in commands.rows if row.procedure is not removed]
+
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    with pytest.raises(RuntimeError, match="Refusing"):
+        normalizer.seed(apps, None)
+
+
+def test_normalizer_reverse_retains_unmarked_and_rejects_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, _procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    normalizer.reverse(apps, None)
+    assert all(command.custom_field_data == {} for command in commands.rows)
+
+    commands.rows[0].custom_field_data = {"unexpected": True}
+    with pytest.raises(RuntimeError, match="Refusing to normalize"):
+        normalizer.reverse(apps, None)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
