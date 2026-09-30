@@ -484,6 +484,75 @@ def test_publication_drift_report_rejects_unsafe_pair_shapes(
         reporter.report(apps, None)
 
 
+def _load_enabled_pair_normalizer(monkeypatch: pytest.MonkeyPatch):
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    repair, _, _, _ = _load_migration(
+        monkeypatch, "0103_disable_enabled_protected_publication_pair.py"
+    )
+    return current, repair, apps, procedures, commands
+
+
+def test_enabled_pair_normalizer_preserves_identity_and_is_reversible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    for procedure in procedures.rows:
+        procedure.enabled = True
+    for command in commands.rows:
+        command.custom_field_data = {}
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    command_identities = [(row.pk, id(row)) for row in commands.rows]
+    repair.seed(apps, None)
+    assert all(row.enabled is False for row in procedures.rows)
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row)) for row in commands.rows] == command_identities
+    repair.reverse(apps, None)
+    assert all(row.enabled is True for row in procedures.rows)
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+
+
+@pytest.mark.parametrize("mutation", ["procedure", "command", "partial", "mixed"])
+def test_enabled_pair_normalizer_rejects_near_misses(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    for procedure in procedures.rows:
+        procedure.enabled = True
+    for command in commands.rows:
+        command.custom_field_data = {}
+    if mutation == "procedure":
+        procedures.rows[0].description = "drift"
+    elif mutation == "command":
+        commands.rows[0].argv = ["backend-orchestrated", "drift"]
+    elif mutation == "partial":
+        removed = procedures.rows.pop()
+        commands.rows = [row for row in commands.rows if row.procedure is not removed]
+    else:
+        procedures.rows[0].enabled = False
+    with pytest.raises(RuntimeError, match="Refusing"):
+        repair.seed(apps, None)
+
+
+def test_enabled_pair_normalizer_allows_absent_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _current, repair, apps, procedures, commands = _load_enabled_pair_normalizer(
+        monkeypatch
+    )
+    repair.seed(apps, None)
+    assert procedures.rows == []
+    assert commands.rows == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
