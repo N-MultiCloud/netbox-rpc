@@ -409,10 +409,21 @@ def seed(apps, schema_editor):
                 and getattr(commands[0], "sequence", None) == 1
                 and _matches(commands[0], predecessor_command_defaults)
             )
+            unmarked_matches = (
+                _matches(procedure, defaults)
+                and len(commands) == 1
+                and getattr(commands[0], "sequence", None) == 1
+                and _matches(commands[0], expected_command)
+                and getattr(commands[0], "custom_field_data", None) == {}
+            )
             mode = (
                 "current"
                 if current_matches
-                else "predecessor" if predecessor_matches else "invalid"
+                else (
+                    "predecessor"
+                    if predecessor_matches
+                    else "unmarked" if unmarked_matches else "invalid"
+                )
             )
             if observed_mode not in {None, mode}:
                 raise RuntimeError(
@@ -422,6 +433,11 @@ def seed(apps, schema_editor):
             if predecessor_matches:
                 commands[0].custom_field_data = command_defaults["custom_field_data"]
                 commands[0].save(update_fields=["custom_field_data"])
+                continue
+            if unmarked_matches:
+                Command.objects.filter(procedure=procedure).update(
+                    custom_field_data=command_defaults["custom_field_data"]
+                )
                 continue
             if not current_matches:
                 raise RuntimeError(
