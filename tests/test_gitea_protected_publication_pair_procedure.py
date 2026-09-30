@@ -82,17 +82,14 @@ def _load_migration(
     monkeypatch.setitem(sys.modules, "django", django)
     monkeypatch.setitem(sys.modules, "django.db", django_db)
     path = ROOT / "netbox_rpc/migrations" / filename
-    spec = importlib.util.spec_from_file_location("publication_pair_migration", path)
+    module_name = f"netbox_rpc.migrations.{path.stem}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if filename == "0104_seed_protected_publication_pair.py":
-        monkeypatch.setitem(
-            sys.modules,
-            "netbox_rpc.migrations.0104_seed_protected_publication_pair",
-            module,
-        )
-    monkeypatch.setattr(module.transaction, "atomic", nullcontext)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    if hasattr(module, "transaction"):
+        monkeypatch.setattr(module.transaction, "atomic", nullcontext)
     procedures = _Manager()
     commands = _Manager(command=True)
 
@@ -402,6 +399,72 @@ def test_normalizer_reverse_retains_unmarked_and_rejects_drift(
     commands.rows[0].custom_field_data = {"unexpected": True}
     with pytest.raises(RuntimeError, match="Refusing to normalize"):
         normalizer.reverse(apps, None)
+
+
+def _load_publication_drift_report(monkeypatch: pytest.MonkeyPatch):
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    reporter, _, _, _ = _load_migration(
+        monkeypatch, "0103_report_protected_publication_drift.py"
+    )
+    return current, reporter, apps, procedures, commands
+
+
+def test_publication_drift_report_allows_absent_and_exact_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, reporter, apps, procedures, commands = _load_publication_drift_report(
+        monkeypatch
+    )
+    reporter.report(apps, None)
+    current.seed(apps, None)
+    identities = [(row.pk, id(row), vars(row).copy()) for row in procedures.rows]
+    command_identities = [(row.pk, id(row), vars(row).copy()) for row in commands.rows]
+    reporter.report(apps, None)
+    assert [(row.pk, id(row), vars(row).copy()) for row in procedures.rows] == identities
+    assert [(row.pk, id(row), vars(row).copy()) for row in commands.rows] == (
+        command_identities
+    )
+
+
+def test_publication_drift_report_names_fields_without_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, reporter, apps, procedures, _commands = _load_publication_drift_report(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    procedures.rows[0].description = "sensitive-observed-value"
+    with pytest.raises(RuntimeError) as error:
+        reporter.report(apps, None)
+    message = str(error.value)
+    assert "procedure_fields=['description']" in message
+    assert "sensitive-observed-value" not in message
+
+
+@pytest.mark.parametrize("mutation", ["partial", "mixed", "sequence", "extra"])
+def test_publication_drift_report_rejects_unsafe_pair_shapes(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    current, reporter, apps, procedures, commands = _load_publication_drift_report(
+        monkeypatch
+    )
+    current.seed(apps, None)
+    if mutation == "partial":
+        removed = procedures.rows.pop()
+        commands.rows = [row for row in commands.rows if row.procedure is not removed]
+    elif mutation == "mixed":
+        commands.rows[0].custom_field_data = {}
+    elif mutation == "sequence":
+        commands.rows[0].sequence = 2
+    else:
+        duplicate = SimpleNamespace(**vars(commands.rows[0]))
+        duplicate.pk = 99
+        commands.rows.append(duplicate)
+    with pytest.raises(RuntimeError, match="Protected publication drift"):
+        reporter.report(apps, None)
 
 
 @pytest.mark.parametrize(
