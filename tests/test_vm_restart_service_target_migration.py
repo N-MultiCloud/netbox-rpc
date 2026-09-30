@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 MIGRATION_MODULE = "netbox_rpc.migrations.0068_widen_ubuntu_restart_service_targets"
+MERGE_MIGRATION_MODULE = "netbox_rpc.migrations.0101_widen_ubuntu_restart_service_targets"
 PROCEDURE_NAME = "os.linux.ubuntu.24.restart_service"
 ORIGINAL_TARGET_MODELS = ["dcim.device"]
 WIDENED_TARGET_MODELS = ["dcim.device", "virtualization.virtualmachine"]
@@ -81,6 +82,21 @@ def test_migration_depends_on_current_leaf(migration) -> None:
     assert migration.Migration.dependencies == [
         ("netbox_rpc", "0067_merge_huawei_bgp_and_upgrade_result_limits")
     ]
+
+
+def test_merge_migration_preserves_applied_0068_and_converges_graph(migration) -> None:
+    assert migration.Migration.dependencies == [
+        ("netbox_rpc", "0067_merge_huawei_bgp_and_upgrade_result_limits")
+    ]
+    sys.modules.pop(MERGE_MIGRATION_MODULE, None)
+    merge_migration = importlib.import_module(MERGE_MIGRATION_MODULE)
+
+    assert merge_migration.Migration.dependencies == [
+        ("netbox_rpc", "0100_extend_openbao_import_timeout_budget"),
+        ("netbox_rpc", "0068_widen_ubuntu_restart_service_targets"),
+    ]
+    assert merge_migration.Migration.operations == []
+    sys.modules.pop(MERGE_MIGRATION_MODULE, None)
 
 
 def test_constants_match_widened_migration_state() -> None:

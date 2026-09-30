@@ -512,6 +512,9 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         # with, so it carries the same fail-closed capability check as the
         # other credential-bearing procedures.
         constants.OPENBAO_1_PROVISION_NETBOX_APPROLE,
+        # OCI pull is a protected operation and therefore fails closed when
+        # the selected backend does not advertise its exact handler contract.
+        constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows

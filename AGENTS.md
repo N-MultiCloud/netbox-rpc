@@ -4,8 +4,8 @@
 
 - Use `os.linux.proxmox.oci_registry_pull` for the public
   `emersonfelipesp/netbox-proxbox` appliance only.
-- Keep it `effect="write"`, approval-required, AsyncSSH-pinned, and without a
-  transport fallback chain.
+- Keep it `effect="write"`, protected by distinct-requester two-person approval,
+  AsyncSSH-pinned, and without a transport fallback chain.
 - Require `proxmox_endpoint_id` to equal the execution target object. Never
   accept caller-provided credentials, command text, argv, registry credentials,
   arbitrary repositories, digest-only references, paths, or shell fragments.

@@ -19,6 +19,7 @@ from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
+from .. import proxmox_oci_pull_contract
 from .. import release_marker_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
@@ -37,6 +38,7 @@ from ..constants import (
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_USER_CI_RUNNER_RECOVER,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
+    LINUX_PROXMOX_OCI_REGISTRY_PULL,
     NETBOX_OPENBAO_IMPORT_APPLY,
     NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
@@ -90,6 +92,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         *GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
         *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
         *NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
+        LINUX_PROXMOX_OCI_REGISTRY_PULL,
     }
 )
 _OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
@@ -146,6 +149,8 @@ _RELEASE_MARKER_RECONCILE_APPROVAL_REASON = (
 _RELEASE_MARKER_RECONCILE_REJECTION_REASON = (
     "Rejected audited release-marker reconcile."
 )
+_PROXMOX_OCI_PULL_APPROVAL_REASON = "Approved audited Proxmox OCI registry pull."
+_PROXMOX_OCI_PULL_REJECTION_REASON = "Rejected audited Proxmox OCI registry pull."
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -160,6 +165,7 @@ _PROTECTED_APPROVAL_REASON = {
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: (
         _RELEASE_MARKER_RECONCILE_APPROVAL_REASON
     ),
+    LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -174,6 +180,7 @@ _PROTECTED_REJECTION_REASON = {
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: (
         _RELEASE_MARKER_RECONCILE_REJECTION_REASON
     ),
+    LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_REJECTION_REASON,
 }
 
 _PROTECTED_CONTRACTS = {
@@ -187,6 +194,7 @@ _PROTECTED_CONTRACTS = {
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: akvorado_contract,
     NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
+    LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -199,6 +207,7 @@ _PROTECTED_LABELS = {
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: "Debian 13 Akvorado bootstrap",
     NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: "Release-marker reconcile",
+    LINUX_PROXMOX_OCI_REGISTRY_PULL: "Proxmox OCI registry pull",
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {

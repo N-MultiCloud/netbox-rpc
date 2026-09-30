@@ -118,6 +118,9 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         "os.linux.debian.13.preflight_influxdb3_core",
         "os.linux.debian.13.install_influxdb3_core",
     }
+    constants.LINUX_PROXMOX_OCI_REGISTRY_PULL = (
+        "os.linux.proxmox.oci_registry_pull"
+    )
     constants.NETBOX_STAGING_ROTATE_BACKEND_TOKEN = (
         "service.netbox.staging.rotate_backend_token"
     )
@@ -176,6 +179,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
             constants.GITEA_USER_CI_RUNNER_RECOVER,
             constants.GITEA_ORG_CI_RUNNER_DIAGNOSE,
             constants.GITEA_ORG_CI_RUNNER_RECOVER,
+            constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
         }
     )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
@@ -189,6 +193,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
+        constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
@@ -1229,6 +1234,7 @@ def test_gitea_org_runner_recovery_admission_rejects_drift_before_save(
         "service.netbox.staging.deploy_dns_pair",
         "os.linux.debian.13.preflight_akvorado",
         "os.linux.debian.13.install_akvorado",
+        "os.linux.proxmox.oci_registry_pull",
     ],
 )
 def test_protected_procedures_require_explicit_compatible_backend_capability(
@@ -3793,3 +3799,218 @@ def test_openbao_import_apply_reject_uses_fixed_reason_no_operator_note(
             "reason": "Rejected audited netbox-openbao credential import.",
         }
     ]
+
+
+def test_proxmox_oci_pull_creation_enters_pending_approval(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure_name = "os.linux.proxmox.oci_registry_pull"
+    procedure = SimpleNamespace(
+        pk=153,
+        name=procedure_name,
+        handler_id="os.linux_proxmox.oci_registry_pull",
+        enabled=True,
+        approval_required=True,
+        params_schema={},
+        timeout_seconds=3720,
+    )
+    params = {
+        "proxmox_endpoint_id": 11,
+        "node": "vpve",
+        "storage": "local",
+        "reference": "emersonfelipesp/netbox-proxbox:test",
+    }
+    execution = SimpleNamespace(pk=550, procedure=procedure, params=params)
+
+    class Serializer:
+        validated_data = {
+            "procedure": procedure,
+            "params": params,
+            "assigned_object_type": "netbox_proxbox.proxmoxendpoint",
+            "assigned_object_id": 11,
+        }
+        initial_data = {
+            "procedure_id": 153,
+            "assigned_object_type": "netbox_proxbox.proxmoxendpoint",
+            "assigned_object_id": 11,
+            "params": params,
+        }
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **kwargs):
+            execution.requested_by_id = kwargs["requested_by"].pk
+            execution.backend_id = kwargs["backend"]
+            return execution
+
+    transitions: list[tuple[object, ...]] = []
+
+    class Aggregate:
+        def __init__(self, candidate):
+            assert candidate is execution
+
+        def request(self, *, requested_by_id):
+            transitions.append(("request", requested_by_id))
+
+        def request_approval(self, *, snapshot_hash, requested_by_id):
+            transitions.append(("request_approval", snapshot_hash, requested_by_id))
+
+        def queue(self):
+            pytest.fail("OCI pull must not queue before distinct approval")
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY": "_timeout_seconds_snapshot"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    monkeypatch.setattr(
+        command_handlers, "_require_enabled_and_authoritative_backend", lambda user: 1
+    )
+    monkeypatch.setattr(
+        command_handlers, "_require_protected_procedure_policy", lambda candidate: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    target_checks: list[int] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_viewable_assigned_object",
+        lambda validated, *args: target_checks.append(validated["assigned_object_id"]),
+    )
+    monkeypatch.setattr(
+        command_handlers, "_verify_backend_capability", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "normalize_execution_params",
+        lambda candidate: {"command_fingerprint": {"handler_id": procedure.handler_id}},
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_create_approval_request",
+        lambda *args, **kwargs: SimpleNamespace(payload_hash="d" * 64),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda *args, **kwargs: pytest.fail("pending OCI pull must not enqueue"),
+    )
+    requester = SimpleNamespace(pk=9, has_perm=lambda permission: True)
+
+    assert command_handlers.create_execution(serializer=Serializer(), user=requester) is execution
+    assert target_checks == [11]
+    assert transitions == [
+        ("request", requester.pk),
+        ("request_approval", "d" * 64, requester.pk),
+    ]
+
+
+def test_proxmox_oci_pull_approval_queues_with_distinct_actor_identity(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=153,
+        name="os.linux.proxmox.oci_registry_pull",
+        handler_id="os.linux_proxmox.oci_registry_pull",
+        timeout_seconds=3720,
+    )
+    locked = SimpleNamespace(
+        pk=551,
+        procedure=procedure,
+        backend_id=1,
+        params={},
+        refresh_from_db=lambda: None,
+    )
+    execution = SimpleNamespace(pk=551, procedure=procedure, procedure_id=153)
+    monkeypatch.setattr(
+        command_handlers, "_require_approval_authorization", lambda *args: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers, "_require_protected_procedure_policy", lambda *args: None
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_resolve_validated_protected_backend_target",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_approved_backend_target_before_io",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        command_handlers, "_verify_backend_capability", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(command_handlers, "normalize_execution_params", lambda value: {})
+    monkeypatch.setattr(
+        command_handlers,
+        "_approval_protected_payload",
+        lambda *args, **kwargs: {"procedure_id": 153},
+    )
+    approvals: list[dict[str, object]] = []
+
+    class Aggregate:
+        def __init__(self, candidate):
+            assert candidate is locked
+
+        def approve(self, **kwargs):
+            approvals.append(kwargs)
+
+    class Manager:
+        def select_for_update(self, **kwargs):
+            return self
+
+        def select_related(self, *args):
+            return self
+
+        def get(self, *, pk):
+            assert pk == 551
+            return locked
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = SimpleNamespace(
+        objects=Manager(),
+        TIMEOUT_SECONDS_SNAPSHOT_PARAM_KEY="_timeout_seconds_snapshot",
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    enqueued: list[object] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "_enqueue_execution_job",
+        lambda candidate, **kwargs: enqueued.append(candidate),
+    )
+    approver = SimpleNamespace(pk=2, has_perm=lambda permission: True)
+
+    assert command_handlers.approve_execution(execution, approver, reason="") is locked
+    assert approvals == [
+        {
+            "approver_id": 2,
+            "current_protected": {"procedure_id": 153},
+            "reason": "Approved audited Proxmox OCI registry pull.",
+            "queue_after_approval": True,
+        }
+    ]
+    assert enqueued == [locked]
+    assert command_handlers._requires_signed_dispatch(locked) is True

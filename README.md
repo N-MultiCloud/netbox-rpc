@@ -42,7 +42,7 @@ adapter. The `nms` extra installs `netbox-nms>=0.1.9,<0.2.0`.
 
 The procedure catalog is intentionally narrow:
 
-- `os.linux.proxmox.oci_registry_pull` — approval-gated import of an explicitly
+- `os.linux.proxmox.oci_registry_pull` — protected two-person import of an explicitly
   tagged public `emersonfelipesp/netbox-proxbox` appliance into selected
   Proxmox node storage. The endpoint ID must match the audited target object;
   normalization resolves its approved SSH binding and pins AsyncSSH without
