@@ -220,7 +220,6 @@ def test_migration_adopts_exact_pre_rebase_provenance(
 ) -> None:
     migration, apps, procedures, commands = _load_migration(monkeypatch)
     migration.seed(apps, None)
-    procedure_by_name = {row.name: row for row in procedures.rows}
     predecessor_markers = {
         contract.PROVE_PROCEDURE: {
             "migration": "0103_seed_protected_publication_pair",
@@ -252,6 +251,35 @@ def test_migration_adopts_exact_pre_rebase_provenance(
         assert command.custom_field_data["migration"] == (
             "0104_seed_protected_publication_pair"
         )
+
+
+def test_migration_adopts_only_exact_unmarked_preexisting_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration, apps, procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    expected_markers = [deepcopy(row.custom_field_data) for row in commands.rows]
+    for command in commands.rows:
+        command.custom_field_data = {}
+
+    migration.seed(apps, None)
+
+    assert len(procedures.rows) == len(commands.rows) == 2
+    assert [row.custom_field_data for row in commands.rows] == expected_markers
+
+
+def test_migration_refuses_unmarked_row_with_contract_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration, apps, _procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    commands.rows[0].custom_field_data = {}
+    commands.rows[0].argv = ["backend-orchestrated", "different-operation"]
+
+    with pytest.raises(
+        RuntimeError, match="Refusing to adopt pre-existing protected publication row"
+    ):
+        migration.seed(apps, None)
 
 
 @pytest.mark.parametrize(
@@ -295,6 +323,51 @@ def test_migration_refuses_drifted_pre_rebase_rows(
         )
 
     with pytest.raises(RuntimeError, match="Refusing .*protected publication"):
+        migration.seed(apps, None)
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        ("current", "predecessor"),
+        ("predecessor", "current"),
+        ("current", "unmarked"),
+        ("unmarked", "current"),
+        ("predecessor", "unmarked"),
+        ("unmarked", "predecessor"),
+    ],
+)
+def test_migration_refuses_individually_valid_mixed_pair_modes(
+    monkeypatch: pytest.MonkeyPatch, modes: tuple[str, str]
+) -> None:
+    migration, apps, _procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    current_markers = [deepcopy(row.custom_field_data) for row in commands.rows]
+    predecessor_hashes = {
+        contract.PROVE_PROCEDURE: (
+            "769bc782b2455743ce3434798de8978f606c26f3c67919e554ab92bde2028943"
+        ),
+        contract.PROVISION_PROCEDURE: (
+            "ecc792a599e791babff150fe41a8949f359bd830edd7375fbe96648efaeca1e3"
+        ),
+    }
+    for command, current_marker, mode in zip(
+        commands.rows, current_markers, modes, strict=True
+    ):
+        if mode == "current":
+            command.custom_field_data = current_marker
+        elif mode == "predecessor":
+            command.custom_field_data = {
+                "migration": "0103_seed_protected_publication_pair",
+                "procedure": command.procedure.name,
+                "contract_sha256": predecessor_hashes[command.procedure.name],
+            }
+        else:
+            command.custom_field_data = {}
+
+    with pytest.raises(
+        RuntimeError, match="Refusing mixed protected publication predecessor state"
+    ):
         migration.seed(apps, None)
 
 
