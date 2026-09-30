@@ -404,6 +404,103 @@ def test_normalizer_reverse_retains_unmarked_and_rejects_drift(
         normalizer.reverse(apps, None)
 
 
+def test_drift_diagnostic_reports_only_bounded_field_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    procedures.rows[0].description = "private drift detail"
+    commands.rows[0].argv = ["backend-orchestrated", "private drift detail"]
+    commands.rows[0].custom_field_data = {
+        "migration": "legacy",
+        "procedure": commands.rows[0].procedure.name,
+        "contract_sha256": "a" * 64,
+        "private": "must not leak",
+    }
+
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "netbox_rpc.migrations.0103_normalize_protected_publication_provenance",
+        normalizer,
+    )
+    diagnostic, _, _, _ = _load_migration(
+        monkeypatch, "0103_report_protected_publication_drift.py"
+    )
+    with pytest.raises(RuntimeError) as caught:
+        diagnostic.diagnose(apps, None)
+
+    message = str(caught.value)
+    assert "description" in message
+    assert "argv" in message
+    assert "contract_sha256" in message
+    assert "4+" in message
+    assert "private drift detail" not in message
+    assert "must not leak" not in message
+
+
+def test_drift_diagnostic_bounds_adversarial_recognized_marker_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, _procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    secret = "secret-" * 10_000
+    commands.rows[0].custom_field_data = {
+        "migration": secret,
+        "procedure": {"nested": secret},
+        "contract_sha256": secret,
+        **{f"oversized-{index}-{secret}": index for index in range(100)},
+    }
+
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "netbox_rpc.migrations.0103_normalize_protected_publication_provenance",
+        normalizer,
+    )
+    diagnostic, _, _, _ = _load_migration(
+        monkeypatch, "0103_report_protected_publication_drift.py"
+    )
+    with pytest.raises(RuntimeError) as caught:
+        diagnostic.diagnose(apps, None)
+
+    message = str(caught.value)
+    assert "migration_mode': 'other'" in message
+    assert "procedure_matches': False" in message
+    assert "contract_sha256': None" in message
+    assert "key_count': '4+'" in message
+    assert secret not in message
+    assert len(message) < 2_000
+
+
+@pytest.mark.parametrize("mode", ["unmarked", "current"])
+def test_drift_diagnostic_accepts_known_exact_pair(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    current, apps, _procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    if mode == "unmarked":
+        for command in commands.rows:
+            command.custom_field_data = {}
+
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "netbox_rpc.migrations.0103_normalize_protected_publication_provenance",
+        normalizer,
+    )
+    diagnostic, _, _, _ = _load_migration(
+        monkeypatch, "0103_report_protected_publication_drift.py"
+    )
+    diagnostic.diagnose(apps, None)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
