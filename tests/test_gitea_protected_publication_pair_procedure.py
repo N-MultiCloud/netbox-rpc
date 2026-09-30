@@ -59,6 +59,7 @@ class _Manager:
 
     def create(self, **values: object):
         row = SimpleNamespace(pk=len(self.rows) + 1, **values)
+        row.save = lambda **_kwargs: None
         self.rows.append(row)
         return row
 
@@ -209,8 +210,91 @@ def test_migration_refuses_preexisting_row_with_spoofed_provenance(
         "contract_sha256": "0" * 64,
     }
     with pytest.raises(
-        RuntimeError, match="Refusing to adopt pre-existing protected publication row"
+        RuntimeError, match="Refusing .*protected publication"
     ):
+        migration.seed(apps, None)
+
+
+def test_migration_adopts_exact_pre_rebase_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration, apps, procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    procedure_by_name = {row.name: row for row in procedures.rows}
+    predecessor_markers = {
+        contract.PROVE_PROCEDURE: {
+            "migration": "0103_seed_protected_publication_pair",
+            "procedure": contract.PROVE_PROCEDURE,
+            "contract_sha256": (
+                "769bc782b2455743ce3434798de8978f606c26f3c67919e554ab92bde2028943"
+            ),
+        },
+        contract.PROVISION_PROCEDURE: {
+            "migration": "0103_seed_protected_publication_pair",
+            "procedure": contract.PROVISION_PROCEDURE,
+            "contract_sha256": (
+                "ecc792a599e791babff150fe41a8949f359bd830edd7375fbe96648efaeca1e3"
+            ),
+        },
+    }
+    for command in commands.rows:
+        name = command.procedure.name
+        command.custom_field_data = predecessor_markers[name]
+
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    command_identities = [(row.pk, id(row)) for row in commands.rows]
+    migration.seed(apps, None)
+
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row)) for row in commands.rows] == command_identities
+    assert len(procedures.rows) == len(commands.rows) == 2
+    for command in commands.rows:
+        assert command.custom_field_data["migration"] == (
+            "0104_seed_protected_publication_pair"
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["procedure", "command", "extra", "missing", "sequence", "mixed"],
+)
+def test_migration_refuses_drifted_pre_rebase_rows(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    migration, apps, procedures, commands = _load_migration(monkeypatch)
+    migration.seed(apps, None)
+    predecessor_hashes = {
+        contract.PROVE_PROCEDURE: (
+            "769bc782b2455743ce3434798de8978f606c26f3c67919e554ab92bde2028943"
+        ),
+        contract.PROVISION_PROCEDURE: (
+            "ecc792a599e791babff150fe41a8949f359bd830edd7375fbe96648efaeca1e3"
+        ),
+    }
+    for command in commands.rows:
+        command.custom_field_data = {
+            "migration": "0103_seed_protected_publication_pair",
+            "procedure": command.procedure.name,
+            "contract_sha256": predecessor_hashes[command.procedure.name],
+        }
+    if mutation == "procedure":
+        procedures.rows[0].description = "drift"
+    elif mutation == "command":
+        commands.rows[0].argv = ["backend-orchestrated", "drift"]
+    elif mutation == "extra":
+        duplicate = SimpleNamespace(**vars(commands.rows[0]))
+        duplicate.pk = 99
+        commands.rows.append(duplicate)
+    elif mutation == "missing":
+        commands.rows.pop(0)
+    elif mutation == "sequence":
+        commands.rows[0].sequence = 2
+    else:
+        commands.rows[0].custom_field_data["migration"] = (
+            "0104_seed_protected_publication_pair"
+        )
+
+    with pytest.raises(RuntimeError, match="Refusing .*protected publication"):
         migration.seed(apps, None)
 
 
