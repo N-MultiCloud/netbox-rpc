@@ -461,6 +461,65 @@ def test_publication_drift_report_does_not_export_unknown_marker(
     assert "marker_sha256" not in message
 
 
+def test_enabled_unmarked_pair_is_adopted_without_identity_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for procedure in procedures.rows:
+        procedure.enabled = True
+    for command in commands.rows:
+        command.custom_field_data = {}
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    command_identities = [(row.pk, id(row), vars(row).copy()) for row in commands.rows]
+
+    _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    adopter, _, _, _ = _load_migration(
+        monkeypatch, "0103_adopt_enabled_unmarked_publication_pair.py"
+    )
+    adopter.seed(apps, None)
+
+    assert all(procedure.enabled is False for procedure in procedures.rows)
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row), vars(row).copy()) for row in commands.rows] == (
+        command_identities
+    )
+    adopter.reverse(apps, None)
+    assert all(procedure.enabled is True for procedure in procedures.rows)
+
+
+@pytest.mark.parametrize("mutation", ["procedure", "command", "marker", "partial"])
+def test_enabled_unmarked_adoption_rejects_other_drift(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for procedure in procedures.rows:
+        procedure.enabled = True
+    for command in commands.rows:
+        command.custom_field_data = {}
+    if mutation == "procedure":
+        procedures.rows[0].description = "drift"
+    elif mutation == "command":
+        commands.rows[0].argv = ["backend-orchestrated", "drift"]
+    elif mutation == "marker":
+        commands.rows[0].custom_field_data = {"unexpected": True}
+    else:
+        removed = procedures.rows.pop()
+        commands.rows = [row for row in commands.rows if row.procedure is not removed]
+
+    _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    adopter, _, _, _ = _load_migration(
+        monkeypatch, "0103_adopt_enabled_unmarked_publication_pair.py"
+    )
+    with pytest.raises(RuntimeError, match="Refusing"):
+        adopter.seed(apps, None)
+
+
 @pytest.mark.parametrize("mutation", ["partial", "mixed", "sequence", "extra"])
 def test_publication_drift_report_rejects_unsafe_pair_shapes(
     monkeypatch: pytest.MonkeyPatch, mutation: str
