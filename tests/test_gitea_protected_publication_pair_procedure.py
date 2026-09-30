@@ -268,7 +268,7 @@ def test_migration_adopts_exact_pre_rebase_provenance(
     assert [(row.pk, id(row)) for row in procedures.rows] == identities
     assert [(row.pk, id(row)) for row in commands.rows] == command_identities
     for command in commands.rows:
-        assert command.custom_field_data == {}
+        assert command.custom_field_data == predecessor_markers[command.procedure.name]
 
     predecessor.seed(apps, None)
     current.seed(apps, None)
@@ -284,6 +284,10 @@ def test_migration_adopts_exact_uniform_unmarked_pair(
 
     identities = [(row.pk, id(row)) for row in procedures.rows]
     command_identities = [(row.pk, id(row)) for row in commands.rows]
+    unmarked, _, _, _ = _load_migration(
+        monkeypatch, "0103_adopt_unmarked_protected_publication_pair.py"
+    )
+    unmarked.seed(apps, None)
     predecessor, _, _, _ = _load_migration(
         monkeypatch, "0103_adopt_protected_publication_predecessor.py"
     )
@@ -349,10 +353,13 @@ def test_migration_refuses_drifted_pre_rebase_rows(
         commands.rows[0].custom_field_data = {}
 
     with pytest.raises(RuntimeError, match="Refusing .*protected publication"):
-        predecessor, _, _, _ = _load_migration(
-            monkeypatch, "0103_adopt_protected_publication_predecessor.py"
+        migration_name = (
+            "0103_adopt_unmarked_protected_publication_pair.py"
+            if mutation == "mixed_legacy"
+            else "0103_adopt_protected_publication_predecessor.py"
         )
-        predecessor.seed(apps, None)
+        migration, _, _, _ = _load_migration(monkeypatch, migration_name)
+        migration.seed(apps, None)
 
 
 def test_catalog_registry_and_code_gate_are_default_dark() -> None:
