@@ -354,6 +354,57 @@ def test_migration_refuses_mixed_normalizable_provenance(
 
 
 @pytest.mark.parametrize(
+    "mutation", ["procedure", "command", "extra", "missing", "sequence", "partial"]
+)
+def test_normalizer_refuses_drifted_or_partial_pair(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+    if mutation == "procedure":
+        procedures.rows[0].description = "drift"
+    elif mutation == "command":
+        commands.rows[0].argv = ["backend-orchestrated", "drift"]
+    elif mutation == "extra":
+        duplicate = SimpleNamespace(**vars(commands.rows[0]))
+        duplicate.pk = 99
+        commands.rows.append(duplicate)
+    elif mutation == "missing":
+        commands.rows.pop(0)
+    elif mutation == "sequence":
+        commands.rows[0].sequence = 2
+    else:
+        removed = procedures.rows.pop(0)
+        commands.rows = [row for row in commands.rows if row.procedure is not removed]
+
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    with pytest.raises(RuntimeError, match="Refusing"):
+        normalizer.seed(apps, None)
+
+
+def test_normalizer_reverse_retains_unmarked_and_rejects_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, _procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+    normalizer, _, _, _ = _load_migration(
+        monkeypatch, "0103_normalize_protected_publication_provenance.py"
+    )
+    normalizer.reverse(apps, None)
+    assert all(command.custom_field_data == {} for command in commands.rows)
+
+    commands.rows[0].custom_field_data = {"unexpected": True}
+    with pytest.raises(RuntimeError, match="Refusing to normalize"):
+        normalizer.reverse(apps, None)
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "procedure",
