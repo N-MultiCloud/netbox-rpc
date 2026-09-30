@@ -268,15 +268,47 @@ def test_migration_adopts_exact_pre_rebase_provenance(
     assert [(row.pk, id(row)) for row in procedures.rows] == identities
     assert [(row.pk, id(row)) for row in commands.rows] == command_identities
     for command in commands.rows:
-        assert command.custom_field_data == predecessor_markers[command.procedure.name]
+        assert command.custom_field_data == {}
 
     predecessor.seed(apps, None)
     current.seed(apps, None)
 
 
+def test_migration_adopts_exact_uniform_unmarked_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, apps, procedures, commands = _load_migration(monkeypatch)
+    current.seed(apps, None)
+    for command in commands.rows:
+        command.custom_field_data = {}
+
+    identities = [(row.pk, id(row)) for row in procedures.rows]
+    command_identities = [(row.pk, id(row)) for row in commands.rows]
+    predecessor, _, _, _ = _load_migration(
+        monkeypatch, "0103_adopt_protected_publication_predecessor.py"
+    )
+    predecessor.seed(apps, None)
+
+    assert [(row.pk, id(row)) for row in procedures.rows] == identities
+    assert [(row.pk, id(row)) for row in commands.rows] == command_identities
+    assert all(
+        command.custom_field_data["migration"]
+        == "0104_seed_protected_publication_pair"
+        for command in commands.rows
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
-    ["procedure", "command", "extra", "missing", "sequence", "mixed"],
+    [
+        "procedure",
+        "command",
+        "extra",
+        "missing",
+        "sequence",
+        "mixed",
+        "mixed_legacy",
+    ],
 )
 def test_migration_refuses_drifted_pre_rebase_rows(
     monkeypatch: pytest.MonkeyPatch, mutation: str
@@ -309,10 +341,12 @@ def test_migration_refuses_drifted_pre_rebase_rows(
         commands.rows.pop(0)
     elif mutation == "sequence":
         commands.rows[0].sequence = 2
-    else:
+    elif mutation == "mixed":
         commands.rows[0].custom_field_data["migration"] = (
             "0104_seed_protected_publication_pair"
         )
+    else:
+        commands.rows[0].custom_field_data = {}
 
     with pytest.raises(RuntimeError, match="Refusing .*protected publication"):
         predecessor, _, _, _ = _load_migration(

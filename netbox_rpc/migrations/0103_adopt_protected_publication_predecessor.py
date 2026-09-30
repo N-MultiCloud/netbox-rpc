@@ -43,12 +43,13 @@ def _rows(contract):
     )
 
 
-def _validate_pair(apps, provenance):
+def _validate_pair(apps, provenances):
     contract = _contract()
     Procedure = apps.get_model("netbox_rpc", "RPCProcedure")
     Command = apps.get_model("netbox_rpc", "RPCProcedureCommand")
     validated = []
     present = []
+    observed_mode = None
     for name, defaults, operation in _rows(contract):
         procedure = Procedure.objects.filter(name=name).first()
         present.append(procedure is not None)
@@ -56,16 +57,29 @@ def _validate_pair(apps, provenance):
             continue
         expected_command = contract._command(operation)
         commands = list(Command.objects.filter(procedure=procedure).order_by("sequence"))
-        expected = {**expected_command, "custom_field_data": provenance(name, contract, expected_command)}
+        candidates = provenances(name, contract, expected_command)
+        mode = next(
+            (
+                candidate_mode
+                for candidate_mode, marker in candidates.items()
+                if contract._matches(
+                    commands[0],
+                    {**expected_command, "custom_field_data": marker},
+                )
+            ),
+            None,
+        ) if len(commands) == 1 else None
         if (
             not contract._matches(procedure, defaults)
             or len(commands) != 1
             or getattr(commands[0], "sequence", None) != 1
-            or not contract._matches(commands[0], expected)
+            or mode is None
+            or observed_mode not in {None, mode}
         ):
             raise RuntimeError(
                 f"Refusing to adopt pre-existing protected publication row {name}"
             )
+        observed_mode = mode
         validated.append((commands[0], name, defaults, expected_command))
     if any(present) and not all(present):
         raise RuntimeError("Refusing partial protected publication predecessor state")
@@ -77,7 +91,10 @@ def seed(apps, schema_editor):
     contract = _contract()
 
     def predecessor(name, _contract, _command):
-        return _marker(name, _PREDECESSOR_HASHES[name])
+        return {
+            "predecessor": _marker(name, _PREDECESSOR_HASHES[name]),
+            "unmarked": {},
+        }
 
     with transaction.atomic():
         validated = _validate_pair(apps, predecessor)
@@ -89,7 +106,7 @@ def seed(apps, schema_editor):
 
 
 def reverse(apps, schema_editor):
-    """Restore predecessor provenance only for the exact current pair."""
+    """Restore unmarked legacy provenance only for the exact current pair."""
 
     def current(name, contract, command):
         defaults = (
@@ -97,12 +114,12 @@ def reverse(apps, schema_editor):
             if name == contract._PROVE
             else contract._PROVISION_DEFAULTS
         )
-        return contract._provenance_marker(name, defaults, command)
+        return {"current": contract._provenance_marker(name, defaults, command)}
 
     with transaction.atomic():
         validated = _validate_pair(apps, current)
-        for command, name, _defaults, _expected_command in validated:
-            command.custom_field_data = _marker(name, _PREDECESSOR_HASHES[name])
+        for command, _name, _defaults, _expected_command in validated:
+            command.custom_field_data = {}
             command.save(update_fields=["custom_field_data"])
 
 
