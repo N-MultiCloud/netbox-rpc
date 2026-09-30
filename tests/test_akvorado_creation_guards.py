@@ -141,6 +141,16 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
     }
+    constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE = (
+        "service.nmulticloud.deploy.diagnose_proxbox_api_images"
+    )
+    constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD = (
+        "service.nmulticloud.deploy.preload_proxbox_api_images"
+    )
+    constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PROCEDURE_NAMES = {
+        constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+        constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
+    }
     constants.GITEA_PRODUCTION_UPGRADE_1_27_1 = (
         "service.gitea.production.upgrade_1_27_1"
     )
@@ -180,6 +190,8 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
             constants.GITEA_ORG_CI_RUNNER_DIAGNOSE,
             constants.GITEA_ORG_CI_RUNNER_RECOVER,
             constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+            constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+            constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
         }
     )
     constants.PROTECTED_APPROVAL_PROCEDURE_NAMES = {
@@ -194,6 +206,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {

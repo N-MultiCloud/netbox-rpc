@@ -178,6 +178,27 @@ NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Fixed deploy-host diagnosis and approval-gated preload for the immutable
+# external image inventory bound to one verified proxbox-api release manifest.
+NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE = (
+    "service.nmulticloud.deploy.diagnose_proxbox_api_images"
+)
+NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE_HANDLER = (
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE
+)
+NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD = (
+    "service.nmulticloud.deploy.preload_proxbox_api_images"
+)
+NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD_HANDLER = (
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD
+)
+NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PROCEDURE_NAMES = frozenset(
+    {
+        NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+        NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
+    }
+)
+
 # Disabled, approval-bound production Gitea binary upgrade. The exact VM,
 # versions, official artifact digest, and target-owned credential policy are
 # server-normalized and signed; the caller supplies no params.
@@ -431,6 +452,8 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_ORG_CI_RUNNER_RECOVER,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+        NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
     }
 )
 PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
@@ -447,6 +470,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         NETBOX_OPENBAO_IMPORT_APPLY,
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
     }
 )
 

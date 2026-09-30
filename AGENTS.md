@@ -15,6 +15,29 @@
   endpoint, node, storage, image reference, and optional filename to the
   operator before execution.
 
+## Proxbox API offline build-image recovery
+
+- Use `service.nmulticloud.deploy.diagnose_proxbox_api_images` to inspect and
+  `service.nmulticloud.deploy.preload_proxbox_api_images` to preload the exact
+  digest-pinned external image inventory for one verified proxbox-api release.
+- Both procedures require only a lowercase 64-hex `manifest_sha256`; never
+  accept a caller-selected image, registry, host, path, credential, tag, or
+  command. The execution target must equal the `dcim.device` selected by the
+  `nmulticloud-deploy-host` `RPCTargetBinding`.
+- Keep diagnosis `effect="read"`, timeout 120 seconds, and no approval. Keep
+  preload `effect="write"`, timeout 2100 seconds, two-person approval, a signed
+  one-time dispatch lease, and the backend's 1950-second route / 1920-second
+  SSH budgets. Both use pinned AsyncSSH with no fallback.
+- Keep the catalog, normalizer, representative fixed argv, backend schemas,
+  semantic capability extension, and capability hashes byte-for-byte aligned.
+  The only commands are `diagnose-proxbox-api-images <manifest_sha256>` and
+  `preload-proxbox-api-images <manifest_sha256>` through the reviewed forced
+  command gateway.
+- Never approve or dispatch preload autonomously. Present the exact deploy
+  target and manifest digest to the operator. A timeout, connection loss, or
+  malformed post-start preload result is indeterminate and must not be retried
+  automatically; diagnose current image state first.
+
 ## Execution-bound credential authority
 
 Named metadata-only `RPCExecution.credential_references` and the read-only

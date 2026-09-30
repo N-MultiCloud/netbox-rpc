@@ -53,6 +53,8 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.actions_runner.diagnose_org_ci_runner",
         "service.gitea.actions_runner.recover_org_ci_runner",
         "service.netbox.staging.deploy_dns_pair",
+        "service.nmulticloud.deploy.diagnose_proxbox_api_images",
+        "service.nmulticloud.deploy.preload_proxbox_api_images",
     }
 )
 
@@ -154,6 +156,9 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_upgrade_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as upgrade_contract,
         )
+        from .proxbox_offline_images_contract import (
+            SEMANTIC_CONTRACTS as proxbox_offline_images_contracts,
+        )
 
         payload["semantic_contract"] = {
             "service.gitea.production.upgrade_1_27_1": upgrade_contract,
@@ -182,6 +187,16 @@ def derive_command_contract_hash(procedure: Any) -> str:
                 ]
             ),
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
+            "service.nmulticloud.deploy.diagnose_proxbox_api_images": (
+                proxbox_offline_images_contracts[
+                    "service.nmulticloud.deploy.diagnose_proxbox_api_images"
+                ]
+            ),
+            "service.nmulticloud.deploy.preload_proxbox_api_images": (
+                proxbox_offline_images_contracts[
+                    "service.nmulticloud.deploy.preload_proxbox_api_images"
+                ]
+            ),
         }[handler_id]
     else:
         from .akvorado_bootstrap_contract import (

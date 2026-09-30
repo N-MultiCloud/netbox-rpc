@@ -508,6 +508,8 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         constants.GITEA_USER_CI_RUNNER_RECOVER,
         constants.GITEA_ORG_CI_RUNNER_DIAGNOSE,
         constants.GITEA_ORG_CI_RUNNER_RECOVER,
+        constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+        constants.NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
         # Mints and rotates the credential NetBox authenticates to OpenBao
         # with, so it carries the same fail-closed capability check as the
         # other credential-bearing procedures.

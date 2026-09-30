@@ -228,6 +228,23 @@ The procedure catalog is intentionally narrow:
   as indeterminate; run `check` before every `reconcile`. Both share the
   single `RPCTargetBinding` slug `nmulticloud-deploy-host` (both apps run on
   the same host, unlike the per-environment openbao-import slugs above).
+- `service.nmulticloud.deploy.diagnose_proxbox_api_images` (read, no approval)
+  and `service.nmulticloud.deploy.preload_proxbox_api_images` (write,
+  two-person approval) diagnose or preload only the digest-pinned external
+  images bound to one verified proxbox-api release manifest. Both target the
+  existing, requester-viewable `dcim.device` selected by the
+  `nmulticloud-deploy-host` `RPCTargetBinding`. The only caller field is a
+  required lowercase 64-hex `manifest_sha256`; image references, registries,
+  hosts, paths, credentials, and command text are rejected. The backend runs
+  only `diagnose-proxbox-api-images <manifest_sha256>` or
+  `preload-proxbox-api-images <manifest_sha256>` through the fixed deploy-host
+  gateway and parses its bounded closed JSON report. A preload transport loss,
+  timeout, or malformed post-start response is `stage="indeterminate"` and
+  must never be retried automatically. Run diagnosis first, present the exact
+  target and manifest to the independent approver, and reconcile an
+  indeterminate preload through diagnosis before considering another write.
+  See [`docs/proxbox-offline-image-recovery.md`](docs/proxbox-offline-image-recovery.md)
+  for the rollout and operator sequence.
 - `service.netbox.staging.deploy_dns_pair` — destructive, two-person deployment
   of one reviewed lowercase 40-hex commit to the staging NetBox DNS plugin and
   dns-api sidecar pair. It is fixed to the existing, requester-viewable

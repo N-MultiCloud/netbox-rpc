@@ -21,6 +21,7 @@ from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
 from .. import proxmox_oci_pull_contract
 from .. import release_marker_contract
+from .. import proxbox_offline_images_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
@@ -45,6 +46,8 @@ from ..constants import (
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PROCEDURE_NAMES,
     PROTECTED_APPROVAL_PROCEDURE_NAMES,
 )
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
@@ -93,6 +96,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
         *NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        *NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PROCEDURE_NAMES,
     }
 )
 _OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
@@ -151,6 +155,12 @@ _RELEASE_MARKER_RECONCILE_REJECTION_REASON = (
 )
 _PROXMOX_OCI_PULL_APPROVAL_REASON = "Approved audited Proxmox OCI registry pull."
 _PROXMOX_OCI_PULL_REJECTION_REASON = "Rejected audited Proxmox OCI registry pull."
+_PROXBOX_IMAGES_PRELOAD_APPROVAL_REASON = (
+    "Approved audited proxbox-api offline-image preload."
+)
+_PROXBOX_IMAGES_PRELOAD_REJECTION_REASON = (
+    "Rejected audited proxbox-api offline-image preload."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -166,6 +176,9 @@ _PROTECTED_APPROVAL_REASON = {
         _RELEASE_MARKER_RECONCILE_APPROVAL_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_APPROVAL_REASON,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD: (
+        _PROXBOX_IMAGES_PRELOAD_APPROVAL_REASON
+    ),
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -181,6 +194,9 @@ _PROTECTED_REJECTION_REASON = {
         _RELEASE_MARKER_RECONCILE_REJECTION_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_REJECTION_REASON,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD: (
+        _PROXBOX_IMAGES_PRELOAD_REJECTION_REASON
+    ),
 }
 
 _PROTECTED_CONTRACTS = {
@@ -195,6 +211,7 @@ _PROTECTED_CONTRACTS = {
     NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
     LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD: proxbox_offline_images_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -208,6 +225,7 @@ _PROTECTED_LABELS = {
     NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: "Release-marker reconcile",
     LINUX_PROXMOX_OCI_REGISTRY_PULL: "Proxmox OCI registry pull",
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD: "proxbox-api offline-image preload",
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {

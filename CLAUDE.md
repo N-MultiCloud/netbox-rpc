@@ -76,6 +76,12 @@ variants; the disabled organization root runner remains local-only.
 `EXEMPT_HANDLER_RATIONALE` notes synchronized with README whenever procedure
 command behavior changes.
 
+The proxbox-api offline build-image diagnosis/preload contract is documented in
+`AGENTS.md` section "Proxbox API offline build-image recovery" and README's
+procedure catalog. Keep its manifest-only caller schema, deploy-host binding,
+fixed gateway argv, timeout budgets, capability hashes, approval boundary, and
+indeterminate-write handling aligned with `netbox-rpc-backend`.
+
 > **LLM Agent Safety:** Before creating any `RPCExecution` record, read the
 > **LLM Agent Safety Guardrails** section in `AGENTS.md`. Destructive Proxmox
 > procedures (`os.linux.proxmox.convert_mellanox_nic_to_ethernet`) MUST NOT be

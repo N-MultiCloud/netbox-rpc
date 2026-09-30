@@ -357,6 +357,24 @@ Procedure normalizers accept structured parameters only. They must not accept or
 store arbitrary SSH command text. Driver/parser selection is injected centrally
 from `RPCProcedure.transport_driver`, `output_parser`, and `output_schema`.
 
+### Deploy-host recovery procedures
+
+The proxbox-api offline-image procedure pair is a narrow cross-service
+extension of the existing command path. `netbox-rpc` owns catalog policy,
+target-binding normalization, two-person approval for preload, the signed
+lease, and durable execution/event history. The standalone
+`netbox-rpc-backend` owns target-binding revalidation, credential resolution,
+bounded transport, closed response parsing, and the registered handlers. The
+deployment host owns the forced-command gateway and derives the exact image
+inventory from the immutable release identified by `manifest_sha256`.
+
+No component accepts a caller-selected image or command. Catalog and backend
+capability hashes bind the same parameter schema, result schema, fixed argv,
+target-binding slug, and runtime budgets. Deployment order is host gateway,
+backend handler/capability, then catalog migration. Retirement reverses that
+order: disable the catalog first, preserve ledger history, then remove backend
+and host support.
+
 
 ## Testing
 

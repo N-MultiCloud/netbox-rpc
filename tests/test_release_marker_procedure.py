@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "netbox_rpc/migrations/0098_seed_release_marker_procedures.py"
 CHECK_ID = "service.nmulticloud.deploy.release_marker_check"
 RECONCILE_ID = "service.nmulticloud.deploy.release_marker_reconcile"
+PROXBOX_DIAGNOSE_ID = "service.nmulticloud.deploy.diagnose_proxbox_api_images"
+PROXBOX_PRELOAD_ID = "service.nmulticloud.deploy.preload_proxbox_api_images"
 DEPLOY_HOST_SLUG = "nmulticloud-deploy-host"
 
 
@@ -160,6 +162,10 @@ def _execution(
             else None
         ),
     )
+
+
+def _proxbox_execution(params: object, *, handler_id: str = PROXBOX_DIAGNOSE_ID):
+    return _execution(params, handler_id=handler_id)
 
 
 class _FakeBinding:
@@ -353,6 +359,118 @@ def test_reconcile_normalizer_binds_the_reconcile_handler_id(jobs_module) -> Non
     normalized = jobs_module.normalize_execution_params(execution)
 
     assert normalized["command_fingerprint"]["handler_id"] == RECONCILE_ID
+
+
+def test_proxbox_offline_image_normalizer_binds_manifest_and_target(jobs_module) -> None:
+    digest = "a" * 64
+    normalized = jobs_module.normalize_execution_params(
+        _proxbox_execution({"manifest_sha256": digest})
+    )
+
+    assert normalized["manifest_sha256"] == digest
+    assert normalized["target_object"] == {
+        "content_type": "dcim.device",
+        "object_id": 44,
+    }
+    assert normalized["command_fingerprint"] == {
+        "handler_id": PROXBOX_DIAGNOSE_ID,
+        "manifest_sha256": digest,
+        "assigned_object_id": 44,
+        "target_binding_id": 3,
+        "target_binding_revision": "2026-01-01T00:00:00Z",
+        "target_object_sha256": normalized["command_fingerprint"][
+            "target_object_sha256"
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        None,
+        {"manifest_sha256": "A" * 64},
+        {"manifest_sha256": "a" * 63},
+        {"manifest_sha256": "a" * 64, "image": "attacker/image:latest"},
+    ],
+)
+def test_proxbox_offline_image_normalizer_rejects_hostile_params(
+    jobs_module,
+    params: object,
+) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(_proxbox_execution(params))
+
+    assert excinfo.value.code == "RPC_PARAM_INVALID"
+
+
+def test_proxbox_preload_normalizer_binds_protected_handler(jobs_module) -> None:
+    normalized = jobs_module.normalize_execution_params(
+        _proxbox_execution(
+            {"manifest_sha256": "b" * 64},
+            handler_id=PROXBOX_PRELOAD_ID,
+        )
+    )
+
+    assert normalized["command_fingerprint"]["handler_id"] == PROXBOX_PRELOAD_ID
+
+
+def test_proxbox_offline_image_normalizer_requires_device_target(jobs_module) -> None:
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(
+            _execution(
+                {"manifest_sha256": "c" * 64},
+                target_model_label="virtualization.virtualmachine",
+                handler_id=PROXBOX_DIAGNOSE_ID,
+            )
+        )
+
+    assert excinfo.value.code == "RPC_TARGET_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("assigned_object_id", "assigned_object"),
+    [
+        (True, SimpleNamespace(pk=True, name="nmc-prod-207")),
+        ("44", SimpleNamespace(pk="44", name="nmc-prod-207")),
+        (0, SimpleNamespace(pk=0, name="nmc-prod-207")),
+        (44, None),
+        (44, SimpleNamespace(pk=45, name="nmc-prod-207")),
+    ],
+    ids=["bool", "non-int", "less-than-one", "missing-object", "pk-mismatch"],
+)
+def test_proxbox_offline_image_normalizer_requires_existing_object(
+    jobs_module,
+    assigned_object_id: object,
+    assigned_object: object,
+) -> None:
+    execution = _execution(
+        {"manifest_sha256": "d" * 64},
+        assigned_object_id=assigned_object_id,
+        handler_id=PROXBOX_DIAGNOSE_ID,
+    )
+    execution.assigned_object = assigned_object
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(execution)
+
+    assert excinfo.value.code == "RPC_TARGET_INVALID"
+
+
+def test_proxbox_offline_image_normalizer_rejects_binding_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs_module = _import_jobs_module(
+        monkeypatch,
+        bindings_by_slug={DEPLOY_HOST_SLUG: _FakeBinding(3, 900, _DEFAULT_LAST_UPDATED)},
+    )
+    try:
+        with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+            jobs_module.normalize_execution_params(
+                _proxbox_execution({"manifest_sha256": "e" * 64})
+            )
+        assert excinfo.value.code == "RPC_TARGET_INVALID"
+    finally:
+        sys.modules.pop("netbox_rpc.jobs", None)
 
 
 def test_normalizer_binds_the_target_binding_id_and_revision_into_the_fingerprint(

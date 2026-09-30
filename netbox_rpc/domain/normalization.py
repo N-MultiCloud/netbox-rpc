@@ -89,6 +89,8 @@ from ..constants import (
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_APPS,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD,
     OOKLA_PROCEDURE_NAMES,
     OPENBAO_1_PROCEDURE_NAMES,
     PACKER_PROCEDURE_NAMES,
@@ -6233,6 +6235,79 @@ def _normalize_release_marker_execution(
     }
 
 
+def _normalize_proxbox_offline_images_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Bind one exact proxbox-api release manifest to the deploy host."""
+    if execution.target_model_label != "dcim.device":
+        raise RPCExecutionError(
+            "proxbox offline-image procedures require a dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        isinstance(assigned_object_id, bool)
+        or not isinstance(assigned_object_id, int)
+        or assigned_object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != assigned_object_id
+    ):
+        raise RPCExecutionError(
+            "proxbox offline-image procedures require an existing viewable "
+            "dcim.device target.",
+            code="RPC_TARGET_INVALID",
+        )
+    params = execution.params
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "proxbox offline-image params must be an object.",
+            code="RPC_PARAM_INVALID",
+        )
+    unexpected = sorted(set(params) - {"manifest_sha256"})
+    if unexpected:
+        raise RPCExecutionError(
+            "proxbox offline-image procedures accept only 'manifest_sha256'; "
+            f"unexpected field(s): {', '.join(unexpected)}.",
+            code="RPC_PARAM_INVALID",
+        )
+    manifest_sha256 = params.get("manifest_sha256")
+    if not isinstance(manifest_sha256, str) or re.fullmatch(
+        r"[a-f0-9]{64}", manifest_sha256
+    ) is None:
+        raise RPCExecutionError(
+            "proxbox offline-image procedures require a lowercase 64-hex "
+            "manifest_sha256.",
+            code="RPC_PARAM_INVALID",
+        )
+
+    binding_device_id, target_binding_id, target_binding_revision = (
+        _release_marker_target_binding()
+    )
+    if assigned_object_id != binding_device_id:
+        raise RPCExecutionError(
+            "proxbox offline-image procedures require the device on "
+            f"RPCTargetBinding slug {RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST!r}.",
+            code="RPC_TARGET_INVALID",
+        )
+    target_object = {
+        "content_type": "dcim.device",
+        "object_id": assigned_object_id,
+    }
+    return {
+        "target": target,
+        "manifest_sha256": manifest_sha256,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "manifest_sha256": manifest_sha256,
+            "assigned_object_id": assigned_object_id,
+            "target_binding_id": target_binding_id,
+            "target_binding_revision": target_binding_revision,
+            "target_object_sha256": _hash_json(target_object),
+        },
+    }
 # Table-driven normalizer registry consulted once at the top of
 # ``_dispatch_normalize_execution_params``. Register a new procedure name
 # here (pointing at a shared or dedicated normalizer, both accepting
@@ -6245,6 +6320,8 @@ _TABLE_NORMALIZERS: dict[
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: _normalize_release_marker_execution,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_DIAGNOSE: _normalize_proxbox_offline_images_execution,
+    NMULTICLOUD_DEPLOY_PROXBOX_IMAGES_PRELOAD: _normalize_proxbox_offline_images_execution,
 }
 
 
