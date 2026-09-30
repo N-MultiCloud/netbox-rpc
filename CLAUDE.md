@@ -102,7 +102,7 @@ command behavior changes.
 > console access, and the `ssh_ports`/`ssh_networks` allowlist before any live
 > run. It accepts no `rpc_ssh_*` override and no password: the Administrator
 > password is supplied only as an `admin_credential_pk` `DeviceCredential`
-> reference (not object-scoped, issue #203), and must never appear in params,
+> reference (authorized for requester and approver, revision-frozen), and must never appear in params,
 > notes, logs, or results. Seeded enabled; it stays undispatchable until the
 > paired backend advertises its exact capability. See
 > `docs/ubuntu-26-samba-ad-dc-bootstrap-runbook.md`.

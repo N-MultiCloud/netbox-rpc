@@ -231,6 +231,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.validate_gitea_upgrade_target = lambda *args, **kwargs: {}
     normalization.validate_akvorado_content_params = lambda name, params: None
     normalization.code_gate_unavailable_reason = lambda procedure_name: None
+    normalization.resolve_samba_ad_dc_admin_credential = lambda *a, **k: {}
     event_store = types.ModuleType("netbox_rpc.event_store")
     event_store.mark_execution_failed = lambda *args, **kwargs: None
 
@@ -4322,3 +4323,119 @@ def test_samba_provision_fence_ignores_other_procedures(
     procedure = SimpleNamespace(pk=3, name="os.linux.ubuntu.26.samba_ad_dc.verify")
     command_handlers._require_no_concurrent_samba_provision({}, procedure)
     assert calls == {"locked": [], "filters": []}
+
+
+def _samba_approver_fixture(command_handlers, monkeypatch, resolved):
+    calls = []
+
+    def resolver(pk, user, *, ssh_identity_id=None):
+        calls.append((pk, user.pk, ssh_identity_id))
+        if isinstance(resolved, Exception):
+            raise resolved
+        return resolved
+
+    monkeypatch.setattr(
+        command_handlers, "resolve_samba_ad_dc_admin_credential", resolver
+    )
+    return calls
+
+
+SAMBA_SNAPSHOT = {"admin_credential_id": 73, "admin_credential_revision": "r1"}
+
+
+def _samba_normalized():
+    return {
+        "admin_credential_pk": 73,
+        "admin_credential_snapshot": SAMBA_SNAPSHOT,
+        "ssh_snapshot": {"ssh_identity_id": 900},
+    }
+
+
+def test_samba_approver_is_checked_against_the_frozen_credential(
+    command_handlers_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    calls = _samba_approver_fixture(command_handlers, monkeypatch, dict(SAMBA_SNAPSHOT))
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name="os.linux.ubuntu.26.samba_ad_dc.provision")
+    )
+
+    command_handlers._require_samba_admin_credential_for_approver(
+        execution, _samba_normalized(), SimpleNamespace(pk=2)
+    )
+
+    assert calls == [(73, 2, 900)]
+
+
+def test_samba_approver_sees_a_changed_credential_revision_as_invalidation(
+    command_handlers_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    _samba_approver_fixture(
+        command_handlers,
+        monkeypatch,
+        {"admin_credential_id": 73, "admin_credential_revision": "r2"},
+    )
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name="os.linux.ubuntu.26.samba_ad_dc.provision")
+    )
+
+    with pytest.raises(RPCExecutionError) as excinfo:
+        command_handlers._require_samba_admin_credential_for_approver(
+            execution, _samba_normalized(), SimpleNamespace(pk=2)
+        )
+    assert excinfo.value.code == "RPC_APPROVAL_INVALIDATED"
+
+
+def test_samba_approver_without_credential_access_is_refused(
+    command_handlers_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command_handlers, _, RPCExecutionError = command_handlers_module
+    _samba_approver_fixture(
+        command_handlers,
+        monkeypatch,
+        RPCExecutionError("forbidden", code="RPC_CREDENTIAL_FORBIDDEN"),
+    )
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name="os.linux.ubuntu.26.samba_ad_dc.provision")
+    )
+
+    with pytest.raises(RPCExecutionError) as excinfo:
+        command_handlers._require_samba_admin_credential_for_approver(
+            execution, _samba_normalized(), SimpleNamespace(pk=3)
+        )
+    assert excinfo.value.code == "RPC_CREDENTIAL_FORBIDDEN"
+
+
+@pytest.mark.parametrize(
+    ("name", "normalized"),
+    [
+        ("os.linux.ubuntu.26.samba_ad_dc.provision", {}),  # dry run, no credential
+        ("os.linux.ubuntu.26.samba_ad_dc.verify", _samba_normalized()),
+        ("os.linux.proxmox.oci_registry_pull", _samba_normalized()),
+    ],
+)
+def test_samba_approver_check_skips_unrelated_executions(
+    command_handlers_module, monkeypatch: pytest.MonkeyPatch, name, normalized
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    calls = _samba_approver_fixture(command_handlers, monkeypatch, {})
+    command_handlers._require_samba_admin_credential_for_approver(
+        SimpleNamespace(procedure=SimpleNamespace(name=name)),
+        normalized,
+        SimpleNamespace(pk=2),
+    )
+    assert calls == []
+
+
+def test_the_approval_path_invokes_the_approver_check() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "netbox_rpc/application/command_handlers.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "normalized = normalize_execution_params(locked)\n"
+        "            _require_samba_admin_credential_for_approver(locked, normalized, user)\n"
+    ) in source

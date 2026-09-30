@@ -21,6 +21,7 @@ import importlib
 import json
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -93,8 +94,77 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
     _install_import_stubs(monkeypatch)
     sys.modules.pop("netbox_rpc.jobs", None)
     module = importlib.import_module("netbox_rpc.jobs")
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    monkeypatch.setattr(normalization, "_resolve_locked_ssh_identity", _fake_ssh)
+    _install_fake_netbox_nms(monkeypatch)
     yield module
     sys.modules.pop("netbox_rpc.jobs", None)
+
+
+SSH_IDENTITY_ID = 900
+REVISION = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _fake_ssh(
+    *, assigned_object_type_id, assigned_object_id, expected_host, policy_ref
+):
+    return {
+        "ssh_service_id": 64,
+        "ssh_service_revision": "2026-09-01T12:00:00Z",
+        "ssh_identity_id": SSH_IDENTITY_ID,
+        "ssh_identity_revision": "2026-09-01T11:00:00Z",
+        "ssh_storage_backend": "local",
+        "ssh_principal": "ops",
+        "ssh_method": "key",
+        "ssh_host": expected_host,
+        "ssh_port": 22,
+        "ssh_known_hosts_sha256": "a" * 64,
+        "ssh_policy_ref": policy_ref,
+    }
+
+
+# pk -> (auth_method, storage_backend, password_encrypted, viewer user pks)
+CREDENTIALS = {
+    73: ("password", "local", "enc", {1, 2}),
+    74: ("password", "local", "enc", {2}),  # the requester (pk 1) cannot view it
+    75: ("key", "local", "enc", {1, 2}),
+    76: ("password", "local", "", {1, 2}),  # no stored material
+    77: ("password", "openbao", "enc", {1, 2}),
+    SSH_IDENTITY_ID: ("password", "local", "enc", {1, 2}),  # the SSH login itself
+}
+
+
+def _install_fake_netbox_nms(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Query:
+        def __init__(self, user_pk):
+            self.user_pk = user_pk
+            self.pk = None
+
+        def filter(self, *, pk):
+            self.pk = pk
+            return self
+
+        def first(self):
+            row = CREDENTIALS.get(self.pk)
+            if row is None or self.user_pk not in row[3]:
+                return None
+            return SimpleNamespace(
+                pk=self.pk,
+                auth_method=row[0],
+                storage_backend=row[1],
+                password_encrypted=row[2],
+                last_updated=REVISION,
+            )
+
+    class Manager:
+        def restrict(self, user, action):
+            assert action == "view"
+            return Query(getattr(user, "pk", None))
+
+    models = types.ModuleType("netbox_nms.models")
+    models.DeviceCredential = SimpleNamespace(objects=Manager())
+    monkeypatch.setitem(sys.modules, "netbox_nms", types.ModuleType("netbox_nms"))
+    monkeypatch.setitem(sys.modules, "netbox_nms.models", models)
 
 
 def _normalize(jobs_module, name: str, params: dict, **kwargs):
@@ -333,6 +403,8 @@ def test_provision_defaults_are_resolved_and_bound_in_both_payloads(
         "target",
         "target_object",
         "command_fingerprint",
+        "ssh_snapshot",
+        "ssh_policy_ref",
         *EXPECTED_DEFAULT_SETTINGS,
     }
     assert set(normalized) == expected_keys
@@ -341,6 +413,9 @@ def test_provision_defaults_are_resolved_and_bound_in_both_payloads(
         "procedure",
         "target_content_type",
         "target_object_id",
+        "target_object_sha256",
+        "ssh_snapshot",
+        "ssh_policy_ref",
         *EXPECTED_DEFAULT_SETTINGS,
     }
 
@@ -377,6 +452,132 @@ def test_provision_live_run_forwards_only_the_credential_reference(jobs_module) 
     assert normalized["command_fingerprint"]["dry_run"] is False
     assert normalized["ssh_ports"] == [22]
     assert normalized["ssh_networks"] == ["10.0.50.0/24"]
+    frozen = {
+        "admin_credential_id": 73,
+        "admin_credential_revision": "2026-09-01T12:00:00Z",
+    }
+    assert normalized["admin_credential_snapshot"] == frozen
+    assert normalized["command_fingerprint"]["admin_credential_snapshot"] == frozen
+
+
+def test_the_resolved_ssh_destination_and_identity_are_frozen(jobs_module) -> None:
+    normalized = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS), object_id=77)
+
+    snapshot = normalized["ssh_snapshot"]
+    assert snapshot["ssh_host"] == "10.0.30.10"
+    assert snapshot["ssh_port"] == 22
+    assert snapshot["ssh_known_hosts_sha256"] == "a" * 64
+    assert snapshot["ssh_identity_id"] == SSH_IDENTITY_ID
+    assert snapshot["ssh_strict_host_key_checking"] is True
+    assert normalized["ssh_policy_ref"] == (
+        "target-owned-ssh:virtualization.virtualmachine:77"
+    )
+    fingerprint = normalized["command_fingerprint"]
+    assert fingerprint["ssh_snapshot"] == snapshot
+    assert fingerprint["ssh_policy_ref"] == normalized["ssh_policy_ref"]
+    assert len(fingerprint["target_object_sha256"]) == 64
+
+
+def test_ssh_drift_changes_the_normalized_payload(
+    jobs_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval/claim re-normalize; a changed host key or identity must differ."""
+
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    before = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
+
+    def drifted(**kwargs):
+        return {**_fake_ssh(**kwargs), "ssh_known_hosts_sha256": "b" * 64}
+
+    monkeypatch.setattr(normalization, "_resolve_locked_ssh_identity", drifted)
+    after = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
+    assert after != before
+    assert after["command_fingerprint"] != before["command_fingerprint"]
+
+
+def test_admin_credential_revision_drift_changes_the_payload(
+    jobs_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
+    global REVISION
+    monkeypatch.setattr(
+        sys.modules[__name__], "REVISION", datetime(2026, 9, 2, tzinfo=timezone.utc)
+    )
+    after = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
+    assert after["admin_credential_snapshot"] != before["admin_credential_snapshot"]
+
+
+@pytest.mark.parametrize(
+    ("pk", "needle"),
+    [
+        (74, "not viewable"),  # exists, but the requester may not view it
+        (999, "not viewable"),  # does not exist
+        (75, "password credential"),  # not a password credential
+        (76, "password credential"),  # no stored material
+        (77, "password credential"),  # not locally stored
+        (SSH_IDENTITY_ID, "password credential"),  # reuses the SSH login identity
+    ],
+)
+def test_the_admin_credential_is_authorized_at_admission(
+    jobs_module, pk: int, needle: str
+) -> None:
+    exc = _reject(
+        jobs_module,
+        PROVISION,
+        {**LIVE_PARAMS, "admin_credential_pk": pk},
+        code="RPC_CREDENTIAL_FORBIDDEN",
+    )
+    assert needle in str(exc)
+
+
+def test_the_admin_credential_needs_netbox_nms(
+    jobs_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "netbox_nms", None)
+    monkeypatch.setitem(sys.modules, "netbox_nms.models", None)
+    _reject(
+        jobs_module, PROVISION, dict(LIVE_PARAMS), code="RPC_CREDENTIAL_UNAVAILABLE"
+    )
+
+
+def test_the_approver_is_authorized_with_the_same_rule(jobs_module) -> None:
+    normalization = sys.modules["netbox_rpc.domain.normalization"]
+    requester_ok = normalization.resolve_samba_ad_dc_admin_credential(
+        73, SimpleNamespace(pk=1), ssh_identity_id=SSH_IDENTITY_ID
+    )
+    approver_ok = normalization.resolve_samba_ad_dc_admin_credential(
+        73, SimpleNamespace(pk=2), ssh_identity_id=SSH_IDENTITY_ID
+    )
+    assert requester_ok == approver_ok
+    with pytest.raises(normalization.RPCExecutionError):
+        normalization.resolve_samba_ad_dc_admin_credential(
+            73, SimpleNamespace(pk=3), ssh_identity_id=SSH_IDENTITY_ID
+        )
+
+
+def test_a_dry_run_without_a_credential_freezes_no_credential(jobs_module) -> None:
+    normalized = _normalize(jobs_module, PROVISION, dict(VALID_PROVISION))
+    assert "admin_credential_snapshot" not in normalized
+    assert "admin_credential_snapshot" not in normalized["command_fingerprint"]
+
+
+def test_the_ip_must_equal_the_targets_primary_ipv4(jobs_module) -> None:
+    exc = _reject(jobs_module, PROVISION, {**VALID_PROVISION, "ip": "10.0.30.99"})
+    assert "primary IPv4" in str(exc)
+
+
+def test_a_target_without_a_primary_ipv4_is_refused(jobs_module) -> None:
+    execution = _execution(PROVISION, dict(VALID_PROVISION))
+    execution.assigned_object = SimpleNamespace(primary_ip4=None)
+    with pytest.raises(jobs_module.RPCExecutionError) as excinfo:
+        jobs_module.normalize_execution_params(execution)
+    assert excinfo.value.code == "RPC_TARGET_INVALID"
+
+
+def test_the_read_procedures_freeze_nothing(jobs_module) -> None:
+    normalized = _normalize(jobs_module, PREFLIGHT, {})
+    assert "ssh_snapshot" not in normalized
+    assert "admin_credential_snapshot" not in normalized
 
 
 def test_dry_run_and_live_fingerprints_differ(jobs_module) -> None:
@@ -566,6 +767,11 @@ def _execution(
         target_model_label=target_model_label,
         assigned_object_type=SimpleNamespace(app_label=app_label, model=model),
         assigned_object_id=object_id,
+        assigned_object_type_id=7,
+        assigned_object=SimpleNamespace(
+            primary_ip4=SimpleNamespace(address="10.0.30.10/24")
+        ),
+        requested_by=SimpleNamespace(pk=1),
     )
 
 

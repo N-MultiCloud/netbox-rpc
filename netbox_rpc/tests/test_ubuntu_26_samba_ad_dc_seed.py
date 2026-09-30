@@ -140,6 +140,31 @@ class _ProtectedProvisionTestCase(TestCase):
         self.device = make_device("samba-ad-dc-target")
         self.requester = make_user("samba-ad-dc-requester", superuser=True)
         self.provision = RPCProcedure.objects.get(name=PROVISION)
+        # The real DeviceService/DeviceCredential resolution needs netbox-nms
+        # fixtures; the frozen-binding rules are covered by the pure-domain tier.
+        for target, value in (
+            (
+                "netbox_rpc.domain.normalization._samba_ad_dc_primary_ipv4",
+                "10.0.30.10",
+            ),
+            (
+                "netbox_rpc.domain.normalization._resolve_locked_ssh_identity",
+                lambda **kwargs: {
+                    "ssh_service_id": 1,
+                    "ssh_identity_id": 2,
+                    "ssh_host": kwargs["expected_host"],
+                    "ssh_port": 22,
+                    "ssh_known_hosts_sha256": "a" * 64,
+                    "ssh_policy_ref": kwargs["policy_ref"],
+                },
+            ),
+        ):
+            patcher = mock.patch(
+                target,
+                new=(lambda *a, _v=value, **k: _v) if isinstance(value, str) else value,
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _serializer(self, procedure=None, params=None):
         procedure = procedure or self.provision
@@ -215,6 +240,8 @@ class PendingApprovalTests(_ProtectedProvisionTestCase):
         assert normalized["dry_run"] is True
         assert normalized["domain"] == "ad.example.com"
         assert normalized["target_object"]["object_id"] == self.device.pk
+        assert normalized["ssh_snapshot"]["ssh_host"] == "10.0.30.10"
+        assert normalized["ssh_policy_ref"].startswith("target-owned-ssh:dcim.device:")
         rendered = str(normalized).lower() + str(snapshot.command_fingerprint).lower()
         assert "password" not in rendered
         assert snapshot.payload_hash
@@ -249,3 +276,24 @@ class ConcurrencyFenceTests(_ProtectedProvisionTestCase):
             serializer=self._serializer(), user=self.requester
         )
         assert second.status == RPCExecution.STATUS_PENDING_APPROVAL
+
+
+class CapabilityFixtureTests(TestCase):
+    def test_the_seeded_rows_hash_to_the_cross_repository_fixture(self):
+        import json
+        from pathlib import Path
+
+        from netbox_rpc.capabilities import derive_command_contract_hash
+
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "tests/fixtures/samba_ad_dc_capability_contract.json"
+            ).read_text()
+        )
+        for name in ALL_PROCEDURES:
+            procedure = RPCProcedure.objects.get(name=name)
+            assert (
+                derive_command_contract_hash(procedure)
+                == fixture["handlers"][name]["contract_hash"]
+            ), name

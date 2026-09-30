@@ -58,6 +58,7 @@ from ..domain.normalization import (
     RPCExecutionError,
     code_gate_unavailable_reason,
     normalize_execution_params,
+    resolve_samba_ad_dc_admin_credential,
     validate_akvorado_content_params,
     validate_gitea_docker_runner_target,
     validate_gitea_org_docker_runner_recovery_target,
@@ -745,6 +746,32 @@ def _require_no_concurrent_samba_provision(
                 )
             },
             code="conflict",
+        )
+
+
+def _require_samba_admin_credential_for_approver(
+    execution: object,
+    normalized: dict[str, Any],
+    approver: object,
+) -> None:
+    """The approver must be authorized for the exact frozen Administrator credential.
+
+    The requester was checked when the snapshot was built; this repeats the rule
+    for the deciding actor and requires the same credential revision.
+    """
+    snapshot = normalized.get("admin_credential_snapshot")
+    if execution.procedure.name != UBUNTU_26_SAMBA_AD_DC_PROVISION or not snapshot:
+        return
+    ssh_snapshot = normalized.get("ssh_snapshot") or {}
+    current = resolve_samba_ad_dc_admin_credential(
+        normalized.get("admin_credential_pk"),
+        approver,
+        ssh_identity_id=ssh_snapshot.get("ssh_identity_id"),
+    )
+    if current != snapshot:
+        raise RPCExecutionError(
+            "The Administrator credential changed after the request.",
+            code="RPC_APPROVAL_INVALIDATED",
         )
 
 
@@ -2166,6 +2193,7 @@ def _approve_protected_execution(
                 use_cache=False,
             )
             normalized = normalize_execution_params(locked)
+            _require_samba_admin_credential_for_approver(locked, normalized, user)
             current_protected = _approval_protected_payload(
                 locked,
                 normalized,

@@ -1033,7 +1033,11 @@ Proxmox OCI pull): creation stays `pending_approval` with an immutable snapshot
 until a distinct approver with an object-scoped approve permission decides, and
 dispatch carries a signed one-time lease (dry runs included, since
 `approval_required` is procedure-level). Its complete catalog policy and both
-schemas are pinned by `netbox_rpc.samba_ad_dc_protected_contract`. `provision`
+schemas are pinned by `netbox_rpc.samba_ad_dc_protected_contract`. The snapshot also freezes the resolved SSH destination, pinned host key and
+SSH/Administrator credential revisions (drift at approval or claim invalidates
+it), `admin_credential_pk` is authorized for both requester and approver, and the
+capability hash pins the installer digest and protocol
+(`tests/fixtures/samba_ad_dc_capability_contract.json`). `provision`
 takes a closed parameter set (`domain`, `netbios`, `hostname`, `ip`, `forwarder`,
 `client_networks`, `ntp_servers`, `timezone`, `share_name`, `share_path`,
 `ssh_ports`, `ssh_networks`, `ban_exempt_networks`, five Fail2ban bounds,

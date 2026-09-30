@@ -1988,10 +1988,19 @@ pending approval or distinct-actor check.
     pins the full catalog policy, both schemas and the command row and must stay
     byte-identical to migration `0103` (tests compare them); it is registered in
     the four protected maps in `command_handlers.py`. `preflight` and `verify` stay
-    unprotected reads. Not frozen into the snapshot (known limitations): the
-    target's `DeviceService`/credential revision, and `admin_credential_pk` is a
-    plain `DeviceCredential` id not object-scoped to the requester (#203); the
-    newer `credential_references` regime is a follow-up.
+    unprotected reads. The normalizer freezes `ssh_snapshot` (host, port,
+    host-key digest, SSH service and identity id/revision, strict pin),
+    `ssh_policy_ref` and `admin_credential_snapshot` (id and revision) into
+    `normalized_params` and the fingerprint; approval and claim re-normalize, so
+    drift invalidates the approval. `admin_credential_pk` is authorized for the
+    requester at creation and the approver at approval through
+    `resolve_samba_ad_dc_admin_credential` (view permission, local password
+    material present, distinct from the SSH login identity; no secret is read),
+    and `ip` must equal the target's primary IPv4. The capability hash carries a
+    semantic contract (`netbox_rpc/samba_ad_dc_capability_contract.py`: installer
+    digest, protocol, schema hashes) mirrored by
+    `tests/fixtures/samba_ad_dc_capability_contract.json`; updating the installer
+    is one constant plus the fixture, with no migration.
     Admission requires that object to exist and be viewable
     (`_ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES`), and the normalizer emits
     `target_object` plus `target_content_type`/`target_object_id` in the

@@ -206,7 +206,16 @@ def derive_command_contract_hash(procedure: Any) -> str:
             semantic_capability_extension,
         )
 
-        if handler_id in AKVORADO_BOOTSTRAP_HANDLER_IDS:
+        from .samba_ad_dc_capability_contract import (
+            HANDLER_IDS as SAMBA_AD_DC_HANDLER_IDS,
+        )
+        from .samba_ad_dc_capability_contract import (
+            semantic_capability_extension as samba_semantic_extension,
+        )
+
+        if handler_id in SAMBA_AD_DC_HANDLER_IDS:
+            payload["semantic_contract"] = samba_semantic_extension(procedure)
+        elif handler_id in AKVORADO_BOOTSTRAP_HANDLER_IDS:
             payload["semantic_contract"] = semantic_capability_extension(procedure)
         elif handler_id in AKVORADO_LIFECYCLE_HANDLER_IDS:
             payload["semantic_contract"] = lifecycle_semantic_capability_extension(

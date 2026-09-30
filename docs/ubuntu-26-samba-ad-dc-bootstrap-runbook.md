@@ -310,28 +310,71 @@ parameter, and a value that looks like one is refused before anything is stored.
   result is stored.
 - The result contains no secret and every free-form string is length-bounded.
 
+## Frozen bindings and credential authorization
+
+Creation, approval and worker claim each re-normalize the request and compare it
+with the immutable approval snapshot, so any drift invalidates the approval
+(`RPC_APPROVAL_INVALIDATED`). For `provision` the snapshot additionally freezes:
+
+- `ssh_snapshot`: the resolved SSH destination (host, port), the SHA-256 of the
+  pinned host-key entry, the SSH service id and revision, the SSH login identity id
+  and revision and its principal and method (non-secret), plus
+  `ssh_strict_host_key_checking=true` and `ssh_policy_ref`
+  (`target-owned-ssh:<content type>:<object id>`). A changed host, port, host key,
+  service or login credential between request, approval and dispatch fails closed.
+- `admin_credential_snapshot`: the Administrator credential id and its revision
+  (`last_updated`). A rotated credential invalidates the approval.
+
+`admin_credential_pk` is authorized, without reading or decrypting any secret, for
+both the requester (at creation) and the distinct approver (at approval): the
+`netbox-nms` `DeviceCredential` must exist and be viewable by that actor through
+NetBox object permissions, be a locally stored password credential with stored
+material, and differ from the target's SSH login identity. `DeviceCredential` has
+no per-target binding, so view permission is the strongest expressible rule; the
+approver sees the exact id in the snapshot. An actor who cannot view it, a missing
+`netbox-nms`, or any other violation is refused with a clear error.
+
+## Capability attestation and updating the installer
+
+The capability hash of all three handlers includes a semantic contract that pins
+the installer program digest, the stdin protocol version and modes, the firewall
+proof and result protocols, and the catalog policy with the params and result
+schema hashes (`netbox_rpc/samba_ad_dc_capability_contract.py`). The backend
+reproduces it byte for byte; `tests/fixtures/samba_ad_dc_capability_contract.json`
+holds the expected hashes that both repositories assert.
+
+To ship a new installer: change `INSTALLER_SHA256` (and the protocol constants if
+they changed) in `samba_ad_dc_capability_contract.py`, regenerate the fixture with
+`python tests/test_samba_ad_dc_capability_contract.py --write-fixture`, and pin the
+same digest in `netbox_rpc_backend/rpc/samba_ad_dc.py`. No migration is needed
+because the digest is not stored in the database. Until both sides agree, the
+advertised hash differs and dispatch fails closed with a capability mismatch.
+
+## Migration compatibility attestation
+
+The compatibility policy row for `0103_seed_ubuntu_26_samba_ad_dc_procedures` is
+`true` because the migration is a single data-only `RunPython`: it creates three
+catalog rows and one command row each (refusing to overwrite drifted existing rows)
+and its reverse only sets `enabled=False`. It alters no schema, removes no field,
+renames nothing and deletes no audited history, so an older plugin version that
+does not know the rows continues to run unchanged.
+
 ## Limitations
 
 - The DC and the data share are on the same VM; separate these roles for
   production use.
-- **Known limitation (#203):** `admin_credential_pk` is a plain `DeviceCredential`
-  id and is not object-scoped to the requester, the same gap that led this
-  procedure to refuse `rpc_ssh_credential_pk`. The two-person approval mitigates
-  it because the approver sees the exact credential id, but a requester can name a
-  credential they cannot view. The newer named `credential_references` /
-  OpenBao authority regime is a separate follow-up.
-- **Known limitation:** the capability hash covers the base payload only (handler,
-  version, effect and the representative command row). It does not attest the
-  installer program digest or the schemas; follow-up.
 - **Concurrency fence:** creating a `provision` is refused (400) while another
   `requested`, `pending_approval`, `approved`, `queued` or `running` provision
   exists for the same target object, because the bootstrap is not rerunnable.
-- **Known limitation:** the SSH destination and credential revision of the target are
-  not frozen into the approval snapshot (as they are for the Akvorado and Gitea
-  procedures); the backend resolves the object's `DeviceService` at run time. A
-  transport failure or timeout after dispatch surfaces as a generic failed
-  execution without a result. Because the bootstrap is not rerunnable, inspect the
-  host state and restore the VM snapshot before any further attempt.
+- **SSH prerequisites of the frozen binding:** the target must have exactly one
+  enabled SSH `DeviceService` on port 22 with strict host-key checking and one
+  pinned `ssh-ed25519` known-hosts entry for its management address, and its
+  primary IPv4 must equal the `ip` parameter. These are the same rules as the
+  Akvorado and Gitea protected procedures.
+- **No result after a transport failure:** a failure or timeout after dispatch
+  surfaces as a generic failed execution without a result. Because the bootstrap is
+  not rerunnable, inspect the host state and restore the VM snapshot before any
+  further attempt.
 - Only a single Netplan/networkd Ethernet configuration is supported.
 - AD service access over IPv6 is not enabled; SSH IPv6 sources may be allowed.
 - The share is administrator-only. Create least-privilege users and groups and

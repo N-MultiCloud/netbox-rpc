@@ -1,0 +1,37 @@
+{
+  "contract_version": 1,
+  "handlers": {
+    "os.linux.ubuntu.26.samba_ad_dc.preflight": {
+      "contract_hash": "3188a0cc60f4a2a121cd4bdc87779e0621a567ccd75f96de1b5651521be9667c",
+      "params_schema_sha256": "72a096c6283e180fea79a1684a97fc331810c9ce2db148ed14adde45fa20688b",
+      "result_schema_sha256": "42dc36b25f5fa42caf056e016c8d4126b1077e6988f850a0110083410b140bfd",
+      "semantic_contract_sha256": "7e6545db0a7b70a51428710272a062243fc8e55f0abd4d27bed35bef1486fe6a"
+    },
+    "os.linux.ubuntu.26.samba_ad_dc.provision": {
+      "contract_hash": "e3fbaccedd2cb7cbcb6cba3087fbbe0bd8cb454f08a8439a440ff77a3c83804f",
+      "params_schema_sha256": "1366f05147a2343d59192cd72ac92159ea94793c73e284a1180e23261dbfa36c",
+      "result_schema_sha256": "95b9bee4f4f0df7fbd8519230c2532229a3e6df5ca3e8be6f9cd7decee40abb2",
+      "semantic_contract_sha256": "3e75050cd90a03f4c7478ffdb00efc26c8a511b67f4a4bccffa5735a08fa9ed0"
+    },
+    "os.linux.ubuntu.26.samba_ad_dc.verify": {
+      "contract_hash": "2b4d03a1b4eb7fefc97286d928274734cfdcc2a2243735a70e76b57f28347a8b",
+      "params_schema_sha256": "72a096c6283e180fea79a1684a97fc331810c9ce2db148ed14adde45fa20688b",
+      "result_schema_sha256": "de8d678e6baed0a910b86fc617e894b9b1720c33c3bd170aa08e0b669e7498cb",
+      "semantic_contract_sha256": "a0156e5b5554c487302c9aa2a5ca9e9c9817a321f49eb3014c1ef63dc70c7140"
+    }
+  },
+  "installer_sha256": "df7a5fc827c56418e3b3b10320ed76c31395b87aa20a6bc5808ff2f0398caa0a",
+  "protocol": {
+    "firewall_proof": "fresh-ssh-connection-confirm-v1",
+    "modes": [
+      "confirm_firewall",
+      "preflight",
+      "provision",
+      "provision_continue",
+      "rollback_firewall",
+      "verify"
+    ],
+    "result": "samba-ad-dc-result-v1",
+    "stdin_version": 1
+  }
+}

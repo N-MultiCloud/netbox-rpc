@@ -5103,7 +5103,7 @@ def _samba_ad_dc_reject_unknown_params(
 
 def _apply_samba_ad_dc_provision_settings(
     normalized: dict[str, Any], params: dict[str, Any]
-) -> None:
+) -> dict[str, Any]:
     try:
         settings = samba_ad_dc_contract.resolve_provision_settings(params)
     except samba_ad_dc_contract.SambaParamError as exc:
@@ -5115,6 +5115,134 @@ def _apply_samba_ad_dc_provision_settings(
         normalized["command_fingerprint"][key] = (
             list(value) if isinstance(value, list) else value
         )
+    return settings
+
+
+def _samba_ad_dc_primary_ipv4(execution: RPCExecution) -> str:
+    primary_ip4 = getattr(
+        getattr(execution, "assigned_object", None), "primary_ip4", None
+    )
+    raw_address = getattr(primary_ip4, "address", primary_ip4)
+    try:
+        address = ip_address(str(raw_address).split("/", 1)[0])
+    except ValueError as exc:
+        raise RPCExecutionError(
+            "Samba AD DC provision requires the target to have one explicit "
+            "primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        ) from exc
+    if address.version != 4:
+        raise RPCExecutionError(
+            "Samba AD DC provision requires the target to have one explicit "
+            "primary IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+    return str(address)
+
+
+def resolve_samba_ad_dc_admin_credential(
+    credential_pk: object,
+    user: object,
+    *,
+    ssh_identity_id: object = None,
+) -> dict[str, Any]:
+    """Authorize and freeze the Administrator password credential reference.
+
+    Rule (netbox-nms ``DeviceCredential`` has no target binding, so the strongest
+    expressible rule is used): the credential must exist, be viewable by ``user``
+    through NetBox object permissions, be a locally stored password credential
+    with stored material, and differ from the target's SSH login identity. Only
+    presence of the encrypted field is checked; no secret is read or decrypted.
+    Returns the non-secret ``{id, revision}`` snapshot.
+    """
+    try:
+        from netbox_nms.models import DeviceCredential
+    except (ImportError, AttributeError) as exc:
+        raise RPCExecutionError(
+            "Samba AD DC provision requires netbox-nms to resolve the "
+            "Administrator credential.",
+            code="RPC_CREDENTIAL_UNAVAILABLE",
+        ) from exc
+    try:
+        credential = (
+            DeviceCredential.objects.restrict(user, "view")
+            .filter(pk=credential_pk)
+            .first()
+        )
+    except Exception as exc:
+        raise RPCExecutionError(
+            "The Administrator credential could not be authorized.",
+            code="RPC_CREDENTIAL_UNAVAILABLE",
+        ) from exc
+    if credential is None:
+        raise RPCExecutionError(
+            "The Administrator credential does not exist or is not viewable by "
+            "the actor.",
+            code="RPC_CREDENTIAL_FORBIDDEN",
+        )
+    if (
+        str(getattr(credential, "auth_method", "") or "") != "password"
+        or str(getattr(credential, "storage_backend", "local") or "local") != "local"
+        or not getattr(credential, "password_encrypted", "")
+        or (ssh_identity_id is not None and credential.pk == ssh_identity_id)
+    ):
+        raise RPCExecutionError(
+            "The Administrator credential must be a stored local password "
+            "credential distinct from the target's SSH login identity.",
+            code="RPC_CREDENTIAL_FORBIDDEN",
+        )
+    return {
+        "admin_credential_id": _positive_model_pk(
+            credential, "Administrator credential"
+        ),
+        "admin_credential_revision": _model_revision(
+            credential, "Administrator credential"
+        ),
+    }
+
+
+def _apply_samba_ad_dc_frozen_bindings(
+    normalized: dict[str, Any],
+    execution: RPCExecution,
+    settings: dict[str, Any],
+    object_id: int,
+    content_type: str,
+) -> None:
+    """Freeze the resolved SSH destination/identity and Administrator credential.
+
+    Re-normalization at approval and at worker claim compares these values with
+    the immutable approval snapshot, so any drift invalidates the approval.
+    """
+    host = _samba_ad_dc_primary_ipv4(execution)
+    if host != settings["ip"]:
+        raise RPCExecutionError(
+            "ip must equal the target's primary IPv4 address.",
+            code="RPC_PARAM_INVALID",
+        )
+    policy_ref = f"target-owned-ssh:{content_type}:{object_id}"
+    ssh_snapshot = {
+        **_resolve_locked_ssh_identity(
+            assigned_object_type_id=getattr(execution, "assigned_object_type_id", None),
+            assigned_object_id=object_id,
+            expected_host=host,
+            policy_ref=policy_ref,
+        ),
+        "ssh_strict_host_key_checking": True,
+    }
+    fingerprint = normalized["command_fingerprint"]
+    normalized["ssh_snapshot"] = ssh_snapshot
+    normalized["ssh_policy_ref"] = policy_ref
+    fingerprint["ssh_snapshot"] = ssh_snapshot
+    fingerprint["ssh_policy_ref"] = policy_ref
+    fingerprint["target_object_sha256"] = _hash_json(normalized["target_object"])
+    if "admin_credential_pk" in settings:
+        admin = resolve_samba_ad_dc_admin_credential(
+            settings["admin_credential_pk"],
+            getattr(execution, "requested_by", None),
+            ssh_identity_id=ssh_snapshot.get("ssh_identity_id"),
+        )
+        normalized["admin_credential_snapshot"] = admin
+        fingerprint["admin_credential_snapshot"] = dict(admin)
 
 
 def _normalize_ubuntu_26_samba_ad_dc_execution(
@@ -5150,7 +5278,10 @@ def _normalize_ubuntu_26_samba_ad_dc_execution(
     }
     if procedure_name == UBUNTU_26_SAMBA_AD_DC_PROVISION:
         _samba_ad_dc_reject_forbidden_ssh_overrides(params, procedure_name)
-        _apply_samba_ad_dc_provision_settings(normalized, params)
+        settings = _apply_samba_ad_dc_provision_settings(normalized, params)
+        _apply_samba_ad_dc_frozen_bindings(
+            normalized, execution, settings, object_id, content_type
+        )
         return normalized
 
     _samba_ad_dc_reject_unknown_params(params, procedure_name)
