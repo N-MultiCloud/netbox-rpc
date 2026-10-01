@@ -1363,8 +1363,10 @@ Deployments may retain the `netbox-nms` adapter that routes established
 handlers to `nms-backend`, or configure the first-class `RPCBackend` row for
 `netbox-rpc-backend`; selection is deployment configuration, never a
 caller-supplied route. When an executor publishes a capability manifest, its
-handler IDs and command-contract hashes are enforced; a missing legacy manifest
-is reported as unknown and currently follows the documented compatibility path.
+authenticated `{backend_url}/rpc/capabilities` route is read with a bounded
+response and cache. Handler IDs, versions, effects, and canonical or explicitly
+compatible command-contract hashes are enforced; a missing legacy manifest is
+reported as unknown and currently follows the documented compatibility path.
 Existing `nms-backend` handlers include
 `network.huawei_olt_ma5800_r024.start_ont` and
 `network.dell_os10_s5232f_on.bootstrap_restconf` and

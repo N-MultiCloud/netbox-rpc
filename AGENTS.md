@@ -1,5 +1,12 @@
 # netbox-rpc Agent Notes
 
+## Backend capability handshake
+
+Fetch the authenticated capability manifest from the backend's canonical
+`/rpc/capabilities` route. Do not move this request to an unauthenticated root
+path or bypass the existing bounded response, cache, and fail-closed contract
+checks.
+
 ## Proxmox OCI pull contract
 
 - Use `os.linux.proxmox.oci_registry_pull` for the public
@@ -352,7 +359,7 @@ until they are migrated deliberately.
   bounded `RPC_BACKEND_RESOLUTION_FAILED` and appended as `ExecutionFailed`;
   never persist resolver text or leave the projection in `running`.
 - **Backend capability handshake (#167)**: `capabilities.py` consumes a manifest
-  the paired `netbox-rpc-backend` advertises at `GET {backend_url}/capabilities`
+  the paired `netbox-rpc-backend` advertises at `GET {backend_url}/rpc/capabilities`
   (per handler: `handler_id`/`version`/`effect`/`contract_hash`, plus a top-level
   `envelope_version`). The fetch is bounded (≤512 KiB), authenticated (backend
   target headers), cached (30 s TTL), Pydantic-v2-validated, and **never trusted

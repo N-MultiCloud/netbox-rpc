@@ -235,11 +235,12 @@ class FetchTests(TestCase):
         with mock.patch(
             "netbox_rpc.capabilities.requests.get",
             return_value=_fake_response(status=404),
-        ):
+        ) as get:
             assert (
                 capabilities.fetch_backend_capabilities(self.target, use_cache=False)
                 is None
             )
+        assert get.call_args.args[0] == "http://backend.test:16005/rpc/capabilities"
 
     def test_redirect_is_not_followed(self):
         with mock.patch(
