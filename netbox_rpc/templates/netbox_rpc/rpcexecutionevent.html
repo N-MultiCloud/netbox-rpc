@@ -1,0 +1,55 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-8">
+    <div class="card">
+      <h5 class="card-header">RPC Execution Event</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Execution</th>
+            <td><a href="{{ object.execution.get_absolute_url }}">{{ object.execution }}</a></td>
+          </tr>
+          <tr>
+            <th scope="row">Sequence</th>
+            <td>{{ object.sequence }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Level</th>
+            <td>{{ object.get_level_display }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Event</th>
+            <td>{{ object.event }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Message</th>
+            <td>{{ object.message|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Payload Hash</th>
+            <td><code>{{ object.payload_hash|placeholder }}</code></td>
+          </tr>
+          <tr>
+            <th scope="row">Created</th>
+            <td>{{ object.created }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col">
+    <div class="card">
+      <h5 class="card-header">Data</h5>
+      <div class="card-body">
+        <pre>{{ object.data }}</pre>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock content %}

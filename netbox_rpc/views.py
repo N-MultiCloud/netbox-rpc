@@ -364,6 +364,11 @@ class RPCExecutionEventListView(generic.ObjectListView):
     actions = READ_ONLY_ACTIONS
 
 
+@register_model_view(models.RPCExecutionEvent)
+class RPCExecutionEventView(generic.ObjectView):
+    queryset = models.RPCExecutionEvent.objects.select_related("execution__procedure")
+
+
 # ── RpcPluginSettings (opt-in) + landing/dashboard ───────────────────────────
 
 

@@ -13,7 +13,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_rpc import tables
-from netbox_rpc.models import RPCExecution
+from netbox_rpc.models import RPCExecution, RPCExecutionEvent
 
 from ._common import device_ct, make_execution, make_intent, make_procedure, make_user
 
@@ -186,3 +186,32 @@ class ExecutionDetailCommandOutputTests(TestCase):
         )
         html = self._detail_html(ex)
         assert "grouped.run" in html
+
+    def test_detail_renders_append_only_event_ledger(self):
+        proc = make_procedure("os.linux.test.detail.events")
+        execution = _make_execution(proc, user=self.user)
+        RPCExecutionEvent.objects.create(
+            execution=execution,
+            sequence=1,
+            event="ApprovalRequested",
+            message="Awaiting a second actor <script>alert('xss')</script>",
+            data={"actor": "<script>alert('data')</script>"},
+        )
+
+        html = self._detail_html(execution)
+
+        assert "ApprovalRequested" in html
+        assert "Awaiting a second actor" in html
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+        event_url = reverse(
+            "plugins:netbox_rpc:rpcexecutionevent",
+            args=[execution.events.get().pk],
+        )
+        event_response = self.client.get(event_url)
+        assert event_response.status_code == 200, event_response.content
+        event_html = event_response.content.decode()
+        assert "ApprovalRequested" in event_html
+        assert "<script>" not in event_html
+        assert "&lt;script&gt;" in event_html
