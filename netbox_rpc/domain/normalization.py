@@ -6627,7 +6627,8 @@ def _normalize_proxbox_api_release_images_execution(
             "proxbox-api release-image procedures require device nmc-prod-207.",
             code="RPC_TARGET_INVALID",
         )
-    if execution.params not in ({}, None):
+    supplied_params = execution.params or {}
+    if set(supplied_params) - {"_timeout_seconds_snapshot"}:
         raise RPCExecutionError(
             "proxbox-api release-image procedures accept only an empty object.",
             code="RPC_PARAM_INVALID",

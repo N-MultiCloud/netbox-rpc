@@ -47,6 +47,70 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
     sys.modules.pop("netbox_rpc.jobs", None)
 
 
+def _proxbox_normalization_execution(
+    params: dict, handler_id: str = "service.proxbox_api.release_images.inspect"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        target_model_label="dcim.device",
+        assigned_object_id=44,
+        assigned_object=SimpleNamespace(pk=44, name="nmc-prod-207"),
+        params=params,
+        procedure=SimpleNamespace(handler_id=handler_id),
+    )
+
+
+@pytest.mark.parametrize(
+    ("handler_id", "timeout_snapshot"),
+    (
+        ("service.proxbox_api.release_images.inspect", 120),
+        ("service.proxbox_api.release_images.recover", 1200),
+    ),
+)
+def test_proxbox_normalizer_accepts_only_the_platform_timeout_snapshot(
+    jobs_module,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_id: str,
+    timeout_snapshot: int,
+) -> None:
+    from netbox_rpc.domain import normalization
+
+    monkeypatch.setattr(
+        normalization,
+        "_release_marker_target_binding",
+        lambda: (44, 9, "2026-10-01T00:00:00Z"),
+    )
+
+    normalized = normalization._normalize_proxbox_api_release_images_execution(
+        _proxbox_normalization_execution(
+            {"_timeout_seconds_snapshot": timeout_snapshot}, handler_id
+        ),
+        "nmc-prod-207",
+    )
+
+    assert normalized["command_fingerprint"]["assigned_object_id"] == 44
+    assert normalized["command_fingerprint"]["handler_id"] == handler_id
+
+
+def test_proxbox_normalizer_still_rejects_every_caller_parameter(
+    jobs_module, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from netbox_rpc.domain import normalization
+
+    monkeypatch.setattr(
+        normalization,
+        "_release_marker_target_binding",
+        lambda: (44, 9, "2026-10-01T00:00:00Z"),
+    )
+
+    with pytest.raises(jobs_module.RPCExecutionError, match="only an empty object"):
+        normalization._normalize_proxbox_api_release_images_execution(
+            _proxbox_normalization_execution(
+                {"_timeout_seconds_snapshot": 120, "image": "attacker/latest"}
+            ),
+            "nmc-prod-207",
+        )
+
+
 def test_gitea_upgrade_normalizer_emits_exact_backend_contract(jobs_module) -> None:
     from netbox_rpc import gitea_upgrade_contract as contract
 

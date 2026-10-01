@@ -1,5 +1,12 @@
 # netbox-rpc Agent Notes
 
+The parameter-free Proxbox release-image normalizer accepts only the trusted
+platform-stamped `_timeout_seconds_snapshot` metadata. Execution creation
+validates and overwrites that reserved key, so the normalizer must preserve its
+queued value instead of comparing it to current procedure defaults. It must
+reject every caller-supplied parameter while preserving the fixed target,
+identity, capability, approval, and command contracts.
+
 ## Backend capability handshake
 
 Fetch the authenticated capability manifest from the backend's canonical

@@ -18,6 +18,10 @@ seeded disabled. Post-deploy activation requires the existing
 `nmulticloud-deploy-host` `RPCTargetBinding` to reference the exact
 `nmc-prod-207` device, compatible backend capability advertisements, and an
 explicit operator enablement; the migration never enables or repoints them.
+The normalizer accepts the platform-stamped `_timeout_seconds_snapshot` metadata
+used to preserve the queued procedure budget, but still rejects every
+caller-supplied parameter. The platform validates and overwrites that reserved
+key during execution creation; callers cannot control its value.
 
 Licensed under Apache-2.0 (see `LICENSE`).
 
