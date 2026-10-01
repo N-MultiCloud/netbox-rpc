@@ -1,7 +1,7 @@
 """Versioned backend capability handshake (issue #167).
 
 netbox-rpc is the *consumer* of a capability manifest that the paired
-``netbox-rpc-backend`` service advertises at ``GET {backend_url}/capabilities``.
+``netbox-rpc-backend`` service advertises at ``GET {backend_url}/rpc/capabilities``.
 The manifest declares, per handler: ``handler_id`` / ``version`` / ``effect`` /
 a ``contract_hash`` over the procedure's command contract, plus a top-level
 ``envelope_version``. This module fetches it (bounded, authenticated, cached,
@@ -9,7 +9,7 @@ Pydantic-v2-validated, *never* trusted as command input) and verifies a
 procedure against it.
 
 Prod-safe rollout / graceful degradation: when the backend advertises **nothing**
-(no ``/capabilities`` route, unreachable, or a malformed/oversized body), the
+(no ``/rpc/capabilities`` route, unreachable, or a malformed/oversized body), the
 fetch returns ``None`` and legacy callers proceed as before. Procedures listed
 in ``EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES`` fail closed on that unknown
 state at advertisement, admission, and worker claim. When the backend **does**
@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 # present — never silently trusted.
 SUPPORTED_ENVELOPE_VERSIONS: frozenset[int] = frozenset({1})
 
-CAPABILITIES_PATH = "/capabilities"
+CAPABILITIES_PATH = "/rpc/capabilities"
 # Hard bound on the manifest body we will read/parse (defence against an
 # oversized/hostile response). 512 KiB is generous for a handler list.
 _MAX_MANIFEST_BYTES = 512 * 1024
