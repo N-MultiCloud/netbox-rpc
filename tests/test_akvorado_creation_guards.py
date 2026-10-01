@@ -3645,6 +3645,33 @@ def test_openbao_import_apply_creation_requests_protected_two_person_approval(
     ]
 
 
+def test_approval_identities_allow_admin_self_approval_only(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    distinct = SimpleNamespace(
+        requested_by_id=1,
+        approved_by_id=2,
+        approved_by=SimpleNamespace(is_superuser=False),
+    )
+    admin_self = SimpleNamespace(
+        requested_by_id=1,
+        approved_by_id=1,
+        approved_by=SimpleNamespace(is_superuser=True),
+    )
+    non_admin_self = SimpleNamespace(
+        requested_by_id=1,
+        approved_by_id=1,
+        approved_by=SimpleNamespace(is_superuser=False),
+    )
+
+    assert command_handlers._approval_identities_are_authorized(distinct) is True
+    assert command_handlers._approval_identities_are_authorized(admin_self) is True
+    assert (
+        command_handlers._approval_identities_are_authorized(non_admin_self) is False
+    )
+
+
 def test_openbao_import_apply_approve_by_distinct_actor_queues_and_dispatches(
     command_handlers_module,
     monkeypatch: pytest.MonkeyPatch,
@@ -3759,6 +3786,7 @@ def test_openbao_import_apply_approve_by_distinct_actor_queues_and_dispatches(
     assert approve_calls == [
         {
             "approver_id": user.pk,
+            "allow_requester_approval": False,
             "current_protected": {"procedure_id": procedure.pk},
             "reason": "Approved audited netbox-openbao credential import.",
             "queue_after_approval": True,
@@ -4021,6 +4049,7 @@ def test_proxmox_oci_pull_approval_queues_with_distinct_actor_identity(
     assert approvals == [
         {
             "approver_id": 2,
+            "allow_requester_approval": False,
             "current_protected": {"procedure_id": 153},
             "reason": "Approved audited Proxmox OCI registry pull.",
             "queue_after_approval": True,
@@ -4243,6 +4272,7 @@ def test_samba_ad_dc_provision_approval_queues_with_distinct_actor_identity(
     assert approvals == [
         {
             "approver_id": 2,
+            "allow_requester_approval": False,
             "current_protected": {"procedure_id": 153},
             "reason": "Approved audited Ubuntu 26.04 Samba AD DC provision.",
             "queue_after_approval": True,

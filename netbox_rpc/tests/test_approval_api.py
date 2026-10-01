@@ -8,9 +8,9 @@ aggregate. State is never mutated via CRUD (PUT/PATCH/DELETE disabled).
 from __future__ import annotations
 
 from django.test import TestCase
-from rest_framework.exceptions import PermissionDenied
-from rest_framework.test import APIClient
 from django.urls import reverse
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.test import APIClient
 
 from netbox_rpc.application.command_handlers import approve_execution
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
@@ -61,14 +61,13 @@ class ApprovalApiTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == ExecutionStatus.APPROVED.value
 
-    def test_requester_cannot_approve_own_via_api(self):
+    def test_admin_requester_can_approve_own_via_api(self):
         ex = _make_pending(self.requester)
         self.client.force_authenticate(user=self.requester)
         resp = self.client.post(_url("approve", ex), {}, format="json")
-        # Aggregate segregation-of-duties -> ValidationError -> HTTP 400.
-        assert resp.status_code == 400, resp.content
+        assert resp.status_code == 200, resp.content
         ex.refresh_from_db()
-        assert ex.status == ExecutionStatus.PENDING_APPROVAL.value
+        assert ex.status == ExecutionStatus.APPROVED.value
 
     def test_reject_via_api_is_terminal(self):
         ex = _make_pending(self.requester)
@@ -132,3 +131,25 @@ class ApprovalAuthorizationTests(TestCase):
         scoped = make_user("authz-scoped", superuser=False)  # refresh perm cache
         with self.assertRaises(PermissionDenied):
             approve_execution(ex, scoped)
+
+    def test_permissioned_non_admin_cannot_approve_own_execution(self):
+        from core.models import ObjectType
+        from users.models import ObjectPermission
+
+        requester = make_user("authz-non-admin-requester", superuser=False)
+        ex = _make_pending(requester)
+        permission = ObjectPermission.objects.create(
+            name="non-admin-self-approval",
+            actions=["view", "approve"],
+        )
+        permission.object_types.set(
+            [ObjectType.objects.get_for_model(ex.procedure.__class__)]
+        )
+        permission.users.set([requester])
+        requester = make_user("authz-non-admin-requester", superuser=False)
+
+        with self.assertRaisesMessage(
+            ValidationError,
+            "The requester cannot approve or reject their own execution",
+        ):
+            approve_execution(ex, requester)

@@ -124,7 +124,8 @@ deletions remain blocked, while provider audit foreign keys can take `KEY SHARE`
 without reversing the provider material-write lock order. Procedure, backend,
 target and command locks retain their full strength, including protection
 against new child command inserts. Approval-required and destructive procedures additionally need immutable
-current approval from an active, authorized distinct approver. The helper also
+current approval from an active, authorized approver. Non-superusers require a
+distinct approver; a NetBox superuser may self-approve. The helper also
 requires that approver's current `approve` scope to include this exact procedure;
 approval permission for another procedure is insufficient. Classes still
 using only the legacy approval permission gate cannot reveal credentials.

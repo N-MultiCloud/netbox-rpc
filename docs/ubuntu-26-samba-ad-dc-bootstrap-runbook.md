@@ -102,10 +102,10 @@ inactive.
   password of at least 12 characters (at most 512 UTF-8 bytes) with at least
   three of upper case, lower case, digits and symbols that does not contain the
   word `Administrator`; the installer also enforces Samba's own complexity check.
-- A **requester** and a **distinct approver**. Both need permissions constrained
-  to the `provision` procedure (execute for the requester, approve for the
-  approver); the approver holds the bounded `approve_rpcprocedure` permission for
-  this task only. Do not request or use that permission autonomously.
+- A **requester** and an **authorized approver**. A non-superuser requester needs
+  a distinct approver; a NetBox superuser may self-approve. The execute and
+  approve permissions remain constrained to the `provision` procedure. Do not
+  request or use that permission autonomously.
 
 ## Operator inputs
 
@@ -171,25 +171,28 @@ the VM.
 
 `provision` is `approval_required`, and that flag applies to the whole
 procedure, so **even the dry run is created `pending_approval` and needs a
-distinct approver**. Review the dry-run result before requesting the live run.
+decision**. A non-superuser requester needs a distinct approver; a NetBox
+superuser may self-approve. Review the dry-run result before requesting the live
+run.
 
-### 3. Two-person approval
+### 3. Approval
 
 Take the pre-run VM snapshot now. Then request the live run by adding
 `"dry_run": false` and `"admin_credential_pk": <id>` to the same parameters.
 
-`provision` is on the **protected two-person approval path** (the same contract
+`provision` is on the **protected approval path** (the same contract
 family as `install_akvorado` and the Proxmox OCI pull): creation records
 `ExecutionRequested` and `ApprovalRequested`, stores an immutable approval
-snapshot and returns `pending_approval` without enqueueing; a **distinct**
-approver holding an object-scoped `approve_rpcprocedure` permission for this exact
-procedure then decides with a fixed, value-free phrase. Approval re-checks the
+snapshot and returns `pending_approval` without enqueueing. A non-superuser
+requester needs a distinct approver; a NetBox superuser may self-approve. The
+approver must hold object-scoped `approve_rpcprocedure` permission for this exact
+procedure and decides with a fixed, value-free phrase. Approval re-checks the
 snapshot and the backend capability, atomically queues the run, and dispatch
 carries a signed one-time lease. The snapshot pins the complete catalog policy,
 both schemas, the command contract, the target object, the normalized settings
 (including `admin_credential_pk`, never a password) and the backend URL/TLS
-identity. The requester cannot approve their own request. Both the execute and
-the approve permission must be constrained to include this procedure; because
+identity. Both the execute and the approve permission must be constrained to
+include this procedure; because
 `approval_required` is procedure-level, a **dry run is approved the same way**.
 
 Before approving, the approver reviews the exact parameters in the snapshot and
@@ -305,7 +308,7 @@ parameter, and a value that looks like one is refused before anything is stored.
   environment variables are stripped.
 - The approval snapshot binds every concrete resolved setting and the exact
   assigned object (content type and ID), and differs between a dry run and a live
-  run. A distinct approver and a signed one-time dispatch lease are required, and
+  run. An authorized approver and a signed one-time dispatch lease are required, and
   the protected path accepts no backend progress events: only the validated
   result is stored.
 - The result contains no secret and every free-form string is length-bounded.
@@ -326,7 +329,7 @@ with the immutable approval snapshot, so any drift invalidates the approval
   (`last_updated`). A rotated credential invalidates the approval.
 
 `admin_credential_pk` is authorized, without reading or decrypting any secret, for
-both the requester (at creation) and the distinct approver (at approval): the
+both the requester (at creation) and the approver (at approval): the
 `netbox-nms` `DeviceCredential` must exist and be viewable by that actor through
 NetBox object permissions, be a locally stored password credential with stored
 material, and differ from the target's SSH login identity. `DeviceCredential` has

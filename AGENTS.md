@@ -18,7 +18,8 @@ checks.
 
 - Use `os.linux.proxmox.oci_registry_pull` for the public
   `emersonfelipesp/netbox-proxbox` appliance only.
-- Keep it `effect="write"`, protected by distinct-requester two-person approval,
+- Keep it `effect="write"`, protected by the approval workflow (a distinct
+  approver for non-superusers; self-approval permitted for a NetBox superuser),
   AsyncSSH-pinned, and without a transport fallback chain.
 - Require `proxmox_endpoint_id` to equal the execution target object. Never
   accept caller-provided credentials, command text, argv, registry credentials,
@@ -291,7 +292,7 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   network command/query gateway service as drivers migrate out of
   `nms-backend`.
 
-### Two-person approval workflow (#164, #221/#224/#235 scoped enforcement)
+### Approval workflow (#164, #221/#224/#235 scoped enforcement)
 
 The execution aggregate carries an additive **approval-workflow** surface (the
 foundation of the P0 two-person-approval epic #163). Issues #221 and #224
@@ -325,9 +326,11 @@ until they are migrated deliberately.
   (never enqueues) → `approve` / `reject` / `expire`. A protected procedure's
   successful `approve` atomically adds `ExecutionApproved` then
   `ExecutionQueued`, after which the application enqueues one RQ job and adds
-  `JobEnqueued`. `approve`/`reject` enforce
-  **segregation of duties** (the requester cannot decide their own request) and
-  `approve` re-checks the snapshot; the decision is serialised with a
+  `JobEnqueued`. `approve` normally enforces **segregation of duties**, but a
+  NetBox `is_superuser=True` actor may approve their own request after the same
+  `approve_rpcprocedure` and object-scope checks. Non-superusers still require
+  a distinct approver, and self-rejection remains prohibited. `approve`
+  re-checks the snapshot; the decision is serialised with a
   `select_for_update` row lock + in-transaction status recheck so
   double/concurrent approvals, approve-vs-cancel, and expiry-vs-decision resolve
   to a single deterministic event.
@@ -346,8 +349,8 @@ until they are migrated deliberately.
   and single-decision concurrency guards; `get_object()` already object-restricts
   the execution row. The staging rotation, production Gitea upgrade, and
   isolated-runner registration use
-  this API: creation requires execute permission scoped to the exact procedure and never accepts
-  a same-request bypass; a distinct actor with approval permission scoped to
+  this API: creation requires execute permission scoped to the exact procedure.
+  Approval requires an actor with approval permission scoped to
   that procedure must decide it. Other procedures are not implicitly migrated
   to this lifecycle.
 - **Authoritative opt-in + selected backend (#166)**: `RpcPluginSettings.enabled`
@@ -527,7 +530,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
-| `os.linux.ubuntu.26.samba_ad_dc.provision` | Creates the FIRST DC of a NEW Active Directory domain on a fresh VM and is **not rerunnable**; there is no domain rollback and recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight` first, then `provision` with `dry_run=true` (the default; it also needs a distinct approver) and show the operator the full plan and rendered configuration. Confirm the exact target VM or device, that a disposable or freshly snapshotted VM with console access exists, the `ssh_ports`/`ssh_networks` allowlist (a wrong value can lock out SSH when the nftables firewall is applied), the client networks and forwarder, and the `share_path`. The Administrator password is supplied only as an `admin_credential_pk` reference to a `netbox-nms` `DeviceCredential`; never request, generate, print or store the password itself and never put it in params, notes or logs. Never enable, create, approve or dispatch autonomously. |
+| `os.linux.ubuntu.26.samba_ad_dc.provision` | Creates the FIRST DC of a NEW Active Directory domain on a fresh VM and is **not rerunnable**; there is no domain rollback and recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight` first, then `provision` with `dry_run=true` (the default; it also needs an authorized approver, distinct for non-superusers) and show the operator the full plan and rendered configuration. Confirm the exact target VM or device, that a disposable or freshly snapshotted VM with console access exists, the `ssh_ports`/`ssh_networks` allowlist (a wrong value can lock out SSH when the nftables firewall is applied), the client networks and forwarder, and the `share_path`. The Administrator password is supplied only as an `admin_credential_pk` reference to a `netbox-nms` `DeviceCredential`; never request, generate, print or store the password itself and never put it in params, notes or logs. Never enable, create, approve or dispatch autonomously. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 | `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 | `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
@@ -598,8 +601,9 @@ not enqueue. It rejects backend/request/trace/comments/tags/custom-field
 metadata (even empty values), and approval/rejection accept no caller reason;
 fixed bounded phrases are the only durable decision messages. Both the execute and approve permissions must include this exact
 procedure; an object permission constrained to some other procedure does not
-grant access. The requester cannot approve their own request even if they hold
-the approval permission. A distinct approver records an immutable
+grant access. A non-superuser requester cannot approve their own request even
+if they hold the approval permission. A NetBox superuser may self-approve and
+records the same immutable
 `approved_by` identity, then the same decision transaction records
 `ExecutionApproved` and `ExecutionQueued`; only afterward is one RQ job
 enqueued. The snapshot includes canonical hashes for the complete immutable
@@ -607,7 +611,7 @@ procedure policy, transport/output pipeline, representative command,
 params/result schemas, and concrete backend URL/TLS identity. Admission,
 approval, worker claim, and pre-lease validation require the exact enabled
 name, handler, version, device target, destructive effect, 1800-second timeout,
-approval bit, and schemas, as well as distinct non-null requester/approver identities. Those identities are exposed read-only
+approval bit, and schemas, as well as authorized non-null requester/approver identities. Those identities are exposed read-only
 on the execution API and bound into the signed one-time dispatch lease.
 
 Unlike ordinary procedures' backwards-compatible ID-only dispatch, this
@@ -896,7 +900,7 @@ pending approval or distinct-actor check.
   VM170 target-owned SSH service/credential revisions, fixed origin/org, and
   lane digest into approval/lease evidence. Redirect-free streaming transport
   has an 8192-byte body cap and 1740-second absolute deadline; events and
-  backend diagnostics are discarded. A distinct approver, exact compatible
+  backend diagnostics are discarded. An authorized approver, exact compatible
   capability, signed lease, exclusive canonical-scope fence, and full
   1800-second reconciliation quiescence window are mandatory. A monotonic
   JS-safe generation binds normalization, approval, lease, reservation, and
@@ -1995,7 +1999,7 @@ pending approval or distinct-actor check.
     It is in `PROTECTED_APPROVAL_PROCEDURE_NAMES` (like `install_akvorado` and the
     OCI pull): creation records `ExecutionRequested` then `ApprovalRequested`,
     persists an immutable non-secret approval snapshot, returns
-    `pending_approval` and never enqueues (dry runs included); a distinct approver
+    `pending_approval` and never enqueues (dry runs included); an authorized approver
     with an object-scoped approve permission decides with a fixed phrase; a signed
     one-time lease is required; no backend progress events are accepted and the
     outer and nested `ok` must agree. `netbox_rpc/samba_ad_dc_protected_contract.py`
@@ -2580,8 +2584,8 @@ that automatically -- reconcile first.
 Both handlers are `EXEMPT_HANDLER_RATIONALE` entries (backend-orchestrated:
 environment-to-root mapping and stdout summary parsing have no faithful
 fixed-argv representation) with one representative command row each. Like
-every other `PROTECTED_APPROVAL_PROCEDURE_NAMES` member, `apply` requires a
-distinct requester/approver, an immutable approval snapshot, and a signed
+every other `PROTECTED_APPROVAL_PROCEDURE_NAMES` member, `apply` requires an
+authorized approver (distinct for non-superusers), an immutable approval snapshot, and a signed
 one-time dispatch lease before the backend is ever called; never create or
 approve it autonomously. Present the exact target device and environment to
 the operator before dispatching either procedure, and run `dry_run` before

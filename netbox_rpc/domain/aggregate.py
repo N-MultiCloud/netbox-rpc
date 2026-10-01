@@ -202,13 +202,19 @@ class RPCExecutionAggregate:
         self,
         *,
         approver_id: Any,
+        allow_requester_approval: bool = False,
         current_protected: dict[str, Any] | None = None,
         reason: str = "",
         queue_after_approval: bool = False,
     ) -> None:
-        """Second-actor approval. Enforces segregation of duties + snapshot match."""
+        """Approve with snapshot checks and an explicit admin self-approval policy."""
         snapshot = self._require_snapshot()
-        self._require_distinct_actor(approver_id, snapshot)
+        if not allow_requester_approval:
+            self._require_distinct_actor(approver_id, snapshot)
+        elif approver_id is None:
+            raise RPCExecutionAggregateError(
+                "An authenticated approver is required to decide an approval."
+            )
         if current_protected is not None and not snapshot.matches_current(
             current_protected
         ):

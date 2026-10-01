@@ -125,7 +125,7 @@ NETBOX_STAGING_DEPLOY_DNS_PAIR_HANDLER = NETBOX_STAGING_DEPLOY_DNS_PAIR
 # supplies only a closed `environment` enum; the backend maps it server-side
 # to a fixed NetBox root, venv python, and management command invocation.
 # `dry_run` is read/no-approval; `apply` is destructive/approval-required with
-# a distinct requester/approver and a signed accept-once lease.
+# an authorized approval decision and a signed accept-once lease.
 NETBOX_OPENBAO_IMPORT_DRY_RUN = "service.netbox.openbao_import.dry_run"
 NETBOX_OPENBAO_IMPORT_DRY_RUN_HANDLER = NETBOX_OPENBAO_IMPORT_DRY_RUN
 NETBOX_OPENBAO_IMPORT_APPLY = "service.netbox.openbao_import.apply"
@@ -447,7 +447,7 @@ AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES = frozenset(
 )
 #: Mints and rotates the credential NetBox authenticates to OpenBao with, so
 #: it sits in the protected paths alongside the other credential-bearing
-#: procedures: a distinct approver, an immutable snapshot, a fail-closed
+#: procedures: an authorized approver, an immutable snapshot, a fail-closed
 #: capability check, and a one-time signed dispatch lease. Without the lease,
 #: replaying a backend execution id mints another credential with no new
 #: approval decision.

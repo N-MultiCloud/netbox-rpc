@@ -387,7 +387,7 @@ class ApprovalRequested:
 
     @property
     def message(self) -> str:
-        return "Approval requested; execution is pending a second-actor decision."
+        return "Approval requested; execution is pending an authorized decision."
 
     @property
     def data(self) -> dict[str, Any]:
@@ -412,8 +412,7 @@ class ApprovalRequested:
 
 @dataclass(frozen=True)
 class ExecutionApproved:
-    """Second-actor approval. ``approved_by_id`` MUST differ from the requester
-    (segregation of duties is enforced in the aggregate)."""
+    """Approval by a second actor or an explicitly authorized superuser."""
 
     approved_by_id: Any
     snapshot_hash: str

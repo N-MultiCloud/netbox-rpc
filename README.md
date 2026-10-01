@@ -4,7 +4,9 @@ Optional providers can use [execution-bound credential references](docs/credenti
 to authorize a just-in-time field bundle from an immutable RPC execution and its
 signed dispatch lease. Reference-bearing dispatch remains fail-closed until a
 compatible executor/provider and explicit executor identity are configured.
-Protected requests retain immutable two-person approval. Providers must recheck
+Protected requests retain immutable approval: non-superusers require a distinct
+approver, while a NetBox superuser may self-approve under the same permission,
+object-scope, snapshot, and audit checks. Providers must recheck
 the verified lease expiry after their lock waits and immediately before reveal;
 the authority result is not a lifetime extension or a replay receipt.
 
@@ -191,8 +193,10 @@ The procedure catalog is intentionally narrow:
   field are rejected even when empty. Approval/rejection bodies accept no
   operator note and audit a fixed bounded reason. Creation returns `pending_approval`
   without enqueueing; execute and approve permissions must each be scoped to
-  this exact procedure. A distinct approver records immutable requester/approver
-  identities, queues the run, and those identities are bound into its one-time
+  this exact procedure. A distinct approver normally records the decision; a
+  NetBox superuser may approve their own request while retaining the same
+  permission and object-scope checks. The requester/approver identities are
+  immutable, queue the run, and are bound into its one-time
   signed dispatch lease. This procedure has no ID-only compatibility fallback:
   absent signing keys fail with `RPC_DISPATCH_LEASE_REQUIRED` before any
   backend request. Admission, approval, worker claim, and pre-lease checks pin
@@ -391,7 +395,7 @@ The procedure catalog is intentionally narrow:
   evidence. Backend responses are redirect-free, streamed, capped at 8192
   bytes, and governed by a 1740-second absolute deadline. Only the closed
   five-key envelope is projected; backend events and diagnostics are discarded.
-  A distinct approver, exact capability, signed lease, exclusive scope fence,
+  An authorized approver, exact capability, signed lease, exclusive scope fence,
   and full 1800-second reconciliation quiescence window are mandatory. Each
   reservation advances a monotonic, approval/lease/result-bound
   `fence_generation`; the legacy registration procedure uses that same
@@ -404,8 +408,8 @@ The procedure catalog is intentionally narrow:
 - `service.gitea.actions_runner.protected_pair.prove` and
   `service.gitea.actions_runner.protected_pair.provision` — parameter-free,
   disabled-by-default contracts for the fixed VM 416 protected publication
-  runner set. Proof is read-only; provisioning is destructive and requires a
-  distinct approver. Both bind the exact `N-MultiCloud` organization scope,
+  runner set. Proof is read-only; provisioning is destructive and requires an
+  authorized approver. Both bind the exact `N-MultiCloud` organization scope,
   singleton `release-validator`, `release-builder`, and `release-publisher`
   labels, pairwise-distinct runner IDs, process identities, service accounts,
   work/state/cache roots, and the
@@ -973,8 +977,9 @@ admitted by the backend only after that same service stores the `known_hosts`
 line and enables strict checking. The sole install parameter is
 `allow_resource_shortfall` (default `false`), covering an explicit approved
 exception to the 8-vCPU/16-GiB/50-GiB minimum.
-The installer also uses the protected two-person approval path: concrete
-procedure-scoped execute/approve restrictions, distinct requester and approver,
+The installer also uses the protected approval path: concrete procedure-scoped
+execute/approve restrictions, an authorized approver (distinct for
+non-superusers),
 an immutable target/backend/params snapshot, approval-time capability
 revalidation, and a required signed one-time dispatch lease. That public
 snapshot and command fingerprint bind the exact target hash, SSH service and
@@ -1032,9 +1037,11 @@ destination is derived from the assigned object; `provision` accepts **no**
 `rpc_ssh_*` override, so the execution runs against the object named in the
 request and the normalized payload and fingerprint bind its content type and ID
 (`preflight` and `verify` accept the shared optional overrides). `provision` is on
-the **protected two-person approval path** (like `install_akvorado` and the
+the **protected approval path** (like `install_akvorado` and the
 Proxmox OCI pull): creation stays `pending_approval` with an immutable snapshot
-until a distinct approver with an object-scoped approve permission decides, and
+until an authorized approver with an object-scoped approve permission decides.
+A non-superuser requester still needs a distinct approver; a NetBox superuser
+may approve their own request. In both cases,
 dispatch carries a signed one-time lease (dry runs included, since
 `approval_required` is procedure-level). Its complete catalog policy and both
 schemas are pinned by `netbox_rpc.samba_ad_dc_protected_contract`. The snapshot also freezes the resolved SSH destination, pinned host key and

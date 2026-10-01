@@ -2,7 +2,7 @@
 
 `service.gitea.runner.register` is the only audited RPC path for registering
 the isolated runner identities declared by `nmulticloud-context/ci/runners`.
-It is destructive, requires a distinct approver, is seeded disabled by
+It is destructive, requires an authorized approver (distinct for non-superusers), is seeded disabled by
 migration `0080`, upgraded onto the shared generation protocol by migration
 `0087`, and is additionally blocked by a code availability gate. It
 must not be enabled or dispatched until the coordinated catalog, backend,

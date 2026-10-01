@@ -2,8 +2,8 @@
 
 ``os.linux.ubuntu.26.samba_ad_dc.provision`` creates the first domain controller
 of a NEW Active Directory domain and cannot be rerun, so it is registered in the
-protected two-person approval catalog: creation stays ``pending_approval`` until a
-distinct approver decides, the approval snapshot pins the complete catalog policy,
+protected approval catalog: creation stays ``pending_approval`` until an
+authorized approver decides, the approval snapshot pins the complete catalog policy,
 both schemas, the command contract and the backend target, and dispatch requires a
 signed one-time lease.
 
