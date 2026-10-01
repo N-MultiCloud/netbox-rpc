@@ -1235,7 +1235,7 @@ class RPCApprovalRequest(NetBoxModel):
     """Immutable approval snapshot for an approval-gated ``RPCExecution`` (issue #164).
 
     Created exactly once when an approval-required execution is requested. It
-    pins every value a distinct second-actor approval must decide against, plus
+    pins every value an authorized approval must decide against, plus
     a tamper-evident ``payload_hash`` over those protected fields. Any later
     change to the procedure policy or schema hashes, target snapshot,
     normalized params/command fingerprint, backend, or credential policy

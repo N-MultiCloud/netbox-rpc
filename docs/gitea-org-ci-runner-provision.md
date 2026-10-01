@@ -99,7 +99,7 @@ Each snapshot carries the exact service and credential IDs/revisions, local
 storage backend, principal, method, host, port 22, known-host digest, and policy
 reference. The command fingerprint const-binds both target-object digests, the
 lane-specific scope and lane-contract digest, the two snapshot digests, and the
-fixed Gitea origin/organization. A distinct approver, current compatible
+fixed Gitea origin/organization. An authorized approver, current compatible
 backend capability, and signed one-time dispatch lease are mandatory; there is
 no ID-only fallback.
 

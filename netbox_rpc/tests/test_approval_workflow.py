@@ -79,6 +79,17 @@ class ApprovalWorkflowTests(TestCase):
         ex.refresh_from_db()
         assert ex.status == ExecutionStatus.PENDING_APPROVAL.value
 
+    def test_admin_policy_can_allow_requester_to_approve_own_execution(self):
+        ex, snap = _open_pending(requester=self.requester)
+        RPCExecutionAggregate(ex).approve(
+            approver_id=self.requester.pk,
+            allow_requester_approval=True,
+            current_protected=snap.protected_payload(),
+        )
+        ex.refresh_from_db()
+        assert ex.status == ExecutionStatus.APPROVED.value
+        assert ex.approved_by_id == self.requester.pk
+
     def test_second_actor_can_approve(self):
         ex, snap = _open_pending(requester=self.requester)
         RPCExecutionAggregate(ex).approve(

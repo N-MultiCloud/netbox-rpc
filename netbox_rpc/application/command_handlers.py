@@ -1417,16 +1417,10 @@ def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
                 "RPC_APPROVAL_INVALIDATED",
             )
             return
-        requested_by_id = getattr(execution, "requested_by_id", None)
-        approved_by_id = getattr(execution, "approved_by_id", None)
-        if (
-            requested_by_id is None
-            or approved_by_id is None
-            or str(requested_by_id) == str(approved_by_id)
-        ):
+        if not _approval_identities_are_authorized(execution):
             agg.fail(
                 f"{_protected_label(procedure.name)} requires a destructive, approval-required "
-                "procedure and distinct requester/approver identities.",
+                "procedure and authorized approval identities.",
                 "RPC_APPROVAL_REQUIRED",
             )
             return
@@ -1981,15 +1975,9 @@ def _require_current_protected_approval(
             code="RPC_APPROVAL_INVALIDATED",
         ) from exc
 
-    requested_by_id = getattr(execution, "requested_by_id", None)
-    approved_by_id = getattr(execution, "approved_by_id", None)
-    if (
-        requested_by_id is None
-        or approved_by_id is None
-        or str(requested_by_id) == str(approved_by_id)
-    ):
+    if not _approval_identities_are_authorized(execution):
         raise RPCExecutionError(
-            f"{_protected_label(procedure_name)} requires distinct requester and approver identities.",
+            f"{_protected_label(procedure_name)} requires authorized approval identities.",
             code="RPC_APPROVAL_REQUIRED",
         )
 
@@ -2125,12 +2113,23 @@ def _require_approval_authorization(execution: object, user: object) -> None:
         )
 
 
-def approve_execution(execution: object, user: object, *, reason: str = "") -> object:
-    """Second-actor approval command (POST). Never mutates state via CRUD.
+def _approval_identities_are_authorized(execution: object) -> bool:
+    """Accept two actors, or one superuser whose self-approval was authorized."""
+    requested_by_id = getattr(execution, "requested_by_id", None)
+    approved_by_id = getattr(execution, "approved_by_id", None)
+    if requested_by_id is None or approved_by_id is None:
+        return False
+    if str(requested_by_id) != str(approved_by_id):
+        return True
+    return bool(getattr(getattr(execution, "approved_by", None), "is_superuser", False))
 
-    Authorization is enforced here; the aggregate enforces segregation of
-    duties, the pending-approval status guard, and single-decision concurrency
-    (``select_for_update`` + status recheck).
+
+def approve_execution(execution: object, user: object, *, reason: str = "") -> object:
+    """Approval command (POST), including the audited superuser exception.
+
+    Authorization is enforced here. A NetBox superuser may approve their own
+    request; every other actor remains subject to segregation of duties. The
+    aggregate still enforces the pending-status and single-decision guards.
     """
     _require_approval_authorization(execution, user)
     if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
@@ -2144,7 +2143,11 @@ def approve_execution(execution: object, user: object, *, reason: str = "") -> o
         _require_protected_procedure_scope(execution.procedure, user, "approve")
         return _approve_protected_execution(execution, user)
     try:
-        RPCExecutionAggregate(execution).approve(approver_id=user.pk, reason=reason)
+        RPCExecutionAggregate(execution).approve(
+            approver_id=user.pk,
+            allow_requester_approval=bool(getattr(user, "is_superuser", False)),
+            reason=reason,
+        )
     except RPCExecutionAggregateError as exc:
         raise drf_serializers.ValidationError({"status": str(exc)}) from exc
     execution.refresh_from_db()
@@ -2201,6 +2204,7 @@ def _approve_protected_execution(
             )
             RPCExecutionAggregate(locked).approve(
                 approver_id=user.pk,
+                allow_requester_approval=bool(getattr(user, "is_superuser", False)),
                 current_protected=current_protected,
                 reason=_PROTECTED_APPROVAL_REASON[locked.procedure.name],
                 queue_after_approval=True,

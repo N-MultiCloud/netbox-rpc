@@ -436,7 +436,8 @@ def _current_approval(
 
     # Legacy permission-only approvals are not sufficient evidence.
     _require(procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES)
-    _require(execution.approved_by_id != execution.requested_by_id)
+    if execution.approved_by_id == execution.requested_by_id:
+        _require(bool(getattr(execution.approved_by, "is_superuser", False)))
     _active_actor(execution.approved_by, "netbox_rpc.approve_rpcprocedure")
     _require_protected_procedure_scope(procedure, execution.approved_by, "approve")
     _viewable(type(procedure), execution.approved_by, procedure.pk)
