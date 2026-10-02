@@ -248,7 +248,7 @@ def _load_command_contract():
 # --------------------------------------------------------------------------- #
 
 
-def test_constants_are_complete_capability_gated_and_provision_is_protected() -> None:
+def test_constants_are_complete_and_capability_gated() -> None:
     constants = runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
 
     assert constants["UBUNTU_26_SAMBA_AD_DC_PREFLIGHT"] == PREFLIGHT
@@ -263,10 +263,6 @@ def test_constants_are_complete_capability_gated_and_provision_is_protected() ->
         frozenset(ALL_PROCEDURES)
         <= constants["EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES"]
     )
-    # Only the destructive installer is two-person protected; the reads are not.
-    protected = constants["PROTECTED_APPROVAL_PROCEDURE_NAMES"]
-    assert PROVISION in protected
-    assert not {PREFLIGHT, VERIFY} & protected
 
 
 def test_seed_names_and_handler_ids_equal_the_constants(catalog) -> None:
@@ -996,137 +992,51 @@ def test_a_failed_provision_result_still_projects_when_schema_valid(
 
 
 # --------------------------------------------------------------------------- #
-# Protected two-person contract
+# Single-operator gate (not the protected two-person path)
 # --------------------------------------------------------------------------- #
 
 
-def _load_protected_contract():
-    spec = importlib.util.spec_from_file_location(
-        "samba_ad_dc_protected_contract_under_test",
-        ROOT / "netbox_rpc/samba_ad_dc_protected_contract.py",
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def test_provision_is_gated_by_the_permission_not_the_two_person_path() -> None:
+    constants = runpy.run_path(str(ROOT / "netbox_rpc/constants.py"))
+
+    protected = constants["PROTECTED_APPROVAL_PROCEDURE_NAMES"]
+    assert not set(ALL_PROCEDURES) & protected
+    # Other protected procedures are untouched.
+    assert "os.linux.proxmox.oci_registry_pull" in protected
+    assert "os.linux.debian.13.install_akvorado" in protected
+    # The explicit backend-capability requirement still applies to all three.
+    explicit = constants["EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES"]
+    assert set(ALL_PROCEDURES) <= explicit
 
 
-def test_immutable_contract_matches_the_seeded_catalog(catalog) -> None:
-    _seed, procedures, commands = catalog
-    contract = _load_protected_contract()
+def test_the_seeded_provision_row_keeps_the_destructive_approval_gate(catalog) -> None:
+    _seed, procedures, _commands = catalog
     row = procedures.rows[PROVISION]
-    command = {"sequence": 1, **commands.rows[(PROVISION, 1)]}
-
-    assert contract.PARAMS_SCHEMA == row["params_schema"]
-    assert contract.RESULT_SCHEMA == row["result_schema"]
-    assert contract.COMMAND_CONTRACT == [command]
-    expected_policy = {
-        key: value
-        for key, value in row.items()
-        if key not in {"description", "params_schema", "result_schema"}
-    }
-    expected_policy["command_contract_sha256"] = contract.canonical_sha256([command])
-    expected_policy["name"] = PROVISION
-    assert contract.PROCEDURE_POLICY == expected_policy
-    assert contract.PROCEDURE_POLICY["enabled"] is True
-    assert contract.PROCEDURE_POLICY["approval_required"] is True
-    assert contract.PROCEDURE_POLICY["effect"] == "destructive"
-    assert contract.PROCEDURE_POLICY["timeout_seconds"] == 3600
-    assert contract.PROCEDURE_POLICY["transport_pinned"] is True
+    assert row["effect"] == "destructive"
+    assert row["approval_required"] is True
+    assert row["enabled"] is True
+    assert row["params_schema"]["properties"]["dry_run"]["default"] is True
 
 
-def test_the_contract_hashes_are_stable_and_distinct() -> None:
-    contract = _load_protected_contract()
-    hashes = {
-        contract.PROCEDURE_POLICY_SHA256,
-        contract.COMMAND_CONTRACT_SHA256,
-        contract.PARAMS_SCHEMA_SHA256,
-        contract.RESULT_SCHEMA_SHA256,
-    }
-    assert len(hashes) == 4
-    assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes)
-    assert contract.PROCEDURE_POLICY_SHA256 == contract.canonical_sha256(
-        contract.PROCEDURE_POLICY
-    )
-
-
-def test_provision_is_registered_in_every_protected_runtime_map() -> None:
+def test_provision_has_no_protected_runtime_registration() -> None:
     source = (ROOT / "netbox_rpc/application/command_handlers.py").read_text(
         encoding="utf-8"
     )
-
-    assert "UBUNTU_26_SAMBA_AD_DC_PROVISION: samba_ad_dc_protected_contract" in source
-    assert (
-        "UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_APPROVAL_REASON"
-        in source
-    )
-    assert (
-        "UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_REJECTION_REASON"
-        in source
-    )
-    assert (
-        'UBUNTU_26_SAMBA_AD_DC_PROVISION: "Ubuntu 26.04 Samba AD DC provision"'
-        in source
-    )
-    # Fixed, value-free decision phrases only.
-    assert '"Approved audited Ubuntu 26.04 Samba AD DC provision."' in source
-    assert '"Rejected audited Ubuntu 26.04 Samba AD DC provision."' in source
+    assert not re.search(r"^    UBUNTU_26_SAMBA_AD_DC_PROVISION:", source, re.M)
+    assert "samba_ad_dc_protected_contract" not in source
+    assert "_require_samba_admin_credential_for_approver" not in source
+    assert not (ROOT / "netbox_rpc/samba_ad_dc_protected_contract.py").exists()
 
 
-def test_the_read_procedures_are_not_registered_as_protected() -> None:
+def test_the_admission_validation_runs_inside_the_creation_transaction() -> None:
     source = (ROOT / "netbox_rpc/application/command_handlers.py").read_text(
         encoding="utf-8"
     )
-    assert "UBUNTU_26_SAMBA_AD_DC_PREFLIGHT:" not in source
-    assert "UBUNTU_26_SAMBA_AD_DC_VERIFY:" not in source
-
-
-def test_a_success_wrapper_around_a_failed_nested_result_is_not_success(
-    catalog, event_store_module
-) -> None:
-    """Protected procedures require the outer and nested ``ok`` to agree."""
-
-    _seed, procedures, _commands = catalog
-    event_store, events = event_store_module
-    failed = {
-        **GOOD_RESULTS[PROVISION],
-        "ok": False,
-        "stage": "firewall",
-        "rerunnable": False,
-    }
-    execution = SimpleNamespace(
-        procedure=SimpleNamespace(
-            name=PROVISION, result_schema=procedures.rows[PROVISION]["result_schema"]
-        )
-    )
-
-    event_store.record_backend_response(execution, {"ok": True, "result": failed})
-
-    assert [event.event_name for event in events] == ["ExecutionFailed"]
-    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
-
-
-def test_protected_provision_ignores_backend_progress_events(
-    catalog, event_store_module
-) -> None:
-    """No progress-event channel: the durable surface is the validated result."""
-
-    _seed, procedures, _commands = catalog
-    event_store, events = event_store_module
-    execution = SimpleNamespace(
-        procedure=SimpleNamespace(
-            name=PROVISION, result_schema=procedures.rows[PROVISION]["result_schema"]
-        )
-    )
-    response = {
-        "ok": True,
-        "result": dict(GOOD_RESULTS[PROVISION]),
-        "events": [{"event": "leak", "message": "must not be recorded"}],
-    }
-
-    event_store.record_backend_response(execution, response)
-
-    assert [event.event_name for event in events] == ["ExecutionSucceeded"]
+    assert (
+        "        else:\n"
+        "            _validate_samba_provision_at_admission(execution)\n"
+        "            aggregate.queue()\n"
+    ) in source
 
 
 def _live_success(catalog):

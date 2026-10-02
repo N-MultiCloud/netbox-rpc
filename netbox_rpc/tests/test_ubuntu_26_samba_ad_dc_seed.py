@@ -3,10 +3,9 @@
 The pure-domain tier (``tests/test_ubuntu_26_samba_ad_dc_procedures.py``) drives
 the migration through fake managers, which enforce no column width, NOT NULL,
 uniqueness or JSON round trip. These tests check what only a real database can:
-that migration ``0103`` applied, that the rows carry the intended gating, that the
-stored ``provision`` row still equals its immutable protected contract after the
-JSON round trip, and that creation is capability-gated and enters the two-person
-``pending_approval`` state.
+that migration ``0103`` applied, that the rows carry the intended gating, and that
+creation is capability-gated and, for ``provision``, follows the single-operator
+``approval_required`` gate (queued and enqueued, no ``pending_approval``).
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from jsonschema import Draft202012Validator
 from rest_framework.exceptions import ValidationError
 
 from netbox_rpc import command_contract
-from netbox_rpc import samba_ad_dc_protected_contract as protected_contract
 from netbox_rpc.api.serializers import RPCExecutionSerializer
 from netbox_rpc.application import command_handlers
 from netbox_rpc.models import RPCExecution, RPCProcedure
@@ -178,26 +176,13 @@ class _ProtectedProvisionTestCase(TestCase):
         )
 
 
-class ProtectedContractTests(_ProtectedProvisionTestCase):
-    def test_the_stored_row_equals_the_immutable_contract_after_the_json_round_trip(
-        self,
-    ):
-        procedure = RPCProcedure.objects.get(name=PROVISION)
-
-        assert procedure.params_schema == protected_contract.PARAMS_SCHEMA
-        assert procedure.result_schema == protected_contract.RESULT_SCHEMA
-        assert (
-            command_handlers._protected_procedure_policy(procedure)
-            == protected_contract.PROCEDURE_POLICY
-        )
-        # Admission would raise a ValidationError on any drift.
-        command_handlers._require_protected_procedure_policy(procedure)
-
-    def test_only_provision_is_protected(self):
+class SingleOperatorGateTests(_ProtectedProvisionTestCase):
+    def test_provision_is_not_protected_and_keeps_the_approval_gate(self):
         from netbox_rpc.constants import PROTECTED_APPROVAL_PROCEDURE_NAMES
 
-        assert PROVISION in PROTECTED_APPROVAL_PROCEDURE_NAMES
-        assert not {PREFLIGHT, VERIFY} & PROTECTED_APPROVAL_PROCEDURE_NAMES
+        assert not set(ALL_PROCEDURES) & PROTECTED_APPROVAL_PROCEDURE_NAMES
+        assert self.provision.approval_required is True
+        assert self.provision.effect == "destructive"
 
 
 class CapabilityRequiredTests(_ProtectedProvisionTestCase):
@@ -218,33 +203,44 @@ class CapabilityRequiredTests(_ProtectedProvisionTestCase):
         enqueue.assert_not_called()
 
 
-class PendingApprovalTests(_ProtectedProvisionTestCase):
+class SingleActorCreationTests(_ProtectedProvisionTestCase):
     @mock.patch("netbox_rpc.application.command_handlers._verify_backend_capability")
     @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
-    def test_provision_enters_pending_approval_and_never_enqueues(self, enqueue, _v):
+    def test_provision_is_queued_and_enqueued_without_pending_approval(self, enq, _v):
+        enq.return_value = mock.Mock(pk=1)
         execution = command_handlers.create_execution(
-            serializer=self._serializer(),
-            user=self.requester,
+            serializer=self._serializer(), user=self.requester
         )
         execution.refresh_from_db()
 
-        assert execution.status == RPCExecution.STATUS_PENDING_APPROVAL
-        assert execution.requested_by_id == self.requester.pk
-        assert execution.approved_by_id is None
-        assert execution.job_id is None
-        assert event_names(execution) == ["ExecutionRequested", "ApprovalRequested"]
-        enqueue.assert_not_called()
+        assert execution.status != RPCExecution.STATUS_PENDING_APPROVAL
+        assert "ApprovalRequested" not in event_names(execution)
+        enq.assert_called_once()
+        assert not hasattr(execution, "approval_request") or (
+            getattr(execution, "approval_request", None) is None
+        )
 
-        snapshot = execution.approval_request
-        normalized = snapshot.normalized_params
-        assert normalized["dry_run"] is True
-        assert normalized["domain"] == "ad.example.com"
-        assert normalized["target_object"]["object_id"] == self.device.pk
-        assert normalized["ssh_snapshot"]["ssh_host"] == "10.0.30.10"
-        assert normalized["ssh_policy_ref"].startswith("target-owned-ssh:dcim.device:")
-        rendered = str(normalized).lower() + str(snapshot.command_fingerprint).lower()
-        assert "password" not in rendered
-        assert snapshot.payload_hash
+    @mock.patch("netbox_rpc.application.command_handlers._verify_backend_capability")
+    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
+    def test_a_caller_without_the_approve_permission_is_refused(self, enq, _v):
+        from rest_framework.exceptions import PermissionDenied
+
+        user = make_user("samba-no-approve", superuser=False)
+        # execute only: the approve permission gate must refuse.
+        from core.models import ObjectType
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.create(
+            name="samba-execute-only", actions=["execute"]
+        )
+        permission.object_types.set([ObjectType.objects.get_for_model(RPCProcedure)])
+        permission.users.set([user])
+
+        # Re-fetch so cached permissions do not hide the new grant.
+        user = make_user("samba-no-approve", superuser=False)
+        with self.assertRaises(PermissionDenied):
+            command_handlers.create_execution(serializer=self._serializer(), user=user)
+        enq.assert_not_called()
 
 
 class ConcurrencyFenceTests(_ProtectedProvisionTestCase):

@@ -85,7 +85,7 @@ The procedure catalog is intentionally narrow:
 - `os.linux.ubuntu.24.ookla.check_firewall`
 - `os.linux.ubuntu.24.upgrade_26.{analyze_preupgrade,save_preupgrade_state,run_upgrade,verify_postupgrade}`
 - `os.linux.ubuntu.26.samba_ad_dc.{preflight,provision,verify}` (enabled; capability-gated and
-  `provision` is two-person protected; see the Samba AD DC bootstrap section below)
+  `provision` uses the single-operator approve-permission gate; see the Samba AD DC bootstrap section below)
 - `os.linux.ubuntu.24.{restart,status,start,stop,reload,enable,disable}_service`
   and `os.linux.ubuntu.24.journal_tail` for the allowlisted `influxdb`
   (`influxdb.service`, OSS 2), `influxdb3-core` (`influxdb3-core.service`,
@@ -1037,17 +1037,15 @@ destination is derived from the assigned object; `provision` accepts **no**
 `rpc_ssh_*` override, so the execution runs against the object named in the
 request and the normalized payload and fingerprint bind its content type and ID
 (`preflight` and `verify` accept the shared optional overrides). `provision` is on
-the **protected approval path** (like `install_akvorado` and the
-Proxmox OCI pull): creation stays `pending_approval` with an immutable snapshot
-until an authorized approver with an object-scoped approve permission decides.
-A non-superuser requester still needs a distinct approver; a NetBox superuser
-may approve their own request. In both cases,
-dispatch carries a signed one-time lease (dry runs included, since
-`approval_required` is procedure-level). Its complete catalog policy and both
-schemas are pinned by `netbox_rpc.samba_ad_dc_protected_contract`. The snapshot also freezes the resolved SSH destination, pinned host key and
-SSH/Administrator credential revisions (drift at approval or claim invalidates
-it), `admin_credential_pk` is authorized for both requester and approver, and the
-capability hash pins the installer digest and protocol
+the catalog's **single-operator gate**: `effect=destructive`, `approval_required=true`
+(the `approve_rpcprocedure` permission is required for every execution, dry runs
+included), with no distinct approver, `pending_approval` state or mandatory
+dispatch lease; the requester may approve their own run and it is queued and
+enqueued immediately. It is not on the protected two-person path. The normalized
+payload freezes the resolved SSH destination, pinned host key and SSH and
+Administrator credential revisions (the backend re-checks them at run time),
+`admin_credential_pk` is authorized for the requester, and the capability hash
+pins the installer digest and protocol
 (`tests/fixtures/samba_ad_dc_capability_contract.json`). `provision`
 takes a closed parameter set (`domain`, `netbios`, `hostname`, `ip`, `forwarder`,
 `client_networks`, `ntp_servers`, `timezone`, `share_name`, `share_path`,

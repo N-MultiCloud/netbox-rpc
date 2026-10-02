@@ -22,7 +22,6 @@ from .. import gitea_upgrade_contract as gitea_contract
 from .. import openbao_import_contract
 from .. import proxmox_oci_pull_contract
 from .. import release_marker_contract
-from .. import samba_ad_dc_protected_contract
 from .. import proxbox_api_release_images_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
@@ -58,7 +57,6 @@ from ..domain.normalization import (
     RPCExecutionError,
     code_gate_unavailable_reason,
     normalize_execution_params,
-    resolve_samba_ad_dc_admin_credential,
     validate_akvorado_content_params,
     validate_gitea_docker_runner_target,
     validate_gitea_org_docker_runner_recovery_target,
@@ -174,12 +172,6 @@ _RELEASE_MARKER_RECONCILE_REJECTION_REASON = (
 )
 _PROXMOX_OCI_PULL_APPROVAL_REASON = "Approved audited Proxmox OCI registry pull."
 _PROXMOX_OCI_PULL_REJECTION_REASON = "Rejected audited Proxmox OCI registry pull."
-_SAMBA_AD_DC_PROVISION_APPROVAL_REASON = (
-    "Approved audited Ubuntu 26.04 Samba AD DC provision."
-)
-_SAMBA_AD_DC_PROVISION_REJECTION_REASON = (
-    "Rejected audited Ubuntu 26.04 Samba AD DC provision."
-)
 _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON = (
     "Approved audited recovery of retained proxbox-api release images."
 )
@@ -210,7 +202,6 @@ _PROTECTED_APPROVAL_REASON = {
         _RELEASE_MARKER_RECONCILE_APPROVAL_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_APPROVAL_REASON,
-    UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_APPROVAL_REASON,
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON
     ),
@@ -232,7 +223,6 @@ _PROTECTED_REJECTION_REASON = {
         _RELEASE_MARKER_RECONCILE_REJECTION_REASON
     ),
     LINUX_PROXMOX_OCI_REGISTRY_PULL: _PROXMOX_OCI_PULL_REJECTION_REASON,
-    UBUNTU_26_SAMBA_AD_DC_PROVISION: _SAMBA_AD_DC_PROVISION_REJECTION_REASON,
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON
     ),
@@ -251,7 +241,6 @@ _PROTECTED_CONTRACTS = {
     NETBOX_OPENBAO_IMPORT_APPLY: openbao_import_contract,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
     LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
-    UBUNTU_26_SAMBA_AD_DC_PROVISION: samba_ad_dc_protected_contract,
     proxbox_api_release_images_contract.PROCEDURE_NAME: proxbox_api_release_images_contract,
 }
 _PROTECTED_LABELS = {
@@ -269,7 +258,6 @@ _PROTECTED_LABELS = {
     NETBOX_OPENBAO_IMPORT_APPLY: "netbox-openbao credential import",
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: "Release-marker reconcile",
     LINUX_PROXMOX_OCI_REGISTRY_PULL: "Proxmox OCI registry pull",
-    UBUNTU_26_SAMBA_AD_DC_PROVISION: "Ubuntu 26.04 Samba AD DC provision",
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         "Proxbox API retained-image recovery"
     ),
@@ -693,6 +681,7 @@ def create_execution(
                 requested_by_id=user.pk,
             )
         else:
+            _validate_samba_provision_at_admission(execution)
             aggregate.queue()
 
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
@@ -749,30 +738,20 @@ def _require_no_concurrent_samba_provision(
         )
 
 
-def _require_samba_admin_credential_for_approver(
-    execution: object,
-    normalized: dict[str, Any],
-    approver: object,
-) -> None:
-    """The approver must be authorized for the exact frozen Administrator credential.
+def _validate_samba_provision_at_admission(execution: object) -> None:
+    """Resolve the frozen bindings and authorize the Administrator credential now.
 
-    The requester was checked when the snapshot was built; this repeats the rule
-    for the deciding actor and requires the same credential revision.
+    ``provision`` uses the single-actor ``approval_required`` gate, so there is no
+    approval-time re-normalization; running the normalizer inside the creation
+    transaction fails closed (and rolls back) when the SSH destination, the pinned
+    host key or the Administrator credential is unusable for the requester.
     """
-    snapshot = normalized.get("admin_credential_snapshot")
-    if execution.procedure.name != UBUNTU_26_SAMBA_AD_DC_PROVISION or not snapshot:
+    if execution.procedure.name != UBUNTU_26_SAMBA_AD_DC_PROVISION:
         return
-    ssh_snapshot = normalized.get("ssh_snapshot") or {}
-    current = resolve_samba_ad_dc_admin_credential(
-        normalized.get("admin_credential_pk"),
-        approver,
-        ssh_identity_id=ssh_snapshot.get("ssh_identity_id"),
-    )
-    if current != snapshot:
-        raise RPCExecutionError(
-            "The Administrator credential changed after the request.",
-            code="RPC_APPROVAL_INVALIDATED",
-        )
+    try:
+        normalize_execution_params(execution)
+    except RPCExecutionError as exc:
+        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
 
 
 def _enqueue_execution_job(
@@ -2196,7 +2175,6 @@ def _approve_protected_execution(
                 use_cache=False,
             )
             normalized = normalize_execution_params(locked)
-            _require_samba_admin_credential_for_approver(locked, normalized, user)
             current_protected = _approval_protected_payload(
                 locked,
                 normalized,

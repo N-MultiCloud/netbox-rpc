@@ -90,10 +90,10 @@ command behavior changes.
 > disabled and accepts no caller parameters; see
 > `docs/gitea-production-upgrade-1.27.1.md` for its exact target, artifact,
 > signed-lease, activation, and rollback contract.
-> `os.linux.ubuntu.26.samba_ad_dc.provision` is destructive, is on the protected
-> two-person approval path (creation stays `pending_approval`; a distinct approver
-> and a signed one-time lease are required, dry runs included), and must never be
-> created, approved, or dispatched autonomously. It creates the first DC
+> `os.linux.ubuntu.26.samba_ad_dc.provision` is destructive and uses the
+> single-operator `approval_required` gate (the `approve_rpcprocedure` permission
+> is needed for every execution, dry runs included; no second approver), and must
+> never be created, approved, or dispatched autonomously. It creates the first DC
 > of a NEW Active Directory domain, applies a restricted nftables firewall that
 > can lock out SSH, and is **not rerunnable**: there is no domain rollback and
 > recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight`

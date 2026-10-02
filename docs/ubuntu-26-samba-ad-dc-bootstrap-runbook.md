@@ -34,9 +34,15 @@ names are in the explicit backend-capability registry, so until the selected
 `netbox-rpc-backend` advertises a compatible capability for a handler, creation,
 the `procedures/available` listing, approval and worker claim all fail closed.
 The feature therefore starts working as soon as the paired backend release
-advertises the handlers. `provision` is additionally pinned by an immutable
-contract (`netbox_rpc.samba_ad_dc_protected_contract`); editing its catalog row,
-schemas or command row in the UI makes admission refuse it.
+advertises the handlers.
+
+`provision` uses the catalog's **single-operator gate**: it is
+`effect=destructive` with `approval_required=true`, so creating any execution
+(dry runs included) requires the `approve_rpcprocedure` permission, but there is no
+second approver, no `pending_approval` state and no mandatory dispatch lease. The
+requester who holds the permission may approve their own run, and the run is
+queued and enqueued immediately. The procedure is not on the protected two-person
+path.
 
 ## What changes on the host
 
@@ -102,10 +108,9 @@ inactive.
   password of at least 12 characters (at most 512 UTF-8 bytes) with at least
   three of upper case, lower case, digits and symbols that does not contain the
   word `Administrator`; the installer also enforces Samba's own complexity check.
-- A **requester** and an **authorized approver**. A non-superuser requester needs
-  a distinct approver; a NetBox superuser may self-approve. The execute and
-  approve permissions remain constrained to the `provision` procedure. Do not
-  request or use that permission autonomously.
+- An operator holding the `execute_rpcprocedure` and `approve_rpcprocedure`
+  permissions (the single-operator gate). Do not request or use the approval
+  permission autonomously.
 
 ## Operator inputs
 
@@ -170,35 +175,20 @@ allowlist covers the address the netbox-rpc backend connects from, as seen by
 the VM.
 
 `provision` is `approval_required`, and that flag applies to the whole
-procedure, so **even the dry run is created `pending_approval` and needs a
-decision**. A non-superuser requester needs a distinct approver; a NetBox
-superuser may self-approve. Review the dry-run result before requesting the live
-run.
+procedure, so **even the dry run needs the `approve_rpcprocedure` permission**.
+Review the dry-run result before requesting the live run.
 
-### 3. Approval
+### 3. Operator confirmation
 
 Take the pre-run VM snapshot now. Then request the live run by adding
 `"dry_run": false` and `"admin_credential_pk": <id>` to the same parameters.
 
-`provision` is on the **protected approval path** (the same contract
-family as `install_akvorado` and the Proxmox OCI pull): creation records
-`ExecutionRequested` and `ApprovalRequested`, stores an immutable approval
-snapshot and returns `pending_approval` without enqueueing. A non-superuser
-requester needs a distinct approver; a NetBox superuser may self-approve. The
-approver must hold object-scoped `approve_rpcprocedure` permission for this exact
-procedure and decides with a fixed, value-free phrase. Approval re-checks the
-snapshot and the backend capability, atomically queues the run, and dispatch
-carries a signed one-time lease. The snapshot pins the complete catalog policy,
-both schemas, the command contract, the target object, the normalized settings
-(including `admin_credential_pk`, never a password) and the backend URL/TLS
-identity. Both the execute and the approve permission must be constrained to
-include this procedure; because
-`approval_required` is procedure-level, a **dry run is approved the same way**.
-
-Before approving, the approver reviews the exact parameters in the snapshot and
-the dry-run plan with the operator. Approval and rejection accept no caller
-reason. An LLM agent must not create, approve or dispatch this execution
-autonomously.
+There is no second approver: the requester holding `approve_rpcprocedure` creates
+the execution and it is queued and enqueued immediately. The confirmation is
+therefore an operational step before submitting the request: review the exact
+parameters and the dry-run plan with the system owner, confirm the snapshot and
+console access, and submit only with their explicit in-session approval. An LLM
+agent must not create or dispatch this execution autonomously.
 
 A live run requires all of the following, and the request is refused otherwise:
 
@@ -306,35 +296,36 @@ parameter, and a value that looks like one is refused before anything is stored.
   a shell.
 - Core dumps are disabled, the process umask is `077`, and inherited password
   environment variables are stripped.
-- The approval snapshot binds every concrete resolved setting and the exact
-  assigned object (content type and ID), and differs between a dry run and a live
-  run. An authorized approver and a signed one-time dispatch lease are required, and
-  the protected path accepts no backend progress events: only the validated
-  result is stored.
+- The normalized payload and command fingerprint carry every concrete resolved
+  setting and the exact assigned object (content type and ID), and differ between
+  a dry run and a live run.
 - The result contains no secret and every free-form string is length-bounded.
 
 ## Frozen bindings and credential authorization
 
-Creation, approval and worker claim each re-normalize the request and compare it
-with the immutable approval snapshot, so any drift invalidates the approval
-(`RPC_APPROVAL_INVALIDATED`). For `provision` the snapshot additionally freezes:
+Creation and worker claim each normalize the request, and the backend re-checks
+the same values at run time. For `provision` the normalized payload and command
+fingerprint additionally freeze:
 
 - `ssh_snapshot`: the resolved SSH destination (host, port), the SHA-256 of the
   pinned host-key entry, the SSH service id and revision, the SSH login identity id
   and revision and its principal and method (non-secret), plus
   `ssh_strict_host_key_checking=true` and `ssh_policy_ref`
   (`target-owned-ssh:<content type>:<object id>`). A changed host, port, host key,
-  service or login credential between request, approval and dispatch fails closed.
+  service or login credential between request and dispatch is refused.
 - `admin_credential_snapshot`: the Administrator credential id and its revision
-  (`last_updated`). A rotated credential invalidates the approval.
+  (`last_updated`). A rotated credential is refused.
+
+Because creation runs the normalizer inside the creation transaction, an unusable
+SSH destination, host key or credential fails the request with a clear error
+before anything is queued.
 
 `admin_credential_pk` is authorized, without reading or decrypting any secret, for
-both the requester (at creation) and the approver (at approval): the
+the requester at creation and again at worker claim: the
 `netbox-nms` `DeviceCredential` must exist and be viewable by that actor through
 NetBox object permissions, be a locally stored password credential with stored
 material, and differ from the target's SSH login identity. `DeviceCredential` has
-no per-target binding, so view permission is the strongest expressible rule; the
-approver sees the exact id in the snapshot. An actor who cannot view it, a missing
+no per-target binding, so view permission is the strongest expressible rule. An actor who cannot view it, a missing
 `netbox-nms`, or any other violation is refused with a clear error.
 
 ## Capability attestation and updating the installer

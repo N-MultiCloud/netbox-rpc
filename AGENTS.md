@@ -530,7 +530,7 @@ the agent must confirm with the user:
 | `os.linux.proxmox.convert_mellanox_nic_to_ethernet` | Confirm the exact endpoint, full parameters, network impact, dry-run result, and working out-of-band access as described above. |
 | `os.linux.proxmox.qemu_vm_lifecycle` | Confirm the exact endpoint, VM, enum-constrained operation, expected guest impact, and recovery path. |
 | `os.linux.ubuntu.24.upgrade_26.run_upgrade` | Run with `dry_run=true` first and review the analysis/backup results. A bad kernel or network-stack upgrade can kill the SSH transport netbox-rpc itself depends on, so operators must confirm working out-of-band console/IPMI access to the target before approving a non-dry-run execution. `reboot_after_upgrade=true` requires separate explicit confirmation. |
-| `os.linux.ubuntu.26.samba_ad_dc.provision` | Creates the FIRST DC of a NEW Active Directory domain on a fresh VM and is **not rerunnable**; there is no domain rollback and recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight` first, then `provision` with `dry_run=true` (the default; it also needs an authorized approver, distinct for non-superusers) and show the operator the full plan and rendered configuration. Confirm the exact target VM or device, that a disposable or freshly snapshotted VM with console access exists, the `ssh_ports`/`ssh_networks` allowlist (a wrong value can lock out SSH when the nftables firewall is applied), the client networks and forwarder, and the `share_path`. The Administrator password is supplied only as an `admin_credential_pk` reference to a `netbox-nms` `DeviceCredential`; never request, generate, print or store the password itself and never put it in params, notes or logs. Never enable, create, approve or dispatch autonomously. |
+| `os.linux.ubuntu.26.samba_ad_dc.provision` | Creates the FIRST DC of a NEW Active Directory domain on a fresh VM and is **not rerunnable**; there is no domain rollback and recovery is a VM snapshot restore. Run `os.linux.ubuntu.26.samba_ad_dc.preflight` first, then `provision` with `dry_run=true` (the default; it also needs the approve permission) and show the operator the full plan and rendered configuration. Confirm the exact target VM or device, that a disposable or freshly snapshotted VM with console access exists, the `ssh_ports`/`ssh_networks` allowlist (a wrong value can lock out SSH when the nftables firewall is applied), the client networks and forwarder, and the `share_path`. The Administrator password is supplied only as an `admin_credential_pk` reference to a `netbox-nms` `DeviceCredential`; never request, generate, print or store the password itself and never put it in params, notes or logs. Never enable, create, approve or dispatch autonomously. |
 | `service.netbox.staging.rotate_backend_token` | Confirm the exact `nms-front-door` staging deploy host and recovery window. The operation invalidates the prior staging backend token and may leave staging unauthenticated if the fixed provisioner cannot install and verify the replacement. Never request or provide token or SSH-routing material in RPC params or operator notes. |
 | `os.linux.debian.13.install_influxdb3_core` | Run `os.linux.debian.13.preflight_influxdb3_core` first and review its posture/`blockers[]`. Confirm the target host, the intended `http_bind` (a non-loopback bind additionally needs either TLS material or a deliberate `allow_plaintext_remote=true` on a firewalled network), and `data_dir`. It installs and holds a package, rewrites `/etc/influxdb3/influxdb3-core.conf` (backing up any prior file), adds a systemd drop-in, and restarts the unit — so on an existing instance it is service-affecting. `force_reconfigure=true` (adopting an unmanaged configuration) and `upgrade_package=true` (moving a held package's version) each need separate explicit confirmation. It never creates a credential; token bootstrap is a separate `service.influxdb.1.bootstrap` run. |
 | `service.gitea.production.upgrade_1_27_1` | Confirm VM PK 170 (`Gitea`), VMID 222, cluster 6 / `PVE-CLUSTER-02`, node `pve03`, IPv4 `10.0.30.96`, the 1.26.2 → 1.27.1 maintenance window, tested backup/rollback path, and out-of-band recovery. Never enable, create, approve, or dispatch autonomously. |
@@ -1996,22 +1996,19 @@ pending approval or distinct-actor check.
   - `provision` accepts **no** `rpc_ssh_*` override (the same #203 rationale as
     the InfluxDB and Akvorado installers): the SSH destination is derived from the
     assigned object, so the execution runs against the object named in the request.
-    It is in `PROTECTED_APPROVAL_PROCEDURE_NAMES` (like `install_akvorado` and the
-    OCI pull): creation records `ExecutionRequested` then `ApprovalRequested`,
-    persists an immutable non-secret approval snapshot, returns
-    `pending_approval` and never enqueues (dry runs included); an authorized approver
-    with an object-scoped approve permission decides with a fixed phrase; a signed
-    one-time lease is required; no backend progress events are accepted and the
-    outer and nested `ok` must agree. `netbox_rpc/samba_ad_dc_protected_contract.py`
-    pins the full catalog policy, both schemas and the command row and must stay
-    byte-identical to migration `0103` (tests compare them); it is registered in
-    the four protected maps in `command_handlers.py`. `preflight` and `verify` stay
-    unprotected reads. The normalizer freezes `ssh_snapshot` (host, port,
+    It uses the single-operator gate (`effect=destructive`, `approval_required=True`):
+    the `approve_rpcprocedure` permission is required to create any execution (dry
+    runs included), the requester may approve their own run, and it is queued and
+    enqueued immediately. It is deliberately NOT in `PROTECTED_APPROVAL_PROCEDURE_NAMES`
+    (no distinct approver, approval snapshot or mandatory lease; operator decision,
+    issue #380). Admission still runs the normalizer in the creation transaction
+    (`_validate_samba_provision_at_admission`), so unusable bindings or credentials
+    fail the request. `preflight` and `verify` are unprotected reads. unprotected reads. The normalizer freezes `ssh_snapshot` (host, port,
     host-key digest, SSH service and identity id/revision, strict pin),
     `ssh_policy_ref` and `admin_credential_snapshot` (id and revision) into
-    `normalized_params` and the fingerprint; approval and claim re-normalize, so
-    drift invalidates the approval. `admin_credential_pk` is authorized for the
-    requester at creation and the approver at approval through
+    `normalized_params` and the fingerprint; claim re-normalizes and the backend
+    re-checks them at run time. `admin_credential_pk` is authorized for the
+    requester at creation through
     `resolve_samba_ad_dc_admin_credential` (view permission, local password
     material present, distinct from the SSH login identity; no secret is read),
     and `ip` must equal the target's primary IPv4. The capability hash carries a
