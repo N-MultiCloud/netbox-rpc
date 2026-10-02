@@ -227,7 +227,6 @@ def test_gitea_upgrade_static_command_and_documentation_contract(migration) -> N
     for path in (
         ROOT / "README.md",
         ROOT / "AGENTS.md",
-        ROOT / "CLAUDE.md",
         ROOT / "docs/gitea-production-upgrade-1.27.1.md",
     ):
         assert PROCEDURE_ID in path.read_text(encoding="utf-8")

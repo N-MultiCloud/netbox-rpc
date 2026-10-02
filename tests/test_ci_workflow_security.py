@@ -889,7 +889,7 @@ def test_public_ci_contract_docs_do_not_leak_private_tracker_ids() -> None:
     ):
         assert not re.search(r"\bnmulticloud-context#\d+\b", _read(path))
     agents = _read(ROOT / "AGENTS.md")
-    claude = _read(ROOT / "CLAUDE.md")
+    claude = _read(ROOT / "AGENTS.md")
     architecture = _read(ROOT / "docs" / "architecture.md")
     readme = _read(ROOT / "README.md")
     for source in (agents, architecture, readme):

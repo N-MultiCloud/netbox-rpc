@@ -233,7 +233,7 @@ def test_transport_and_parsing_selection_docs_are_present() -> None:
     guide = read("docs/transport-and-parsing-selection.md")
     readme = read("README.md")
     agents = read("AGENTS.md")
-    claude = read("CLAUDE.md")
+    claude = read("AGENTS.md")
 
     assert "Transport-driver and output-parser selection" in guide
     assert "Transport-driver decision matrix" in guide

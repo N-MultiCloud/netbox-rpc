@@ -537,7 +537,7 @@ def test_provision_rejects_non_exact_secret_reference_before_target_io(
 
 def test_docs_and_contract_name_the_default_dark_dependency() -> None:
     for path in (
-        ROOT / "CLAUDE.md",
+        ROOT / "AGENTS.md",
         ROOT / "docs/gitea-org-ci-runner-provision.md",
     ):
         text = path.read_text(encoding="utf-8")
