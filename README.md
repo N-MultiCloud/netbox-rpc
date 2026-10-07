@@ -1373,7 +1373,10 @@ handlers to `nms-backend`, or configure the first-class `RPCBackend` row for
 `netbox-rpc-backend`; selection is deployment configuration, never a
 caller-supplied route. When an executor publishes a capability manifest, its
 authenticated `{backend_url}/rpc/capabilities` route is read with a bounded
-response and cache. Handler IDs, versions, effects, and canonical or explicitly
+response and cache. Staff operators can use the protected, fresh
+[`backend capability diagnostic`](docs/backend-capability-diagnostics.md) to
+compare visible catalog procedures without dispatching an execution. Handler IDs,
+versions, effects, and canonical or explicitly
 compatible command-contract hashes are enforced; a missing legacy manifest is
 reported as unknown and currently follows the documented compatibility path.
 Existing `nms-backend` handlers include
