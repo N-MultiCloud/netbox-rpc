@@ -8,8 +8,12 @@ nms rpc raw GET backends/1/capabilities/ --json
 
 The NetBox route is `GET /api/plugins/rpc/backends/{id}/capabilities/`.
 Authentication, staff or superuser status, and the backend view permission are
-required. Backend object restrictions apply before any upstream fetch. Procedure
-object view restrictions independently limit the returned catalog. The endpoint
+required. Backend object restrictions apply before any upstream fetch.
+NetBox 4.7's custom user model represents administrators with `is_superuser` and
+does not define `is_staff`. A missing staff attribute grants no authorization;
+ordinary users remain denied even with backend view permission.
+Procedure object view restrictions independently limit the returned catalog.
+The endpoint
 accepts no query parameters or caller-controlled backend destinations, headers,
 paths, timeouts, or refresh options.
 
