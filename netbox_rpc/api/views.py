@@ -69,7 +69,9 @@ class RPCBackendViewSet(NetBoxModelViewSet):
     def capabilities(self, request: Request, pk: str | None = None) -> Response:
         """Read a fresh, bounded capability comparison for a visible backend."""
         user = request.user
-        if not user.is_authenticated or not (user.is_staff or user.is_superuser):
+        if not user.is_authenticated or not (
+            user.is_superuser or getattr(user, "is_staff", False)
+        ):
             raise PermissionDenied("Staff access is required.")
         if not user.has_perm("netbox_rpc.view_rpcbackend"):
             raise PermissionDenied("Backend view permission is required.")

@@ -5,7 +5,7 @@ class NetBoxRPCConfig(PluginConfig):
     name = "netbox_rpc"
     verbose_name = "NetBox RPC"
     description = "Audited RPC procedure catalog & execution framework for NetBox"
-    version = "0.1.9rc1"
+    version = "0.1.9rc2"
     base_url = "rpc"
     author = "Emerson Felipe"
     author_email = "emerson.felipe@nmultifibra.com.br"

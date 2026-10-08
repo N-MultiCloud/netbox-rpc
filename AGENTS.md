@@ -11,6 +11,11 @@ it never exposes credentials, backend URLs, raw errors, or an inferred build
 version. See `docs/backend-capability-diagnostics.md`. Diagnostics do not grant
 permission to dispatch a procedure or bypass existing admission checks.
 
+NetBox 4.7's custom User model does not define Django's `is_staff` attribute.
+Authenticated superusers satisfy the administrator gate without that attribute;
+ordinary users do not. Permission tests must load real model instances without
+adding synthetic staff attributes that hide production incompatibilities.
+
 The parameter-free Proxbox release-image normalizer accepts only the trusted
 platform-stamped `_timeout_seconds_snapshot` metadata. Execution creation
 validates and overwrites that reserved key, so the normalizer must preserve its
