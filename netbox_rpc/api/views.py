@@ -8,7 +8,7 @@ from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
 
@@ -63,6 +63,37 @@ class RPCBackendViewSet(NetBoxModelViewSet):
     queryset = models.RPCBackend.objects.prefetch_related("tags")
     serializer_class = RPCBackendSerializer
     filterset_class = filtersets.RPCBackendFilterSet
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
+    @action(detail=True, methods=["get"], url_path="capabilities")
+    def capabilities(self, request: Request, pk: str | None = None) -> Response:
+        """Read a fresh, bounded capability comparison for a visible backend."""
+        user = request.user
+        if not user.is_authenticated or not (user.is_staff or user.is_superuser):
+            raise PermissionDenied("Staff access is required.")
+        if not user.has_perm("netbox_rpc.view_rpcbackend"):
+            raise PermissionDenied("Backend view permission is required.")
+        backend = self.get_object()
+        if request.query_params:
+            raise ValidationError("Capability diagnostics do not accept query parameters.")
+
+        from ..backends import _adapt_backend
+        from ..capabilities import fetch_backend_capabilities
+        from ..capability_diagnostics import MAX_CATALOG_PROCEDURES, project_capabilities
+
+        procedures = list(
+            models.RPCProcedure.objects.restrict(user, "view")
+            .order_by("pk").prefetch_related("commands")[:MAX_CATALOG_PROCEDURES + 1]
+        )
+        try:
+            manifest = fetch_backend_capabilities(_adapt_backend(backend), use_cache=False)
+            projection = project_capabilities(int(backend.pk), procedures, manifest)
+        except Exception:
+            return Response(
+                {"detail": "Capability diagnostics are unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(projection)
 
 
 class RPCTargetBindingViewSet(NetBoxModelViewSet):

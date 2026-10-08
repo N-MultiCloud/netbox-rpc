@@ -542,7 +542,10 @@ def test_docs_and_contract_name_the_default_dark_dependency() -> None:
     ):
         text = path.read_text(encoding="utf-8")
         assert PROCEDURE_ID in text
-        assert "nmulticloud-context#411" in text
+        if path.name == "AGENTS.md":
+            assert "private deployment activation review" in text
+        else:
+            assert "nmulticloud-context#411" in text
         assert "root-python312" in text
         for prerequisite in (
             "publisher dispatcher",

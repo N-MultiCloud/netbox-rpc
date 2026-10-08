@@ -1,5 +1,16 @@
 # netbox-rpc Agent Notes
 
+## Protected backend capability diagnostics
+
+Use `nms rpc raw GET backends/<id>/capabilities/ --json` to inspect the fresh
+capability comparison before proposing an approved recovery operation. This
+staff-only endpoint applies backend and procedure object view restrictions,
+uses the configured server-side backend target, and accepts no query controls.
+The response contains bounded validated identities and compatibility reasons;
+it never exposes credentials, backend URLs, raw errors, or an inferred build
+version. See `docs/backend-capability-diagnostics.md`. Diagnostics do not grant
+permission to dispatch a procedure or bypass existing admission checks.
+
 The parameter-free Proxbox release-image normalizer accepts only the trusted
 platform-stamped `_timeout_seconds_snapshot` metadata. Execution creation
 validates and overwrites that reserved key, so the normalizer must preserve its
@@ -3041,7 +3052,7 @@ command behavior changes.
 > A monotonic generation binds approval, lease, fence reservation, and every
 > result for both procedures sharing canonical `N-MultiCloud`; takeover never
 > revalidates a late original response. The root lane is
-> `activation_eligible=false` until `N-MultiCloud/nmulticloud-context#411`
+> `activation_eligible=false` until the private deployment activation review
 > publishes its content-addressed VM416 provision-and-prove boundary and final
 > job image. `provision` alone accepts an exact `nms-secret:<uuid>` reference;
 > credential-free `reconcile` uses only the durable fence proof. See
