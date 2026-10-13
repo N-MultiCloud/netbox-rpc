@@ -13,10 +13,14 @@ class NetBoxRPCConfig(PluginConfig):
     max_version = "4.7.99"
     required_settings = []
     default_settings = {}
+    queues = ["control"]
 
     def ready(self) -> None:
         super().ready()
-        from . import jobs  # noqa: F401
+        from . import (  # noqa: F401
+            jobs,
+            system_jobs,
+        )
 
 
 config = NetBoxRPCConfig

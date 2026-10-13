@@ -473,8 +473,21 @@ UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Production NetBox Compose RQ worker lifecycle. These fixed-target procedures
+# replace the retired netbox-rq.service host unit and are capability-gated so a
+# worker cannot dispatch them to a backend with a different Compose contract.
+NETBOX_PRODUCTION_STATUS_RQ_WORKER = "service.netbox.production.status_rq_worker"
+NETBOX_PRODUCTION_RESTART_RQ_WORKER = "service.netbox.production.restart_rq_worker"
+NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES = frozenset(
+    {
+        NETBOX_PRODUCTION_STATUS_RQ_WORKER,
+        NETBOX_PRODUCTION_RESTART_RQ_WORKER,
+    }
+)
+
 EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
     AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
+    | NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
     | UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
     | {
         NETBOX_STAGING_DEPLOY_DNS_PAIR,
@@ -509,6 +522,7 @@ PROTECTED_APPROVAL_PROCEDURE_NAMES = frozenset(
         NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
         PROXBOX_API_RELEASE_IMAGES_RECOVER,
+        NETBOX_PRODUCTION_RESTART_RQ_WORKER,
     }
 )
 

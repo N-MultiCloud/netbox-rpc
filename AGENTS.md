@@ -1167,19 +1167,46 @@ pending approval or distinct-actor check.
   instance. Do not add InfluxDB-specific shell text; use the existing fixed
   systemctl handlers or add a new typed procedure if a future operation cannot be
   modeled as service lifecycle control.
-- NetBox stack service management is provided the same way, through the allowlist
-  rows seeded by migration `0058`: `slug="netbox"` -> `systemd_unit="netbox.service"`
-  (WSGI/gunicorn) and `slug="netbox-rq"` -> `systemd_unit="netbox-rq.service"`
-  (RQ background worker), both targeting `dcim.device` and
-  `virtualization.virtualmachine`. Use the existing generic Ubuntu 24 systemd
-  procedures (`os.linux.ubuntu.24.restart_service` / `status_service` /
-  `journal_tail`, etc.) against a NetBox-host `dcim.device`/VM that carries a
-  DeviceService SSH credential — never SSH the NetBox host directly.
-  **Restarting `netbox-rq` also sweeps orphaned/zombie `core.Job` rows** left by a
-  worker that died mid-job (its `job_timeout` never fires), so it is the audited
-  recovery for a NetBox RQ job stuck in `running`. `restart_service` is
-  `effect="write"`, no approval, but disruptive — present the action before
-  dispatching per the write-procedure rule below.
+- Migration `0058` seeded Linux service allowlist rows for `netbox.service` and
+  `netbox-rq.service`. Migration `0110` retains the `netbox-rq` row for audit
+  history but disables it because the production RQ worker moved to Compose and
+  the legacy host unit is not executable. Never use the generic Ubuntu 24
+  systemd procedures with `service_slug=netbox-rq`. Use
+  `service.netbox.production.status_rq_worker` and the approval-required
+  `service.netbox.production.restart_rq_worker`; both are fixed to device `44`,
+  Compose project `nmc-netbox`, and service `netbox-rq`, accept no caller
+  parameters, and require an exact backend semantic capability. Restarting the
+  Compose worker also sweeps orphaned/zombie `core.Job` rows left by a worker
+  that died mid-job. The restart is in
+  `PROTECTED_APPROVAL_PROCEDURE_NAMES`: the requester must hold execute and
+  approve permissions scoped to this exact procedure, each restart receives a
+  separate approval, and no requester, including a superuser, can self-approve.
+  Admission and approval must both observe a live RQ worker on the exact
+  `netbox_rpc.control` queue before they accept or enqueue the restart. The
+  worker heartbeat must be no older than 120 seconds. Missing, stopped, stale,
+  suspended, dead, or unreachable worker registrations fail closed. Both
+  procedure execution jobs must remain on this queue, served by the separate
+  `netbox-rpc-control` Compose service. Start that worker with
+  `python manage.py rqworker netbox_rpc.control --worker-ttl 90`; RQ's idle
+  heartbeat cadence is `worker_ttl - 15`, so 90 gives 75 seconds inside the
+  120-second admission gate, while the default 420 gives 405 seconds and can
+  fail admission. The control worker must never fall back to the default
+  queue or to the ordinary `netbox-rq` worker, because that would terminate the
+  job recording its own restart result. The expiry job also stays on the
+  dedicated control queue; it is audit-only and cannot dispatch the restart.
+  It appends a terminal failure when a restart remains queued for 10 minutes.
+  A separate one-minute system job runs on the default queue and invokes the
+  same locked expiry helper, so control-consumer loss cannot strand the audit.
+  The control worker checks the
+  latest immutable `ExecutionQueued.created` timestamp again under the row lock
+  before dispatch, so an old restart never fires after the consumer returns.
+  Plugin-to-backend HTTP requests stream at most 16,384 bytes under an absolute
+  deadline and reject redirects. Ambiguous transport, HTTP, or response-decode
+  outcomes return a closed reconciliation-required result. Restart launch
+  ambiguity and post-restart readiness failure require a fresh status check
+  before retry. The `netbox` allowlist
+  row remains available for the legacy WSGI host-unit lifecycle until a
+  separate migration retires it.
 - `os.linux_env_file.upsert_var` (migration `0059`/`0060`) upserts a
   credential-backed `KEY=VALUE` line into an allowlisted service's
   `environment_file`, then restarts its `systemd_unit`. `effect="write"`,

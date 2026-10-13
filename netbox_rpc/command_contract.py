@@ -331,6 +331,12 @@ EXEMPT_HANDLER_RATIONALE = {
     "service.akvorado.1.restart_stack": (
         "Restarts the backend-owned Akvorado Compose project and normalizes its final status."
     ),
+    "service.netbox.production.status_rq_worker": (
+        "Reads and normalizes the fixed production NetBox Compose RQ worker status."
+    ),
+    "service.netbox.production.restart_rq_worker": (
+        "Restarts only the fixed production NetBox Compose RQ worker and waits for running state."
+    ),
     "service.samba_1.user_create": (
         "Creates a Samba/AD user with a caller-supplied password delivered to "
         "samba-tool over stdin. The password is scrubbed to a sha256+byte-count "

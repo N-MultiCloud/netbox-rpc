@@ -8,7 +8,7 @@ import json
 import sys
 import types
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from itertools import product
 from types import SimpleNamespace
 
@@ -114,6 +114,16 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL = (
         "os.linux.debian.13.install_akvorado"
     )
+    constants.NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES = {
+        "service.netbox.production.status_rq_worker",
+        "service.netbox.production.restart_rq_worker",
+    }
+    constants.NETBOX_PRODUCTION_STATUS_RQ_WORKER = (
+        "service.netbox.production.status_rq_worker"
+    )
+    constants.NETBOX_PRODUCTION_RESTART_RQ_WORKER = (
+        "service.netbox.production.restart_rq_worker"
+    )
     constants.INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = {
         "os.linux.debian.13.preflight_influxdb3_core",
         "os.linux.debian.13.install_influxdb3_core",
@@ -203,6 +213,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
         constants.NETBOX_OPENBAO_IMPORT_APPLY,
         constants.NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE,
         constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
+        constants.NETBOX_PRODUCTION_RESTART_RQ_WORKER,
     }
     akvorado_contract = types.ModuleType("netbox_rpc.akvorado_bootstrap_contract")
     akvorado_contract.AKVORADO_BOOTSTRAP_CURRENT_CAPABILITY_HASHES = {
@@ -4213,6 +4224,615 @@ def test_samba_provision_is_not_protected_but_other_procedures_still_are(
         command_handlers._PROTECTED_LABELS,
     ):
         assert SAMBA_PROVISION not in table
+
+
+def _install_scoped_procedure_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allowed: dict[str, set[int]],
+) -> None:
+    class Query:
+        def __init__(self, action: str) -> None:
+            self.action = action
+            self.pk: int | None = None
+
+        def filter(self, *, pk: int):
+            self.pk = pk
+            return self
+
+        def exists(self) -> bool:
+            return self.pk in allowed.get(self.action, set())
+
+    class Manager:
+        def restrict(self, _user: object, action: str) -> Query:
+            return Query(action)
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCProcedure = type("RPCProcedure", (), {"objects": Manager()})
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+
+
+def test_restart_requester_requires_exact_execute_and_approve_scopes(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=812,
+        name="service.netbox.production.restart_rq_worker",
+    )
+    requester = object()
+    _install_scoped_procedure_manager(
+        monkeypatch,
+        allowed={"execute": {812}, "approve": {812}},
+    )
+
+    command_handlers._require_protected_procedure_scope(
+        procedure, requester, "execute"
+    )
+    command_handlers._require_restart_requester_scopes(procedure, requester)
+
+
+def test_restart_requester_rejects_execute_only_and_unrelated_scoped_grants(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=812,
+        name="service.netbox.production.restart_rq_worker",
+    )
+    requester = object()
+    _install_scoped_procedure_manager(
+        monkeypatch,
+        allowed={"execute": {812}, "approve": {999}},
+    )
+
+    command_handlers._require_protected_procedure_scope(
+        procedure, requester, "execute"
+    )
+    with pytest.raises(command_handlers.PermissionDenied, match="approve"):
+        command_handlers._require_restart_requester_scopes(procedure, requester)
+
+    _install_scoped_procedure_manager(
+        monkeypatch,
+        allowed={"execute": {999}, "approve": {999}},
+    )
+    with pytest.raises(command_handlers.PermissionDenied, match="execute"):
+        command_handlers._require_protected_procedure_scope(
+            procedure, requester, "execute"
+        )
+
+
+def test_restart_creation_rejects_execute_only_requester_before_save(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=812,
+        name="service.netbox.production.restart_rq_worker",
+        handler_id="service.netbox.production.restart_rq_worker",
+        enabled=True,
+        approval_required=True,
+        params_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+
+    class Serializer:
+        def __init__(self) -> None:
+            self.validated_data = {"procedure": procedure, "params": {}}
+            self.saved = False
+
+        def is_valid(self, *, raise_exception: bool) -> None:
+            assert raise_exception is True
+
+        def save(self, **_kwargs: object) -> object:
+            self.saved = True
+            return object()
+
+    serializer = Serializer()
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_enabled_and_authoritative_backend",
+        lambda _user: 1,
+    )
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_policy",
+        lambda _procedure: None,
+    )
+    scoped_actions: list[str] = []
+
+    def require_scope(_procedure: object, _user: object, action: str) -> None:
+        scoped_actions.append(action)
+        if action == "approve":
+            raise command_handlers.PermissionDenied("approve scope required")
+
+    monkeypatch.setattr(
+        command_handlers,
+        "_require_protected_procedure_scope",
+        require_scope,
+    )
+    user = SimpleNamespace(
+        has_perm=lambda permission: permission == "netbox_rpc.execute_rpcprocedure"
+    )
+
+    with pytest.raises(command_handlers.PermissionDenied, match="approve scope"):
+        command_handlers.create_execution(serializer=serializer, user=user)
+
+    assert scoped_actions == ["execute", "approve"]
+    assert serializer.saved is False
+
+
+def test_restart_non_superuser_self_approval_is_not_authorized_at_claim(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.netbox.production.restart_rq_worker"
+        ),
+        requested_by_id=44,
+        approved_by_id=44,
+        approved_by=SimpleNamespace(is_superuser=False),
+    )
+
+    assert command_handlers._approval_identities_are_authorized(execution) is False
+
+
+def test_restart_superuser_still_requires_a_distinct_approver(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name="service.netbox.production.restart_rq_worker"
+        ),
+        requested_by_id=44,
+        approved_by_id=44,
+        approved_by=SimpleNamespace(is_superuser=True),
+    )
+
+    assert command_handlers._approval_identities_are_authorized(execution) is False
+    assert (
+        command_handlers._allow_protected_self_approval(
+            execution.procedure.name,
+            execution.approved_by,
+        )
+        is False
+    )
+
+
+def test_restart_is_registered_in_every_protected_approval_map(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure_name = "service.netbox.production.restart_rq_worker"
+
+    assert procedure_name in command_handlers.PROTECTED_APPROVAL_PROCEDURE_NAMES
+    assert command_handlers._protected_contract(procedure_name) is not None
+    for protected_map in (
+        command_handlers._PROTECTED_APPROVAL_REASON,
+        command_handlers._PROTECTED_REJECTION_REASON,
+        command_handlers._PROTECTED_LABELS,
+        command_handlers._PROTECTED_CONTRACTS,
+    ):
+        assert procedure_name in protected_map
+
+
+def test_restart_catalog_policy_matches_complete_protected_contract(
+    command_handlers_module,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    migration = importlib.import_module(
+        "netbox_rpc.migrations.0110_seed_netbox_production_rq_worker_procedures"
+    )
+    procedure_name = "service.netbox.production.restart_rq_worker"
+    command_values = migration._command(
+        "netbox-production-restart-rq-worker",
+        migration._RESTART_DESCRIPTION,
+    )
+    command = SimpleNamespace(sequence=1, **command_values)
+
+    class Commands:
+        def all(self):
+            return self
+
+        def order_by(self, field: str):
+            assert field == "sequence"
+            return self
+
+        def __iter__(self):
+            return iter([command])
+
+    procedure = SimpleNamespace(
+        pk=812,
+        name=procedure_name,
+        commands=Commands(),
+        **migration._RESTART_DEFAULTS,
+    )
+
+    assert command_handlers._protected_procedure_policy(procedure) == (
+        command_handlers.netbox_rq_worker_contract.PROCEDURE_POLICY
+    )
+    assert procedure.params_schema == (
+        command_handlers.netbox_rq_worker_contract.PARAMS_SCHEMA
+    )
+    assert procedure.result_schema == (
+        command_handlers.netbox_rq_worker_contract.RESULT_SCHEMAS[procedure_name]
+    )
+    assert command_handlers.netbox_rq_worker_contract.SEMANTIC_CAPABILITY_SHA256[
+        procedure_name
+    ] == command_handlers.netbox_rq_worker_contract.canonical_sha256(
+        command_handlers.netbox_rq_worker_contract.semantic_capability_extension(
+            procedure
+        )
+    )
+    command_handlers._require_protected_procedure_policy(procedure)
+
+
+def test_restart_refuses_missing_control_consumer_before_persistence(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, ValidationError, _ = command_handlers_module
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs.control_queue_has_live_worker = lambda: False
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+
+    with pytest.raises(ValidationError, match="no live consumer"):
+        command_handlers._require_restart_control_consumer(
+            "service.netbox.production.restart_rq_worker"
+        )
+
+
+def test_stale_restart_claim_is_audited_terminal_failure(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=812,
+        name="service.netbox.production.restart_rq_worker",
+        enabled=True,
+    )
+    queued_at = datetime.now(UTC) - timedelta(minutes=11)
+
+    class Events:
+        def filter(self, *, event: str):
+            assert event == "ExecutionQueued"
+            return self
+
+        def order_by(self, field: str):
+            assert field == "-sequence"
+            return self
+
+        def first(self):
+            return SimpleNamespace(created=queued_at)
+
+    execution = SimpleNamespace(
+        procedure=procedure,
+        procedure_id=procedure.pk,
+        events=Events(),
+    )
+    failures: list[tuple[str, str]] = []
+
+    class Aggregate:
+        status = "queued"
+
+        def __init__(self):
+            self.execution = execution
+
+        def fail(self, message: str, code: str) -> None:
+            failures.append((message, code))
+
+        def start(self) -> None:
+            pytest.fail("A stale restart must never enter running state")
+
+    class ProcedureManager:
+        def select_for_update(self):
+            return self
+
+        def get(self, *, pk: int):
+            assert pk == procedure.pk
+            return procedure
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type("RPCExecution", (), {"STATUS_QUEUED": "queued"})
+    models.RPCProcedure = type(
+        "RPCProcedure", (), {"objects": ProcedureManager()}
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+
+    command_handlers._claim_if_procedure_enabled(Aggregate())
+
+    assert failures == [
+        (
+            "The production NetBox RQ worker restart exceeded the 10-minute queue age and was not dispatched.",
+            "RPC_CONTROL_QUEUE_STALE",
+        )
+    ]
+
+
+def test_stale_restart_expiry_job_terminalizes_never_claimed_execution(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    procedure = SimpleNamespace(
+        pk=812,
+        name="service.netbox.production.restart_rq_worker",
+    )
+    queued_at = datetime.now(UTC) - timedelta(minutes=11)
+
+    class Events:
+        def filter(self, *, event: str):
+            assert event == "ExecutionQueued"
+            return self
+
+        def order_by(self, field: str):
+            assert field == "-sequence"
+            return self
+
+        def first(self):
+            return SimpleNamespace(created=queued_at)
+
+    execution = SimpleNamespace(
+        pk=812,
+        procedure=procedure,
+        status="queued",
+        events=Events(),
+    )
+
+    class Executions:
+        def select_for_update(self):
+            return self
+
+        def select_related(self, *_fields: str):
+            return self
+
+        def get(self, *, pk: int):
+            assert pk == execution.pk
+            return execution
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"objects": Executions(), "STATUS_QUEUED": "queued"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    failures: list[tuple[str, str]] = []
+
+    class Aggregate:
+        def __init__(self, candidate: object) -> None:
+            assert candidate is execution
+
+        def fail(self, message: str, code: str) -> None:
+            failures.append((message, code))
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+
+    assert command_handlers.expire_stale_restart_execution(execution.pk) is True
+    assert failures == [
+        (
+            "The production NetBox RQ worker restart exceeded the 10-minute queue age and was not dispatched.",
+            "RPC_CONTROL_QUEUE_STALE",
+        )
+    ]
+
+
+def test_restart_enqueue_schedules_control_queue_audit_only_expiry(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    queued_at = datetime.now(UTC)
+
+    class Events:
+        def filter(self, *, event: str):
+            assert event == "ExecutionQueued"
+            return self
+
+        def order_by(self, field: str):
+            assert field == "-sequence"
+            return self
+
+        def first(self):
+            return SimpleNamespace(created=queued_at)
+
+    execution = SimpleNamespace(
+        pk=812,
+        procedure=SimpleNamespace(
+            name="service.netbox.production.restart_rq_worker"
+        ),
+        events=Events(),
+    )
+    captured: dict[str, object] = {}
+
+    class ExpiryJob:
+        @classmethod
+        def enqueue(cls, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs.RPCExecutionQueueExpiryJob = ExpiryJob
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    user = object()
+
+    command_handlers._enqueue_restart_expiry_job(execution, user=user)
+
+    assert captured == {
+        "execution_pk": 812,
+        "user": user,
+        "name": "Expire stale production NetBox RQ worker restart",
+        "schedule_at": queued_at + timedelta(minutes=10),
+    }
+
+
+def test_expiry_schedule_failure_does_not_reclassify_published_restart(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    queued_at = datetime.now(UTC)
+
+    class Events:
+        def filter(self, *, event: str):
+            assert event == "ExecutionQueued"
+            return self
+
+        def order_by(self, field: str):
+            assert field == "-sequence"
+            return self
+
+        def first(self):
+            return SimpleNamespace(created=queued_at)
+
+    execution = SimpleNamespace(
+        pk=812,
+        backend_id=7,
+        procedure=SimpleNamespace(
+            name="service.netbox.production.restart_rq_worker"
+        ),
+        events=Events(),
+    )
+
+    class ExecutionJob:
+        @classmethod
+        def enqueue(cls, **_kwargs: object):
+            return SimpleNamespace(pk="published-job")
+
+    class ExpiryJob:
+        @classmethod
+        def enqueue(cls, **_kwargs: object):
+            raise RuntimeError("scheduler unavailable")
+
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs.RPCExecutionJob = ExecutionJob
+    jobs.RPCExecutionQueueExpiryJob = ExpiryJob
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    enqueued: list[object] = []
+
+    class Aggregate:
+        def __init__(self, candidate: object) -> None:
+            assert candidate is execution
+
+        def enqueue(self, job_pk: object) -> None:
+            enqueued.append(job_pk)
+
+    monkeypatch.setattr(command_handlers, "RPCExecutionAggregate", Aggregate)
+    failed: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "mark_execution_failed",
+        lambda *args, **kwargs: failed.append((args, kwargs)),
+    )
+
+    command_handlers._enqueue_execution_job(
+        execution,
+        user=object(),
+        timeout_seconds_snapshot=150,
+    )
+
+    assert enqueued == ["published-job"]
+    assert failed == []
+
+
+def test_restart_publication_failure_still_records_enqueue_failure(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    execution = SimpleNamespace(
+        pk=812,
+        backend_id=7,
+        procedure=SimpleNamespace(
+            name="service.netbox.production.restart_rq_worker"
+        ),
+    )
+
+    class ExecutionJob:
+        @classmethod
+        def enqueue(cls, **_kwargs: object):
+            raise RuntimeError("redis unavailable")
+
+    jobs = types.ModuleType("netbox_rpc.jobs")
+    jobs.RPCExecutionJob = ExecutionJob
+    monkeypatch.setitem(sys.modules, "netbox_rpc.jobs", jobs)
+    failed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        command_handlers,
+        "mark_execution_failed",
+        lambda *args, **kwargs: failed.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="redis unavailable"):
+        command_handlers._enqueue_execution_job(
+            execution,
+            user=object(),
+            timeout_seconds_snapshot=150,
+        )
+
+    assert len(failed) == 1
+    assert failed[0][0][0] is execution
+    assert failed[0][0][2] == "RPC_ENQUEUE_FAILED"
+    assert failed[0][1]["event_name"] == "ExecutionEnqueueFailed"
+
+
+def test_periodic_sweep_calls_locked_expiry_helper_when_control_consumer_is_lost(
+    command_handlers_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_handlers, _, _ = command_handlers_module
+    captured: dict[str, object] = {}
+
+    class Query:
+        def filter(self, **kwargs: object):
+            captured["filter"] = kwargs
+            return self
+
+        def order_by(self, field: str):
+            captured["order_by"] = field
+            return self
+
+        def values_list(self, field: str, *, flat: bool):
+            captured["values_list"] = (field, flat)
+            return self
+
+        def __getitem__(self, value: slice):
+            captured["slice"] = value
+            return [812, 813]
+
+    models = types.ModuleType("netbox_rpc.models")
+    models.RPCExecution = type(
+        "RPCExecution",
+        (),
+        {"objects": Query(), "STATUS_QUEUED": "queued"},
+    )
+    monkeypatch.setitem(sys.modules, "netbox_rpc.models", models)
+    expired: list[int] = []
+
+    def expire(execution_pk: int) -> bool:
+        expired.append(execution_pk)
+        return execution_pk == 812
+
+    monkeypatch.setattr(command_handlers, "expire_stale_restart_execution", expire)
+
+    assert command_handlers.expire_stale_restart_executions(batch_size=2) == 1
+    assert expired == [812, 813]
+    assert captured["filter"]["status"] == "queued"
+    assert captured["filter"]["procedure__name"] == (
+        "service.netbox.production.restart_rq_worker"
+    )
+    assert captured["filter"]["events__event"] == "ExecutionQueued"
+    assert captured["order_by"] == "pk"
+    assert captured["values_list"] == ("pk", True)
+    assert captured["slice"] == slice(None, 2, None)
 
 
 def _samba_fence_models(monkeypatch: pytest.MonkeyPatch, *, open_rows: bool):

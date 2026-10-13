@@ -82,6 +82,7 @@ from ..constants import (
     MINECRAFT_VIAVERSION_INSTALL,
     NETBOX_OPENBAO_IMPORT_APPLY,
     NETBOX_OPENBAO_IMPORT_DRY_RUN,
+    NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES,
     NETBOX_PLUGIN_INSTALL,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
@@ -6654,6 +6655,64 @@ def _normalize_proxbox_api_release_images_execution(
     }
 
 
+def _normalize_netbox_production_rq_worker_execution(
+    execution: RPCExecution,
+    target: str,
+) -> dict[str, Any]:
+    """Bind parameter-free RQ worker operations to nmc-prod-207 device 44."""
+    from ..netbox_rq_worker_contract import (
+        NORMALIZED_PARAMS_SCHEMAS,
+        TARGET_MODEL,
+        TARGET_NAME,
+        TARGET_OBJECT_ID,
+    )
+
+    assigned_object = getattr(execution, "assigned_object", None)
+    assigned_object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        execution.target_model_label != TARGET_MODEL
+        or assigned_object_id != TARGET_OBJECT_ID
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != TARGET_OBJECT_ID
+        or getattr(assigned_object, "name", None) != TARGET_NAME
+        or target != TARGET_NAME
+    ):
+        raise RPCExecutionError(
+            "NetBox RQ worker procedures require device nmc-prod-207 (id 44).",
+            code="RPC_TARGET_INVALID",
+        )
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict) or set(params) - {"_timeout_seconds_snapshot"}:
+        raise RPCExecutionError(
+            "NetBox RQ worker procedures accept only an empty object.",
+            code="RPC_PARAM_INVALID",
+        )
+    procedure_name = execution.procedure.name
+    target_object = {
+        "content_type": TARGET_MODEL,
+        "object_id": TARGET_OBJECT_ID,
+    }
+    normalized = {
+        "target": TARGET_NAME,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": procedure_name,
+            "target_object": target_object,
+        },
+    }
+    try:
+        jsonschema.validate(normalized, NORMALIZED_PARAMS_SCHEMAS[procedure_name])
+    except (KeyError, jsonschema.ValidationError) as exc:
+        raise RPCExecutionError(
+            "NetBox RQ worker normalized contract validation failed.",
+            code="RPC_NORMALIZED_CONTRACT_INVALID",
+        ) from exc
+    return normalized
+
+
 # Table-driven normalizer registry consulted once at the top of
 # ``_dispatch_normalize_execution_params``. Register a new procedure name
 # here (pointing at a shared or dedicated normalizer, both accepting
@@ -6664,6 +6723,10 @@ _TABLE_NORMALIZERS: dict[str, Callable[[RPCExecution, str], dict[str, Any]]] = {
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: _normalize_release_marker_execution,
+    **{
+        name: _normalize_netbox_production_rq_worker_execution
+        for name in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
+    },
     **{
         name: _normalize_ubuntu_26_samba_ad_dc_execution
         for name in UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES

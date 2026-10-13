@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import datetime, timedelta, timezone
+import logging
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import jsonschema
@@ -13,16 +14,19 @@ from rest_framework.exceptions import PermissionDenied
 
 from .. import akvorado_bootstrap_contract as akvorado_contract
 from .. import dns_staging_deploy_contract as dns_staging_contract
-from .. import gitea_docker_runner_contract
-from .. import gitea_org_docker_runner_recovery_contract
+from .. import (
+    gitea_docker_runner_contract,
+    gitea_org_docker_runner_recovery_contract,
+    netbox_rq_worker_contract,
+    openbao_import_contract,
+    proxbox_api_release_images_contract,
+    proxmox_oci_pull_contract,
+    release_marker_contract,
+)
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_protected_publication_pair_contract as publication_pair_contract
 from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
-from .. import openbao_import_contract
-from .. import proxmox_oci_pull_contract
-from .. import release_marker_contract
-from .. import proxbox_api_release_images_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
 from ..constants import (
@@ -43,6 +47,8 @@ from ..constants import (
     LINUX_PROXMOX_OCI_REGISTRY_PULL,
     NETBOX_OPENBAO_IMPORT_APPLY,
     NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER,
+    NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
@@ -51,7 +57,6 @@ from ..constants import (
     UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES,
     UBUNTU_26_SAMBA_AD_DC_PROVISION,
 )
-
 from ..domain.aggregate import RPCExecutionAggregate, RPCExecutionAggregateError
 from ..domain.normalization import (
     RPCExecutionError,
@@ -59,8 +64,8 @@ from ..domain.normalization import (
     normalize_execution_params,
     validate_akvorado_content_params,
     validate_gitea_docker_runner_target,
-    validate_gitea_org_docker_runner_recovery_target,
     validate_gitea_org_ci_runner_target,
+    validate_gitea_org_docker_runner_recovery_target,
     validate_gitea_runner_target,
     validate_gitea_upgrade_target,
 )
@@ -69,6 +74,8 @@ from ..openbao_validation import (
     OpenBaoSecretIngressError,
     validate_openbao_params_for_persistence,
 )
+
+logger = logging.getLogger(__name__)
 
 GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES = (
     publication_pair_contract.PROCEDURE_NAMES
@@ -99,6 +106,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
     AKVORADO_1_PROCEDURE_NAMES
     | AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
     | INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
+    | NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
     | UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
     | {
         GITEA_RUNNER_REGISTER,
@@ -184,6 +192,12 @@ _GITEA_PROTECTED_PUBLICATION_PAIR_APPROVAL_REASON = (
 _GITEA_PROTECTED_PUBLICATION_PAIR_REJECTION_REASON = (
     "Rejected audited provisioning of the fixed protected publication-runner pair."
 )
+_NETBOX_RQ_RESTART_APPROVAL_REASON = (
+    "Approved audited production NetBox RQ worker restart."
+)
+_NETBOX_RQ_RESTART_REJECTION_REASON = (
+    "Rejected audited production NetBox RQ worker restart."
+)
 
 _PROTECTED_APPROVAL_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_APPROVAL_REASON,
@@ -205,6 +219,7 @@ _PROTECTED_APPROVAL_REASON = {
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_APPROVAL_REASON
     ),
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER: _NETBOX_RQ_RESTART_APPROVAL_REASON,
 }
 _PROTECTED_REJECTION_REASON = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: _STAGING_ROTATION_REJECTION_REASON,
@@ -226,6 +241,7 @@ _PROTECTED_REJECTION_REASON = {
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         _PROXBOX_API_RELEASE_IMAGES_REJECTION_REASON
     ),
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER: _NETBOX_RQ_RESTART_REJECTION_REASON,
 }
 
 _PROTECTED_CONTRACTS = {
@@ -242,6 +258,7 @@ _PROTECTED_CONTRACTS = {
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_RECONCILE: release_marker_contract,
     LINUX_PROXMOX_OCI_REGISTRY_PULL: proxmox_oci_pull_contract,
     proxbox_api_release_images_contract.PROCEDURE_NAME: proxbox_api_release_images_contract,
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER: netbox_rq_worker_contract,
 }
 _PROTECTED_LABELS = {
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: "Staging token rotation",
@@ -261,6 +278,7 @@ _PROTECTED_LABELS = {
     proxbox_api_release_images_contract.PROCEDURE_NAME: (
         "Proxbox API retained-image recovery"
     ),
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER: "Production NetBox RQ worker restart",
 }
 _GITEA_RUNNER_TARGET_POLICIES = {
     GITEA_RUNNER_REGISTER: {
@@ -511,23 +529,12 @@ def _resolve_validated_protected_backend_target(
     return target
 
 
-def create_execution(
-    *,
-    serializer: Any,
-    user: object,
-    source_intent: object | None = None,
-) -> object:
-    if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
-        raise PermissionDenied("execute_rpcprocedure permission is required.")
-    serializer.is_valid(raise_exception=True)
-    procedure = serializer.validated_data["procedure"]
+def _validate_creation_admission(procedure: object, params: dict[str, Any]) -> None:
+    """Validate immutable request fields before backend or target access."""
     if not procedure.enabled:
         raise drf_serializers.ValidationError(
             {"procedure_id": "This procedure is disabled."}
         )
-    params = serializer.validated_data.get("params") or {}
-    # Keep one linked object so all later platform-owned stamps are persisted.
-    serializer.validated_data["params"] = params
     if getattr(procedure, "params_schema", None):
         try:
             jsonschema.validate(params, procedure.params_schema)
@@ -542,21 +549,18 @@ def create_execution(
                 {"params": activation_reason},
                 code="RPC_HOST_GENERATION_UNAVAILABLE",
             )
-
-    # Hard-coded fail-closed gates (see code_gate_unavailable_reason) sit
-    # below RPCProcedure.enabled: an operator could flip that mutable flag
-    # without knowing a gate is still closed, so this admission-time check
-    # is the primary enforcement point, checked before an RPCExecution row
-    # can even be created. The identical check inside normalize_execution_params
-    # remains as defense in depth for a worker claiming a pre-existing row.
     gate_reason = code_gate_unavailable_reason(procedure.name)
     if gate_reason is not None:
         raise drf_serializers.ValidationError({"procedure_id": gate_reason})
 
-    # #166: opt-in + selected backend are authoritative at creation time.  The
-    # root-lane source gate above is intentionally pure and precedes this first
-    # settings/backend access.
-    authoritative_backend_id = _require_enabled_and_authoritative_backend(user)
+
+def _prepare_creation_authorization(
+    procedure: object,
+    user: object,
+    serializer: Any,
+    authoritative_backend_id: object,
+) -> tuple[object, object | None]:
+    """Apply approval policy and resolve a protected backend when required."""
     protected_backend_target: object | None = None
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
         authoritative_backend_id = _require_concrete_protected_backend_id(
@@ -565,24 +569,38 @@ def create_execution(
         )
         _require_protected_procedure_policy(procedure)
         _require_protected_procedure_scope(procedure, user, "execute")
+        _require_restart_requester_scopes(procedure, user)
+        _require_restart_control_consumer(procedure.name)
         _require_protected_creation_shape(serializer, procedure.name)
         protected_backend_target = _resolve_validated_protected_backend_target(
             authoritative_backend_id,
             procedure.name,
         )
-    elif procedure.approval_required:
-        if not user.has_perm("netbox_rpc.approve_rpcprocedure"):
-            raise PermissionDenied(
-                "This procedure requires approval (approve_rpcprocedure permission)."
-            )
-    # Reject caller-supplied OpenBao secret material before target lookups or
-    # capability work. A second scan immediately before persistence below
-    # covers the complete payload after platform-owned stamps.
+    elif procedure.approval_required and not user.has_perm(
+        "netbox_rpc.approve_rpcprocedure"
+    ):
+        raise PermissionDenied(
+            "This procedure requires approval (approve_rpcprocedure permission)."
+        )
+    return authoritative_backend_id, protected_backend_target
+
+
+def _validate_openbao_payload(procedure_name: str, params: dict[str, Any]) -> None:
+    """Translate the domain secret-ingress rejection into an API error."""
     try:
-        validate_openbao_params_for_persistence(procedure.name, params)
+        validate_openbao_params_for_persistence(procedure_name, params)
     except OpenBaoSecretIngressError as exc:
         raise drf_serializers.ValidationError({"params": str(exc)}) from exc
 
+
+def _validate_creation_payload(
+    serializer: Any,
+    procedure: object,
+    user: object,
+    params: dict[str, Any],
+) -> None:
+    """Validate object visibility, family content, and secret-bearing fields."""
+    _validate_openbao_payload(procedure.name, params)
     _require_viewable_assigned_object(serializer.validated_data, procedure, user)
     _require_staging_rotation_assigned_object(
         serializer.validated_data,
@@ -603,13 +621,77 @@ def create_execution(
         validate_akvorado_content_params(procedure.name, params)
     except RPCExecutionError as exc:
         raise drf_serializers.ValidationError({"params": str(exc)}) from exc
-
-    # #160: scrub a raw password to a fingerprint AFTER schema validation (so
-    # the caller-visible validation error still names "password") and BEFORE
-    # anything is persisted, so the plaintext value is never written to the
-    # database even transiently.
     if procedure.handler_id in _PASSWORD_BEARING_HANDLER_IDS:
         _scrub_password_param(params)
+
+
+def _persist_execution_request(
+    *,
+    serializer: Any,
+    procedure: object,
+    user: object,
+    authoritative_backend_id: object,
+    source_intent: object | None,
+    protected_backend_target: object | None,
+) -> object:
+    """Persist and transition one admitted request in a single transaction."""
+    with transaction.atomic():
+        _require_no_concurrent_samba_provision(serializer.validated_data, procedure)
+        execution = serializer.save(
+            requested_by=user,
+            backend=authoritative_backend_id,
+            source_intent=source_intent,
+        )
+        aggregate = RPCExecutionAggregate(execution)
+        if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+            try:
+                normalized = normalize_execution_params(execution)
+            except RPCExecutionError as exc:
+                raise drf_serializers.ValidationError({"params": str(exc)}) from exc
+            aggregate.request(requested_by_id=user.pk)
+            approval_request = _create_approval_request(
+                execution,
+                normalized,
+                backend_target=protected_backend_target,
+            )
+            aggregate.request_approval(
+                snapshot_hash=approval_request.payload_hash,
+                requested_by_id=user.pk,
+            )
+        else:
+            _validate_samba_provision_at_admission(execution)
+            aggregate.queue()
+    return execution
+
+
+def create_execution(
+    *,
+    serializer: Any,
+    user: object,
+    source_intent: object | None = None,
+) -> object:
+    if not user.has_perm("netbox_rpc.execute_rpcprocedure"):
+        raise PermissionDenied("execute_rpcprocedure permission is required.")
+    serializer.is_valid(raise_exception=True)
+    procedure = serializer.validated_data["procedure"]
+    params = serializer.validated_data.get("params") or {}
+    # Keep one linked object so all later platform-owned stamps are persisted.
+    serializer.validated_data["params"] = params
+    _validate_creation_admission(procedure, params)
+
+    # #166: opt-in + selected backend are authoritative at creation time.  The
+    # root-lane source gate above is intentionally pure and precedes this first
+    # settings/backend access.
+    authoritative_backend_id = _require_enabled_and_authoritative_backend(user)
+    authoritative_backend_id, protected_backend_target = (
+        _prepare_creation_authorization(
+            procedure,
+            user,
+            serializer,
+            authoritative_backend_id,
+        )
+    )
+    _validate_creation_payload(serializer, procedure, user, params)
 
     # #167: fail closed before enqueue on a backend capability mismatch.
     _verify_backend_capability(
@@ -645,44 +727,15 @@ def create_execution(
 
         prepare_reference_execution(serializer, user, authoritative_backend_id)
 
-    # Scan the COMPLETE final object immediately before the atomic insert,
-    # after every platform-owned params mutation. RPCExecution.save() repeats
-    # this family-scoped check at the ORM boundary so script/job-created rows
-    # cannot bypass it. The intent relation is persisted separately below.
-    try:
-        validate_openbao_params_for_persistence(procedure.name, params)
-    except OpenBaoSecretIngressError as exc:
-        raise drf_serializers.ValidationError({"params": str(exc)}) from exc
-
-    with transaction.atomic():
-        _require_no_concurrent_samba_provision(serializer.validated_data, procedure)
-        # #166: a normal requester cannot select an arbitrary backend — the
-        # authoritative selected backend from RPC settings always wins over any
-        # client-supplied ``backend_id``.
-        execution = serializer.save(
-            requested_by=user,
-            backend=authoritative_backend_id,
-            source_intent=source_intent,
-        )
-        aggregate = RPCExecutionAggregate(execution)
-        if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-            try:
-                normalized = normalize_execution_params(execution)
-            except RPCExecutionError as exc:
-                raise drf_serializers.ValidationError({"params": str(exc)}) from exc
-            aggregate.request(requested_by_id=user.pk)
-            approval_request = _create_approval_request(
-                execution,
-                normalized,
-                backend_target=protected_backend_target,
-            )
-            aggregate.request_approval(
-                snapshot_hash=approval_request.payload_hash,
-                requested_by_id=user.pk,
-            )
-        else:
-            _validate_samba_provision_at_admission(execution)
-            aggregate.queue()
+    _validate_openbao_payload(procedure.name, params)
+    execution = _persist_execution_request(
+        serializer=serializer,
+        procedure=procedure,
+        user=user,
+        authoritative_backend_id=authoritative_backend_id,
+        source_intent=source_intent,
+        protected_backend_target=protected_backend_target,
+    )
 
     if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
         return execution
@@ -770,6 +823,7 @@ def _enqueue_execution_job(
             name=f"RPC Execution: {execution.procedure.name}",
             backend_pk=execution.backend_id,
             execution_pk=execution.pk,
+            procedure_name=execution.procedure.name,
             job_timeout=_execution_job_timeout(timeout_seconds_snapshot),
         )
     except Exception:
@@ -782,6 +836,28 @@ def _enqueue_execution_job(
         raise
 
     RPCExecutionAggregate(execution).enqueue(job.pk)
+    try:
+        _enqueue_restart_expiry_job(execution, user=user)
+    except Exception:
+        logger.exception(
+            "The restart job was published, but its audit-only expiry job was not scheduled; "
+            "the periodic expiry sweep will reconcile execution %s.",
+            execution.pk,
+        )
+
+
+def _enqueue_restart_expiry_job(execution: object, *, user: object) -> None:
+    """Schedule an audit-only terminal transition for an overdue restart."""
+    if execution.procedure.name != NETBOX_PRODUCTION_RESTART_RQ_WORKER:
+        return
+    from ..jobs import RPCExecutionQueueExpiryJob
+
+    RPCExecutionQueueExpiryJob.enqueue(
+        execution_pk=execution.pk,
+        user=user,
+        name="Expire stale production NetBox RQ worker restart",
+        schedule_at=_restart_queue_deadline(execution),
+    )
 
 
 def _hash_approval_value(value: object) -> str:
@@ -1065,10 +1141,14 @@ def _require_protected_procedure_policy(
         procedure,
         contract_name=contract_name,
     )
-    expected_policy = getattr(contract, "PROCEDURE_POLICIES", {}).get(
-        procedure_name,
-        contract.PROCEDURE_POLICY,
+    expected_policy = getattr(contract, "PROTECTED_PROCEDURE_POLICIES", {}).get(
+        procedure_name
     )
+    if expected_policy is None:
+        expected_policy = getattr(contract, "PROCEDURE_POLICIES", {}).get(
+            procedure_name,
+            contract.PROCEDURE_POLICY,
+        )
     expected_result_schema = getattr(contract, "RESULT_SCHEMAS", {}).get(
         procedure_name,
         getattr(contract, "RESULT_SCHEMA", None),
@@ -1312,6 +1392,75 @@ def _require_protected_procedure_scope(
         )
 
 
+def _require_restart_requester_scopes(procedure: object, user: object) -> None:
+    """Require the restart requester to hold both exact procedure grants."""
+    if getattr(procedure, "name", "") != NETBOX_PRODUCTION_RESTART_RQ_WORKER:
+        return
+    _require_protected_procedure_scope(procedure, user, "approve")
+
+
+def _require_restart_control_consumer(procedure_name: object) -> None:
+    """Reject a restart unless its independent control consumer is live."""
+    if procedure_name != NETBOX_PRODUCTION_RESTART_RQ_WORKER:
+        return
+    from ..jobs import control_queue_has_live_worker
+
+    if not control_queue_has_live_worker():
+        raise drf_serializers.ValidationError(
+            {
+                "procedure_id": (
+                    "The dedicated netbox_rpc.control queue has no live consumer; "
+                    "the production NetBox RQ worker restart was not accepted."
+                )
+            }
+        )
+
+
+def _restart_queue_is_stale(
+    execution: object,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Fail closed when a restart has exceeded its audited queue-age limit."""
+    if getattr(getattr(execution, "procedure", None), "name", "") != (
+        NETBOX_PRODUCTION_RESTART_RQ_WORKER
+    ):
+        return False
+    queued_at = _restart_queued_at(execution)
+    if queued_at is None:
+        return True
+    current = now or datetime.now(queued_at.tzinfo)
+    try:
+        return current - queued_at >= timedelta(
+            seconds=netbox_rq_worker_contract.CONTROL_QUEUE_MAX_AGE_SECONDS
+        )
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
+def _restart_queued_at(execution: object) -> datetime | None:
+    """Read the latest immutable queue-transition timestamp."""
+    events = getattr(execution, "events", None)
+    if events is None:
+        return None
+    try:
+        queued = events.filter(event="ExecutionQueued").order_by("-sequence").first()
+        queued_at = getattr(queued, "created", None)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return queued_at if isinstance(queued_at, datetime) else None
+
+
+def _restart_queue_deadline(execution: object) -> datetime:
+    """Return the immutable deadline used by the audit-only expiry job."""
+    queued_at = _restart_queued_at(execution)
+    if queued_at is None:
+        raise ValueError("Restart execution has no audited queue timestamp.")
+    return queued_at + timedelta(
+        seconds=netbox_rq_worker_contract.CONTROL_QUEUE_MAX_AGE_SECONDS
+    )
+
+
 def _transition_locked(execution: object, transition) -> object:
     """Run a status-guarded transition while holding a row lock on the execution.
 
@@ -1332,6 +1481,69 @@ def _transition_locked(execution: object, transition) -> object:
         return locked
 
 
+def _reject_invalid_gitea_org_claim(
+    agg: RPCExecutionAggregate,
+    procedure: object,
+) -> bool:
+    """Fail a closed organization-runner request before it can start."""
+    if procedure.name != GITEA_ORG_CI_RUNNER_PROVISION:
+        return False
+    execution = agg.execution
+    params = execution.params if isinstance(execution.params, dict) else None
+    internal_keys = {"_intent", "_intent_name", "_timeout_seconds_snapshot"}
+    if params is None or any(
+        key not in gitea_org_ci_runner_contract.PARAMS_SCHEMA["properties"]
+        and key not in internal_keys
+        for key in params
+    ):
+        agg.fail(
+            "Gitea organization CI runner params do not match the closed schema.",
+            "RPC_PARAM_INVALID",
+        )
+        return True
+    raw_params = {key: value for key, value in params.items() if key not in internal_keys}
+    try:
+        jsonschema.validate(raw_params, gitea_org_ci_runner_contract.PARAMS_SCHEMA)
+    except jsonschema.ValidationError:
+        agg.fail(
+            "Gitea organization CI runner params do not match the closed schema.",
+            "RPC_PARAM_INVALID",
+        )
+        return True
+    activation_reason = gitea_org_ci_runner_contract.activation_unavailable_reason(
+        raw_params
+    )
+    if activation_reason is not None:
+        agg.fail(activation_reason, "RPC_HOST_GENERATION_UNAVAILABLE")
+        return True
+    return False
+
+
+def _reject_invalid_protected_claim(
+    agg: RPCExecutionAggregate,
+    procedure: object,
+) -> bool:
+    """Fail a protected request whose approved policy or identities drifted."""
+    if procedure.name not in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+        return False
+    try:
+        _require_protected_procedure_policy(procedure)
+    except drf_serializers.ValidationError:
+        agg.fail(
+            f"{_protected_label(procedure.name)} catalog policy changed after approval.",
+            "RPC_APPROVAL_INVALIDATED",
+        )
+        return True
+    if not _approval_identities_are_authorized(agg.execution):
+        agg.fail(
+            f"{_protected_label(procedure.name)} requires a destructive, approval-required "
+            "procedure and authorized approval identities.",
+            "RPC_APPROVAL_REQUIRED",
+        )
+        return True
+    return False
+
+
 def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
     """Atomically claim queued work only while its procedure remains enabled."""
 
@@ -1350,60 +1562,60 @@ def _claim_if_procedure_enabled(agg: RPCExecutionAggregate) -> None:
             "RPC_PROCEDURE_DISABLED",
         )
         return
-    if procedure.name == GITEA_ORG_CI_RUNNER_PROVISION:
-        params = execution.params if isinstance(execution.params, dict) else None
-        internal_keys = {
-            "_intent",
-            "_intent_name",
-            "_timeout_seconds_snapshot",
-        }
-        if params is None or any(
-            key not in gitea_org_ci_runner_contract.PARAMS_SCHEMA["properties"]
-            and key not in internal_keys
-            for key in params
-        ):
-            agg.fail(
-                "Gitea organization CI runner params do not match the closed schema.",
-                "RPC_PARAM_INVALID",
-            )
-            return
-        raw_params = {
-            key: value for key, value in params.items() if key not in internal_keys
-        }
-        try:
-            jsonschema.validate(
-                raw_params,
-                gitea_org_ci_runner_contract.PARAMS_SCHEMA,
-            )
-        except jsonschema.ValidationError:
-            agg.fail(
-                "Gitea organization CI runner params do not match the closed schema.",
-                "RPC_PARAM_INVALID",
-            )
-            return
-        activation_reason = gitea_org_ci_runner_contract.activation_unavailable_reason(
-            raw_params
+    if _restart_queue_is_stale(execution):
+        agg.fail(
+            "The production NetBox RQ worker restart exceeded the 10-minute queue age and was not dispatched.",
+            "RPC_CONTROL_QUEUE_STALE",
         )
-        if activation_reason is not None:
-            agg.fail(activation_reason, "RPC_HOST_GENERATION_UNAVAILABLE")
-            return
-    if procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-        try:
-            _require_protected_procedure_policy(procedure)
-        except drf_serializers.ValidationError:
-            agg.fail(
-                f"{_protected_label(procedure.name)} catalog policy changed after approval.",
-                "RPC_APPROVAL_INVALIDATED",
-            )
-            return
-        if not _approval_identities_are_authorized(execution):
-            agg.fail(
-                f"{_protected_label(procedure.name)} requires a destructive, approval-required "
-                "procedure and authorized approval identities.",
-                "RPC_APPROVAL_REQUIRED",
-            )
-            return
+        return
+    if _reject_invalid_gitea_org_claim(agg, procedure):
+        return
+    if _reject_invalid_protected_claim(agg, procedure):
+        return
     agg.start()
+
+
+def expire_stale_restart_execution(execution_pk: object) -> bool:
+    """Terminalize one still-queued overdue restart under its row lock."""
+    from ..models import RPCExecution
+
+    with transaction.atomic():
+        execution = (
+            RPCExecution.objects.select_for_update()
+            .select_related("procedure")
+            .get(pk=execution_pk)
+        )
+        if execution.status != RPCExecution.STATUS_QUEUED:
+            return False
+        if not _restart_queue_is_stale(execution):
+            return False
+        RPCExecutionAggregate(execution).fail(
+            "The production NetBox RQ worker restart exceeded the 10-minute queue age and was not dispatched.",
+            "RPC_CONTROL_QUEUE_STALE",
+        )
+        return True
+
+
+def expire_stale_restart_executions(*, batch_size: int = 1000) -> int:
+    """Find overdue queued restarts and expire each through the locked helper."""
+    from ..models import RPCExecution
+
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=netbox_rq_worker_contract.CONTROL_QUEUE_MAX_AGE_SECONDS
+    )
+    candidate_ids = list(
+        RPCExecution.objects.filter(
+            status=RPCExecution.STATUS_QUEUED,
+            procedure__name=NETBOX_PRODUCTION_RESTART_RQ_WORKER,
+            events__event="ExecutionQueued",
+            events__created__lte=cutoff,
+        )
+        .order_by("pk")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    return sum(
+        1 for execution_pk in candidate_ids if expire_stale_restart_execution(execution_pk)
+    )
 
 
 def _gitea_runner_scope_contract(execution: object):
@@ -2093,22 +2305,36 @@ def _require_approval_authorization(execution: object, user: object) -> None:
 
 
 def _approval_identities_are_authorized(execution: object) -> bool:
-    """Accept two actors, or one superuser whose self-approval was authorized."""
+    """Accept distinct actors, with the legacy admin exception except for restart."""
     requested_by_id = getattr(execution, "requested_by_id", None)
     approved_by_id = getattr(execution, "approved_by_id", None)
     if requested_by_id is None or approved_by_id is None:
         return False
     if str(requested_by_id) != str(approved_by_id):
         return True
+    if getattr(getattr(execution, "procedure", None), "name", "") == (
+        NETBOX_PRODUCTION_RESTART_RQ_WORKER
+    ):
+        return False
     return bool(getattr(getattr(execution, "approved_by", None), "is_superuser", False))
+
+
+def _allow_protected_self_approval(procedure_name: str, user: object) -> bool:
+    """Keep the restart's distinct-actor rule stricter than other procedures."""
+    return bool(
+        procedure_name != NETBOX_PRODUCTION_RESTART_RQ_WORKER
+        and getattr(user, "is_superuser", False)
+    )
 
 
 def approve_execution(execution: object, user: object, *, reason: str = "") -> object:
     """Approval command (POST), including the audited superuser exception.
 
     Authorization is enforced here. A NetBox superuser may approve their own
-    request; every other actor remains subject to segregation of duties. The
-    aggregate still enforces the pending-status and single-decision guards.
+    request for legacy protected procedures. The production NetBox RQ worker
+    restart always requires a distinct approver, including for a superuser.
+    Every other actor remains subject to segregation of duties. The aggregate
+    still enforces the pending-status and single-decision guards.
     """
     _require_approval_authorization(execution, user)
     if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
@@ -2160,6 +2386,7 @@ def _approve_protected_execution(
                 )
                 .get(pk=execution.pk)
             )
+            _require_restart_control_consumer(locked.procedure.name)
             _require_protected_procedure_policy(locked.procedure)
             backend_target = _resolve_validated_protected_backend_target(
                 locked.backend_id,
@@ -2182,7 +2409,10 @@ def _approve_protected_execution(
             )
             RPCExecutionAggregate(locked).approve(
                 approver_id=user.pk,
-                allow_requester_approval=bool(getattr(user, "is_superuser", False)),
+                allow_requester_approval=_allow_protected_self_approval(
+                    locked.procedure.name,
+                    user,
+                ),
                 current_protected=current_protected,
                 reason=_PROTECTED_APPROVAL_REASON[locked.procedure.name],
                 queue_after_approval=True,

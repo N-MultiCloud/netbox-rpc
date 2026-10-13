@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -17,8 +18,14 @@ from netbox.constants import RQ_QUEUE_DEFAULT
 from netbox.jobs import JobRunner
 from urllib3.util import Timeout as Urllib3Timeout
 
+from . import netbox_rq_worker_contract
 from .backends import BackendTarget
-from .constants import AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL
+from .constants import (
+    AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL,
+    NETBOX_PRODUCTION_RESTART_RQ_WORKER,
+    NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES,
+    NETBOX_PRODUCTION_STATUS_RQ_WORKER,
+)
 from .domain.normalization import (
     RPCExecutionError,
     RPCLinuxServiceAllowlist,
@@ -34,6 +41,7 @@ from .event_store import (
     record_backend_response,
 )
 from .models import RPCExecution
+from .netbox_rq_worker_contract import CONTROL_QUEUE_NAME as RPC_CONTROL_QUEUE_NAME
 
 if TYPE_CHECKING:
     from rq.job import Job
@@ -44,6 +52,48 @@ RPC_QUEUE_NAME = RQ_QUEUE_DEFAULT
 RPC_JOB_TIMEOUT = 600
 
 
+def _worker_is_live(worker: object, *, now: datetime) -> bool:
+    """Accept only RQ worker states that can consume queued work."""
+    try:
+        state = worker.get_state()
+        heartbeat = worker.last_heartbeat
+    except Exception:  # noqa: BLE001 -- Registry errors must fail closed.
+        return False
+    state_value = getattr(state, "value", state)
+    if str(state_value).lower() not in {"started", "idle", "busy"}:
+        return False
+    if not isinstance(heartbeat, datetime) or heartbeat.tzinfo is None:
+        return False
+    age = now - heartbeat
+    return timedelta(0) <= age <= timedelta(
+        seconds=netbox_rq_worker_contract.CONTROL_WORKER_HEARTBEAT_MAX_AGE_SECONDS
+    )
+
+
+def control_queue_has_live_worker() -> bool:
+    """Return whether the dedicated control queue has a live RQ consumer."""
+    try:
+        import django_rq
+        from rq import Worker
+        from rq.suspension import is_suspended
+
+        queue = django_rq.get_queue(RPC_CONTROL_QUEUE_NAME)
+        if is_suspended(queue.connection):
+            return False
+        now = datetime.now(UTC)
+        return any(
+            _worker_is_live(worker, now=now) for worker in Worker.all(queue=queue)
+        )
+    except Exception:  # noqa: BLE001 -- Redis/RQ registry errors must fail closed.
+        return False
+
+
+def _execution_queue_name(procedure_name: object) -> str:
+    if procedure_name in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES:
+        return RPC_CONTROL_QUEUE_NAME
+    return RPC_QUEUE_NAME
+
+
 class _ProtectedBackendResponseError(ValueError):
     """Raised when a protected backend response exceeds its closed contract."""
 
@@ -52,9 +102,21 @@ class _ProtectedBackendWallClockError(TimeoutError):
     """Raised when a protected request exceeds its request-absolute budget."""
 
 
+def _protected_wall_clock_cause(exc: BaseException) -> _ProtectedBackendWallClockError | None:
+    """Recover a wall-clock exception wrapped by urllib3 and Requests."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _ProtectedBackendWallClockError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 @contextmanager
 def _protected_backend_wall_clock(deadline: float):
-    """Bound DNS, connect, send, and response headers on the worker main thread."""
+    """Bound the full protected HTTP exchange on the worker main thread."""
     if threading.current_thread() is not threading.main_thread():
         raise _ProtectedBackendWallClockError(
             "protected backend request requires the worker main thread"
@@ -216,10 +278,11 @@ def _read_bounded_json_response(
 
 __all__ = (
     "BackendTarget",
-    "RPCLinuxServiceAllowlist",
-    "RPCNetBoxPluginAllowlist",
     "RPCExecutionError",
     "RPCExecutionJob",
+    "RPCExecutionQueueExpiryJob",
+    "RPCLinuxServiceAllowlist",
+    "RPCNetBoxPluginAllowlist",
     "_apply_driver_pipeline_overrides",
     "_call_backend",
     "_dispatch_normalize_execution_params",
@@ -238,8 +301,9 @@ class RPCExecutionJob(JobRunner):
     @classmethod
     def enqueue(cls, *args: Any, **kwargs: Any) -> Job:
         backend_pk = kwargs.pop("backend_pk", None)
+        procedure_name = kwargs.pop("procedure_name", None)
         execution_pk = kwargs.get("execution_pk")
-        kwargs.setdefault("queue_name", RPC_QUEUE_NAME)
+        kwargs.setdefault("queue_name", _execution_queue_name(procedure_name))
         kwargs.setdefault("job_timeout", RPC_JOB_TIMEOUT)
         # Embed identifiers in job data before enqueueing so workers can read
         # them without a race between super().enqueue() and a subsequent save.
@@ -308,6 +372,29 @@ class RPCExecutionJob(JobRunner):
         mark_execution_failed(execution, message, code)
 
 
+class RPCExecutionQueueExpiryJob(JobRunner):
+    """Audit and fail an overdue queued restart without dispatching it."""
+
+    class Meta:
+        name = "RPC Execution Queue Expiry"
+
+    @classmethod
+    def enqueue(cls, *args: Any, **kwargs: Any) -> Job:
+        kwargs.setdefault("queue_name", RPC_CONTROL_QUEUE_NAME)
+        kwargs.setdefault("job_timeout", 60)
+        return super().enqueue(*args, **kwargs)
+
+    def run(self, *args: object, **kwargs: object) -> None:
+        execution_pk = kwargs.get("execution_pk")
+        if execution_pk is None:
+            raise RuntimeError(
+                "RPCExecutionQueueExpiryJob requires an RPCExecution primary key."
+            )
+        from .application.command_handlers import expire_stale_restart_execution
+
+        expire_stale_restart_execution(execution_pk)
+
+
 class _BackendTransportKind(Enum):
     GENERIC = "generic"
     GITEA_UPGRADE = "gitea-upgrade"
@@ -317,6 +404,7 @@ class _BackendTransportKind(Enum):
     GITEA_DOCKER_RUNNER = "gitea-docker-runner"
     DNS_STAGING_DEPLOY = "dns-staging-deploy"
     AKVORADO_INSTALL = "akvorado-install"
+    NETBOX_RQ_WORKER = "netbox-rq-worker"
 
 
 _PROCEDURE_TRANSPORT_KINDS = {
@@ -347,6 +435,10 @@ _PROCEDURE_TRANSPORT_KINDS = {
         _BackendTransportKind.DNS_STAGING_DEPLOY
     ),
     AKVORADO_BOOTSTRAP_DEBIAN13_INSTALL: _BackendTransportKind.AKVORADO_INSTALL,
+    **{
+        procedure_name: _BackendTransportKind.NETBOX_RQ_WORKER
+        for procedure_name in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
+    },
 }
 _SECRET_PROTECTED_TRANSPORTS = frozenset(
     {
@@ -366,6 +458,7 @@ _STREAMED_TRANSPORTS = frozenset(
         _BackendTransportKind.DNS_STAGING_DEPLOY,
         _BackendTransportKind.AKVORADO_INSTALL,
         _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR,
+        _BackendTransportKind.NETBOX_RQ_WORKER,
     }
 )
 _CONNECT_FAILURE_STAGES = {
@@ -509,6 +602,12 @@ def _protected_response_limits(
             ],
             contract.BACKEND_RESPONSE_MAX_BYTES,
         )
+    elif policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER:
+        procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+        return (
+            netbox_rq_worker_contract.BACKEND_ROUTE_BUDGET_SECONDS[procedure_name],
+            netbox_rq_worker_contract.BACKEND_RESPONSE_MAX_BYTES,
+        )
     else:
         return None
     return contract.ROUTE_BUDGET_SECONDS, contract.BACKEND_RESPONSE_MAX_BYTES
@@ -533,6 +632,7 @@ def _build_backend_request_plan(
         policy.secret_protected
         or policy.kind is _BackendTransportKind.AKVORADO_INSTALL
         or policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR
+        or policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER
     ):
         request_kwargs["allow_redirects"] = False
     limits = _protected_response_limits(policy)
@@ -601,6 +701,8 @@ def _closed_backend_transport_failure(
         return _gitea_docker_runner_transport_failure_response(policy)
     if policy.kind is _BackendTransportKind.GITEA_PROTECTED_PUBLICATION_PAIR:
         return _protected_publication_pair_transport_failure_response(policy)
+    if policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER:
+        return _netbox_rq_worker_transport_failure_response(policy)
     raise RuntimeError("generic backend transport has no closed failure envelope")
 
 
@@ -613,6 +715,8 @@ def _classify_backend_request_failure(
     if policy.kind is _BackendTransportKind.AKVORADO_INSTALL:
         return _closed_backend_transport_failure(policy, stage="indeterminate")
     if policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER:
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    if policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER:
         return _closed_backend_transport_failure(policy, stage="indeterminate")
     if policy.secret_protected:
         connect_timeout = getattr(requests.exceptions, "ConnectTimeout", ())
@@ -634,19 +738,12 @@ def _perform_backend_request(
 ) -> _BackendRequestResult:
     response: requests.Response | None = None
     try:
-        if plan.response_deadline is None:
-            response = requests.post(plan.url, **plan.kwargs)
-        else:
-            with _protected_backend_wall_clock(plan.response_deadline):
-                response = requests.post(plan.url, **plan.kwargs)
+        response = requests.post(plan.url, **plan.kwargs)
         return _BackendRequestResult(response=response)
-    except _ProtectedBackendWallClockError as exc:
-        if response is not None:
-            response.close()
-        return _BackendRequestResult(
-            failure=_classify_backend_request_failure(policy, exc)
-        )
     except requests.exceptions.RequestException as exc:
+        wall_clock_error = _protected_wall_clock_cause(exc)
+        if wall_clock_error is not None:
+            raise wall_clock_error
         return _BackendRequestResult(
             failure=_classify_backend_request_failure(policy, exc)
         )
@@ -656,6 +753,11 @@ def _classify_backend_http_response(
     policy: _BackendTransportPolicy,
     response: requests.Response,
 ) -> dict[str, Any] | None:
+    if policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER and not (
+        200 <= response.status_code < 300
+    ):
+        response.close()
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
     if response.status_code == 401 and not policy.secret_protected:
         if policy.kind is _BackendTransportKind.AKVORADO_INSTALL:
             response.close()
@@ -698,10 +800,14 @@ def _read_backend_response(
         else:
             data = response.json()
     except (ValueError, requests.exceptions.RequestException) as exc:
+        wall_clock_error = _protected_wall_clock_cause(exc)
+        if wall_clock_error is not None:
+            raise wall_clock_error
         if (
             policy.secret_protected
             or policy.kind is _BackendTransportKind.GITEA_DOCKER_RUNNER
             or policy.kind is _BackendTransportKind.AKVORADO_INSTALL
+            or policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER
         ):
             return _BackendReadResult(
                 failure=_closed_backend_transport_failure(
@@ -837,6 +943,30 @@ def _normalize_akvorado_backend_response(
     return _normalize_generic_backend_response(response, data)
 
 
+def _normalize_netbox_rq_worker_backend_response(
+    policy: _BackendTransportPolicy,
+    response: requests.Response,
+    data: object,
+) -> dict[str, Any]:
+    """Accept only a closed, schema-valid RQ worker response envelope."""
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    if not isinstance(data, dict) or type(data.get("ok")) is not bool:
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    result = data.get("result")
+    if not isinstance(result, dict) or result.get("ok") is not data["ok"]:
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    try:
+        jsonschema.validate(
+            result,
+            netbox_rq_worker_contract.RESULT_SCHEMAS[procedure_name],
+        )
+    except (jsonschema.ValidationError, jsonschema.SchemaError, KeyError):
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    if not (200 <= response.status_code < 300):
+        return _closed_backend_transport_failure(policy, stage="indeterminate")
+    return data
+
+
 def _normalize_backend_response(
     policy: _BackendTransportPolicy,
     execution: RPCExecution,
@@ -870,17 +1000,17 @@ def _normalize_backend_response(
             response,
             data,
         )
+    if policy.kind is _BackendTransportKind.NETBOX_RQ_WORKER:
+        return _normalize_netbox_rq_worker_backend_response(policy, response, data)
     return _normalize_generic_backend_response(response, data)
 
 
-def _call_backend(
-    target: BackendTarget,
+def _call_backend_with_plan(
     execution: RPCExecution,
-    *,
-    lease: Any = None,
+    plan: _BackendRequestPlan,
+    policy: _BackendTransportPolicy,
 ) -> dict[str, Any]:
-    policy = _resolve_backend_transport_policy(execution)
-    plan = _build_backend_request_plan(target, execution, policy, lease)
+    """Run one request through the shared classification and cleanup pipeline."""
     request_result = _perform_backend_request(plan, policy)
     if request_result.failure is not None:
         return request_result.failure
@@ -898,6 +1028,25 @@ def _call_backend(
         return read_result.failure
     data = read_result.data
     return _normalize_backend_response(policy, execution, resp, data)
+
+
+def _call_backend(
+    target: BackendTarget,
+    execution: RPCExecution,
+    *,
+    lease: Any = None,
+) -> dict[str, Any]:
+    policy = _resolve_backend_transport_policy(execution)
+    plan = _build_backend_request_plan(target, execution, policy, lease)
+    if plan.response_deadline is None:
+        return _call_backend_with_plan(execution, plan, policy)
+    try:
+        # Keep the absolute guard active through urllib3 framing, JSON parsing,
+        # response normalization, and the streamed-response finally cleanup.
+        with _protected_backend_wall_clock(plan.response_deadline):
+            return _call_backend_with_plan(execution, plan, policy)
+    except _ProtectedBackendWallClockError as exc:
+        return _classify_backend_request_failure(policy, exc)
 
 
 def _akvorado_transport_failure_response(target: object) -> dict[str, Any]:
@@ -937,6 +1086,43 @@ def _akvorado_transport_failure_response(target: object) -> dict[str, Any]:
             "warnings": ["Run Akvorado bootstrap preflight before retrying."],
             "error": "Backend transport outcome is indeterminate.",
         },
+    }
+
+
+def _netbox_rq_worker_transport_failure_response(
+    policy: _BackendTransportPolicy,
+) -> dict[str, Any]:
+    """Return a closed result that requires status reconciliation before retry."""
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    phase = (
+        "restart"
+        if procedure_name == NETBOX_PRODUCTION_RESTART_RQ_WORKER
+        else "status"
+    )
+    return {
+        "ok": False,
+        "result": {
+            "ok": False,
+            "procedure": procedure_name,
+            "target": netbox_rq_worker_contract.TARGET_NAME,
+            "project": netbox_rq_worker_contract.COMPOSE_PROJECT,
+            "service": netbox_rq_worker_contract.COMPOSE_SERVICE,
+            "status": "indeterminate",
+            "phase": phase,
+            "retry_requires_status_check": True,
+            "state": "",
+            "health": "",
+            "container": "",
+            "exit_code": -1,
+            "output": (
+                "The backend response is indeterminate. Run "
+                f"{NETBOX_PRODUCTION_STATUS_RQ_WORKER} before retry."
+            ),
+        },
+        "error_code": "RPC_BACKEND_OUTCOME_UNKNOWN",
+        "error_message": (
+            "The backend response is indeterminate; reconcile worker status before retry."
+        ),
     }
 
 

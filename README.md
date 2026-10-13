@@ -1115,6 +1115,50 @@ command-only digest as primary plus the single reviewed semantic digest as
 compatible; the catalog accepts that exact matrix only when its own current
 digest matches the reviewed constant, so policy drift still fails closed.
 
+### `service.netbox.production.*_rq_worker` — production Compose RQ lifecycle
+
+Migration `0110` seeds a read-only status procedure and an approval-required
+restart procedure for the production NetBox RQ worker. Both accept an empty
+parameter object only and are bound to `dcim.device` id `44`
+(`nmc-prod-207`), Compose project `nmc-netbox`, and service `netbox-rq`.
+The restart affects only that Compose service and waits for it to return to a
+running state. The restart is a protected approval procedure: its requester
+must hold both execute and approve permissions scoped to this exact procedure,
+and no requester, including a superuser, can approve their own request. Each
+restart therefore receives a separate immutable approval decision.
+
+Status and restart executions use the `netbox_rpc.control` queue, which the
+independent `netbox-rpc-control` Compose service consumes. Restart admission
+and approval both require a live RQ worker registered for that exact queue with
+a heartbeat no older than 120 seconds. They fail closed when RQ is suspended or
+the consumer is absent, stopped, stale, or unreachable. The `netbox-rq` service
+does not consume that queue. The restart and its audit-only expiry job never
+fall back to the default queue. The expiry job can only mark a still-queued
+restart failed; it cannot dispatch the restart.
+
+The dedicated control service must start its worker with
+`python manage.py rqworker netbox_rpc.control --worker-ttl 90`. RQ idles for
+`worker_ttl - 15` seconds between heartbeats, so this setting gives a 75-second
+idle cadence inside the 120-second admission gate. The default 420-second TTL
+can leave a healthy idle worker with a 405-second heartbeat gap and make
+admission fail closed.
+
+The immutable `ExecutionQueued` event starts a 10-minute maximum queue age. The
+expiry job appends an audited terminal failure if the control worker never
+claims the restart, and the control worker checks the same timestamp again
+under the execution row lock before dispatch. An old restart can therefore
+never execute after a control worker returns. An independent system job runs
+each minute on the default queue and calls the same locked expiry helper. It
+still expires overdue restarts when the control consumer disappears. Both
+procedures require an exact backend semantic capability. Their plugin-to-backend
+HTTP requests have an absolute deadline, a 16,384-byte streamed response limit,
+and redirects disabled. An ambiguous HTTP or SSH outcome returns a closed
+reconciliation-required result. A restart launch ambiguity or a post-restart
+readiness failure requires a fresh status check before any retry.
+The migration disables, but does not delete, the legacy `netbox-rq` Linux
+service allowlist row because it points to the retired
+`netbox-rq.service` host unit.
+
 ### `service.samba.1.*` — Samba file-server observability and config lifecycle
 
 Migration `0049` seeds twelve **read-only** procedures (`effect="read"`,

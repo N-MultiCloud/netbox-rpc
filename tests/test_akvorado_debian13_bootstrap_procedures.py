@@ -524,6 +524,8 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         "os.linux.ubuntu.26.samba_ad_dc.verify",
         constants.PROXBOX_API_RELEASE_IMAGES_INSPECT,
         constants.PROXBOX_API_RELEASE_IMAGES_RECOVER,
+        constants.NETBOX_PRODUCTION_STATUS_RQ_WORKER,
+        constants.NETBOX_PRODUCTION_RESTART_RQ_WORKER,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows

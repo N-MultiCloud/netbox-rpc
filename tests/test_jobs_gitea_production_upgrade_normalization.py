@@ -1225,7 +1225,7 @@ def test_runner_backend_enforces_streaming_and_total_deadline(
     )
     post = MagicMock(return_value=response)
     monkeypatch.setattr(jobs_module.requests, "post", post)
-    monotonic = iter((100.0, 100.1, 401.0))
+    monotonic = iter((100.0, 100.1, 401.0, 401.0))
     monkeypatch.setattr(jobs_module.time, "monotonic", lambda: next(monotonic))
 
     projected = jobs_module._call_backend(
@@ -2158,7 +2158,7 @@ def test_org_ci_runner_absolute_deadline_closes_a_trickle_response(
         "post",
         MagicMock(return_value=response),
     )
-    monotonic = iter((100.0, 100.1, 1841.0))
+    monotonic = iter((100.0, 100.1, 1841.0, 1841.0))
     monkeypatch.setattr(jobs_module.time, "monotonic", lambda: next(monotonic))
 
     projected = jobs_module._call_backend(
