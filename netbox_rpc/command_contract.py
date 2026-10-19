@@ -69,6 +69,19 @@ COMMAND_RUNTIME_KEYS = frozenset(
 # representative RPCProcedureCommand row so the object view and API expose the
 # fact that backend-owned orchestration exists.
 EXEMPT_HANDLER_RATIONALE = {
+    "service.pbs.1.status": (
+        "Runs three fixed PBS posture probes and parses their bounded outputs backend-side."
+    ),
+    "service.pbs.1.cert_fingerprint": (
+        "Parses the fixed PBS certificate report and validates its SHA-256 fingerprint."
+    ),
+    "service.pbs.1.disk_list": (
+        "Parses and bounds the fixed PBS JSON disk inventory backend-side."
+    ),
+    "service.pbs.1.datastore_from_disk": (
+        "Passes the closed name, disk, filesystem, and disk_identity parameters to one "
+        "backend-owned lock-held inventory check and datastore creation invocation."
+    ),
     "network.huawei_ne8000_f1a.show_bgp_peer": (
         "Runs a backend-orchestrated, read-only Huawei BGP workflow: peer summary, "
         "per-peer verbose detail, and IPv4/IPv6 TCP correlation vary by VRF and "

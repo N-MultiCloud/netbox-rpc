@@ -431,6 +431,21 @@ INFLUXDB3_DEBIAN13_PROCEDURE_NAMES = frozenset(
     }
 )
 
+# Proxmox Backup Server catalog. Migration 0111 seeds these rows disabled until
+# the paired backend handlers and capability contracts are deployed.
+PBS_1_STATUS = "service.pbs.1.status"
+PBS_1_CERT_FINGERPRINT = "service.pbs.1.cert_fingerprint"
+PBS_1_DISK_LIST = "service.pbs.1.disk_list"
+PBS_1_DATASTORE_FROM_DISK = "service.pbs.1.datastore_from_disk"
+PBS_1_PROCEDURE_NAMES = frozenset(
+    {
+        PBS_1_STATUS,
+        PBS_1_CERT_FINGERPRINT,
+        PBS_1_DISK_LIST,
+        PBS_1_DATASTORE_FROM_DISK,
+    }
+)
+
 # Debian 13 Akvorado bootstrap catalog. Migration 0086 seeds these rows closed;
 # a later release enables them only after every worker runs code that recognizes
 # the protected approval and outcome-unknown contracts. These prepare a fresh
@@ -488,6 +503,7 @@ NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES = frozenset(
 EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
     AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
     | NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
+    | PBS_1_PROCEDURE_NAMES
     | UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
     | {
         NETBOX_STAGING_DEPLOY_DNS_PAIR,

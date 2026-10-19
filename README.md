@@ -457,6 +457,39 @@ targets `v4.5.8`, `v4.6.5`, and `v4.7.0`. The plugin pins
 
 ## Procedure command source of truth
 
+### Proxmox Backup Server procedures
+
+Migration `0111` seeds the disabled `service.pbs.1.*` family for devices and
+virtual machines. It reports PBS status, certificate metadata, and bounded disk
+inventory. Each disk row includes a required SHA-256 `identity` and an
+`identity_stable` boolean. The boolean is true only when the raw row has a
+non-empty serial or WWN. Attach each datastore disk with a unique serial or
+WWN. A Proxmox SCSI disk reports a serial. A VirtIO block disk without a
+configured serial does not. Datastore
+creation requires `name`, `disk`, `filesystem`, and `disk_identity`. The backend
+holds its datastore lock while it verifies the exact disk identity and
+`unused` state and creates the datastore. The create process and all
+descendants inherit the lock file description. The lock remains held if the
+supervisor exits or is killed. Each result schema accepts a closed
+success result or a closed failure result with a bounded `RPC_*` code. Datastore refusals use
+`RPC_PBS_DISK_NOT_FOUND`, `RPC_PBS_DISK_IN_USE`,
+`RPC_PBS_DISK_IDENTITY_MISMATCH`, `RPC_PBS_DISK_IDENTITY_UNSTABLE`,
+`RPC_PBS_DISK_LIST_AMBIGUOUS`, `RPC_PBS_DISK_LIST_INVALID`, or
+`RPC_PBS_COMMAND_FAILED`. `RPC_PBS_BUSY` means another disk operation still
+holds the datastore lock. Wait and inspect the host before a retry.
+`RPC_PBS_CREDENTIAL_UNAVAILABLE` means credential resolution failed before
+dispatch. Duplicate canonical disk names invalidate `disk_list`.
+Duplicate names or duplicate unused-disk identities block datastore creation.
+The datastore row pins AsyncSSH and forbids an estate
+transport fallback chain. `RPC_PBS_CONNECTION_FAILED` means the connection
+failed before channel creation. `RPC_PBS_OUTCOME_UNKNOWN` means the destructive
+command may have started. After that result, run `disk_list` and inspect the host
+before a retry. Use the same reconciliation after the create tool reports a
+normal failure because formatting can be partial. A launch-failure message
+states that creation did not start and is safe to retry after the host failure
+is corrected. Deploy and verify the matching backend capability contracts
+before you enable these rows.
+
 Each `RPCProcedure` can own ordered `RPCProcedureCommand` rows. These rows are
 the database source of truth for the fixed command or device-CLI steps that
 nms-backend may run for a procedure. They are structured tokens, never arbitrary

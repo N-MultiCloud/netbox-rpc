@@ -2686,6 +2686,39 @@ have been rewritten before the failure. Never create or approve `reconcile`
 autonomously; present the exact target device and `app` to the operator
 before dispatching either procedure, and run `check` before every `reconcile`.
 
+## Proxmox Backup Server procedures
+
+The `service.pbs.1.*` family is seeded disabled by migration `0111`. Deploy the
+matching `netbox-rpc-backend` handlers and verify their capability contracts.
+Then enable the four procedure rows through a coordinated additive rollout.
+The datastore procedure requires approval and has a destructive effect. It is
+not a protected two-person procedure. Disk-list results include a required
+SHA-256 `identity` and an `identity_stable` boolean. The boolean is true only
+when the raw row has a non-empty serial or WWN. The operator must attach each
+datastore disk with a unique serial or WWN. A Proxmox SCSI disk reports a
+serial. A VirtIO block disk without a configured serial does not. Datastore
+creation requires `name`, `disk`, `filesystem`,
+and `disk_identity`. Every result schema accepts either its closed success
+result or a closed failure result with a bounded `RPC_*` code. Datastore refusals use
+`RPC_PBS_DISK_NOT_FOUND`, `RPC_PBS_DISK_IN_USE`,
+`RPC_PBS_DISK_IDENTITY_MISMATCH`, `RPC_PBS_DISK_IDENTITY_UNSTABLE`,
+`RPC_PBS_DISK_LIST_AMBIGUOUS`, `RPC_PBS_DISK_LIST_INVALID`, or
+`RPC_PBS_COMMAND_FAILED`. The create process and all descendants inherit the
+datastore lock file description. The lock remains held if the supervisor exits
+or is killed. `RPC_PBS_BUSY` means another disk operation still holds that
+lock. The operator must wait and inspect the host before a retry.
+`RPC_PBS_CREDENTIAL_UNAVAILABLE` means credential resolution failed before
+dispatch. Duplicate canonical disk names invalidate `disk_list`.
+Duplicate names or duplicate unused-disk identities block datastore creation.
+The datastore row pins AsyncSSH and has no transport
+fallback chain. `RPC_PBS_CONNECTION_FAILED` means the connection failed before
+channel creation. `RPC_PBS_OUTCOME_UNKNOWN` means the destructive command may
+have started. The operator must run `disk_list` and inspect the host before a
+retry after `RPC_PBS_OUTCOME_UNKNOWN`. The operator must use the same
+reconciliation when the create tool reports a normal failure because formatting
+can be partial. A launch-failure message states that creation did not start and
+is safe to retry after the host failure is corrected.
+
 ## Adding New Procedures
 
 Every procedure seeded via migration must have a corresponding branch in

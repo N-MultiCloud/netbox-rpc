@@ -526,6 +526,10 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         constants.PROXBOX_API_RELEASE_IMAGES_RECOVER,
         constants.NETBOX_PRODUCTION_STATUS_RQ_WORKER,
         constants.NETBOX_PRODUCTION_RESTART_RQ_WORKER,
+        constants.PBS_1_STATUS,
+        constants.PBS_1_CERT_FINGERPRINT,
+        constants.PBS_1_DISK_LIST,
+        constants.PBS_1_DATASTORE_FROM_DISK,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows

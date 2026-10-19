@@ -1,5 +1,5 @@
 {
-  "migration_count": 127,
+  "migration_count": 128,
   "reviewed_migrations": {
     "netbox_rpc/migrations/0001_initial.py": true,
     "netbox_rpc/migrations/0002_seed_initial_procedures.py": true,
@@ -127,8 +127,9 @@
     "netbox_rpc/migrations/0107_merge_publication_provenance_normalization.py": true,
     "netbox_rpc/migrations/0108_merge_publication_drift_report.py": true,
     "netbox_rpc/migrations/0109_merge_enabled_publication_adoption.py": true,
-    "netbox_rpc/migrations/0110_seed_netbox_production_rq_worker_procedures.py": true
+    "netbox_rpc/migrations/0110_seed_netbox_production_rq_worker_procedures.py": true,
+    "netbox_rpc/migrations/0111_seed_pbs_procedures.py": true
   },
-  "reviewed_migrations_sha256": "ed8a0ef8fa5463b9f10f11c7d6060c34062becc98121d37e9d9acf7cc31c67cc",
+  "reviewed_migrations_sha256": "7b044715acb25d4e0d43a63a734e172bfc333002b8028c7ef82f8b79017c7da8",
   "schema": 2
 }

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 import types
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +117,77 @@ def test_schema_valid_backend_result_still_records_success(event_store_module) -
     )
 
     assert [event.event_name for event in events] == ["ExecutionSucceeded"]
+
+
+@pytest.mark.parametrize(
+    "procedure_name",
+    [
+        "service.pbs.1.status",
+        "service.pbs.1.cert_fingerprint",
+        "service.pbs.1.disk_list",
+        "service.pbs.1.datastore_from_disk",
+    ],
+)
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "RPC_PBS_CONNECTION_FAILED",
+        "RPC_PBS_COMMAND_FAILED",
+        "RPC_PBS_BUSY",
+        "RPC_PBS_CREDENTIAL_UNAVAILABLE",
+        "RPC_HANDLER_FAILED",
+        "RPC_SSH_CREDENTIALS_INVALID",
+        "RPC_LEASE_REQUIRED",
+        "RPC_PBS_DEADLINE_EXCEEDED",
+        "RPC_FUTURE_ROUTER_REFUSAL",
+    ],
+)
+def test_pbs_backend_failure_preserves_original_code_and_closed_result(
+    event_store_module,
+    procedure_name: str,
+    error_code: str,
+) -> None:
+    event_store, events = event_store_module
+    django_db = sys.modules["django.db"]
+
+    class RunPython:
+        def __init__(self, code, reverse_code=None):
+            self.code = code
+            self.reverse_code = reverse_code
+
+    django_db.migrations = SimpleNamespace(Migration=object, RunPython=RunPython)
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "pbs_event_store_migration",
+        root / "netbox_rpc/migrations/0111_seed_pbs_procedures.py",
+    )
+    assert spec and spec.loader
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    schema = next(row[5] for row in migration._PROCEDURES if row[0] == procedure_name)
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, result_schema=schema)
+    )
+    failure_result = {
+        "procedure": procedure_name,
+        "failure": {"code": error_code},
+    }
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": failure_result,
+            "error_code": error_code,
+            "error_message": "The PBS operation failed.",
+        },
+    )
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == error_code
+    assert failure.result == failure_result
 
 
 def test_gitea_public_ssh_snapshot_survives_redaction_byte_exact(

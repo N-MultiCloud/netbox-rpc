@@ -86,6 +86,8 @@ from ..constants import (
     NETBOX_PLUGIN_INSTALL,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+    PBS_1_DATASTORE_FROM_DISK,
+    PBS_1_PROCEDURE_NAMES,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
@@ -218,6 +220,7 @@ _NETBOX_PLUGIN_INSTALL_AVAILABLE = False
 # same coordinated rollout that deploys the handlers and their capability
 # contract, via an additive migration that also sets RPCProcedure.enabled=True.
 _INFLUXDB3_DEBIAN13_AVAILABLE = False
+_PBS_1_AVAILABLE = False
 # Registration remains unavailable until the composite backend handler and the
 # exact runner-host helper generation are deployed together.  The catalog row
 # is also seeded disabled; this code gate prevents an operator toggle from
@@ -321,6 +324,12 @@ def code_gate_unavailable_reason(procedure_name: str) -> str | None:
             "execution could only queue and then fail on an unknown handler. "
             "Enable it in the coordinated rollout that ships the handlers and "
             "their approved capability contract."
+        )
+    if procedure_name in PBS_1_PROCEDURE_NAMES and not _PBS_1_AVAILABLE:
+        return (
+            f"{procedure_name} cannot run yet: the service.pbs.1.* backend handlers "
+            "and matching capability contracts must be deployed before the catalog "
+            "procedures are enabled."
         )
     gitea_runner_reason = _gitea_runner_code_gate_unavailable_reason(procedure_name)
     if gitea_runner_reason is not None:
@@ -6655,6 +6664,60 @@ def _normalize_proxbox_api_release_images_execution(
     }
 
 
+def _normalize_pbs_execution(execution: RPCExecution, target: str) -> dict[str, Any]:
+    """Bind PBS operations to one audited device or virtual machine."""
+    reason = code_gate_unavailable_reason(execution.procedure.name)
+    if reason is not None:
+        raise RPCExecutionError(reason, code="RPC_PROCEDURE_NOT_AVAILABLE")
+    model_label = execution.target_model_label
+    assigned_object = getattr(execution, "assigned_object", None)
+    object_id = getattr(execution, "assigned_object_id", None)
+    if (
+        model_label not in {"dcim.device", "virtualization.virtualmachine"}
+        or isinstance(object_id, bool)
+        or not isinstance(object_id, int)
+        or object_id < 1
+        or assigned_object is None
+        or getattr(assigned_object, "pk", None) != object_id
+        or getattr(assigned_object, "name", None) != target
+    ):
+        raise RPCExecutionError(
+            "PBS procedures require one existing device or virtual machine target.",
+            code="RPC_TARGET_INVALID",
+        )
+    raw_params = execution.params
+    params = {} if raw_params is None else raw_params
+    if not isinstance(params, dict):
+        raise RPCExecutionError(
+            "PBS params must be an object.", code="RPC_PARAM_INVALID"
+        )
+    public = {
+        key: value for key, value in params.items() if not str(key).startswith("_")
+    }
+    allowed = (
+        {"name", "disk", "filesystem", "disk_identity"}
+        if execution.procedure.name == PBS_1_DATASTORE_FROM_DISK
+        else set()
+    )
+    if set(public) != allowed:
+        raise RPCExecutionError(
+            "PBS procedure parameters do not match the closed contract.",
+            code="RPC_PARAM_INVALID",
+        )
+    target_object = {"content_type": model_label, "object_id": object_id}
+    return {
+        "target": target,
+        "target_object": target_object,
+        **public,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": execution.procedure.name,
+            "target_object": target_object,
+            **public,
+        },
+    }
+
+
 def _normalize_netbox_production_rq_worker_execution(
     execution: RPCExecution,
     target: str,
@@ -6727,6 +6790,7 @@ _TABLE_NORMALIZERS: dict[str, Callable[[RPCExecution, str], dict[str, Any]]] = {
         name: _normalize_netbox_production_rq_worker_execution
         for name in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
     },
+    **{name: _normalize_pbs_execution for name in PBS_1_PROCEDURE_NAMES},
     **{
         name: _normalize_ubuntu_26_samba_ad_dc_execution
         for name in UBUNTU_26_SAMBA_AD_DC_PROCEDURE_NAMES
