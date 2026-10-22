@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import jsonschema
 import pytest
+import test_netbox_rq_worker_procedures as rq_tests
 from test_netbox_rq_worker_procedures import (
     _execution,
     _install_runtime_import_stubs,
@@ -33,7 +34,8 @@ def normalization_jobs(monkeypatch):
 
 
 def test_seed_is_frozen_idempotent_and_preserves_history(monkeypatch):
-    migration = runpy.run_path(str(MIGRATION))
+    monkeypatch.setattr(rq_tests, "MIGRATION_PATH", MIGRATION)
+    migration = vars(rq_tests._load_migration())
     monkeypatch.setattr(migration["transaction"], "atomic", nullcontext)
     procedures = _Manager("procedure")
     commands = _Manager("command")

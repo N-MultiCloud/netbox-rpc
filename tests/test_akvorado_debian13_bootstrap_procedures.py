@@ -530,6 +530,7 @@ def test_constants_and_command_contract_match_catalog(catalog) -> None:
         constants.PBS_1_CERT_FINGERPRINT,
         constants.PBS_1_DISK_LIST,
         constants.PBS_1_DATASTORE_FROM_DISK,
+        *constants.KEYCLOAK_IAM_UI_PROCEDURE_NAMES,
     }
     assert set(constants.AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES) == set(
         procedures.rows
