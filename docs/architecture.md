@@ -192,7 +192,7 @@ typed events from `RPCExecutionEvent` rows.
 | `ParametersNormalized` | `normalized_params`, `resolved_command_hash` |
 | `BackendEventRecorded` | no projection change; audit/progress only; remote names are capped and stored as `Backend::<name>` |
 | `ExecutionSucceeded` | status `succeeded`, `result`, `finished_at`, clear errors |
-| `ExecutionFailed` | status `failed`, `error_code`, `error_message`, `finished_at` |
+| `ExecutionFailed` | status `failed`, `error_code` (catalog-shaped and at most 100 characters; any other code becomes `RPC_EXECUTION_FAILED`), `error_message`, `finished_at` |
 | `ExecutionEnqueueFailed` | status `failed`, enqueue error fields, `finished_at` |
 | `ExecutionCancelled` | status `cancelled`, `finished_at`, clear errors |
 

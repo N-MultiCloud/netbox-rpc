@@ -720,6 +720,14 @@ not discarded. A mismatch emits `ExecutionFailed` with
 diagnostic. Event messages are independently redacted and hard-capped at 4096
 characters.
 
+Every failure code that is persisted as `RPCExecution.error_code` must be
+catalog-shaped: upper snake case and at most 100 characters, the width of the
+column. A code from any source that does not fit is replaced by the fixed fallback
+`RPC_EXECUTION_FAILED`, or by `RPC_ENQUEUE_FAILED` for an enqueue failure. The
+rule applies to a backend response, a backend HTTP error body, and an exception
+code alike. The execution still reaches a terminal state, and ledger rows written
+before the rule rebuild with their stored codes.
+
 One exception applies to ordinary procedures. A backend response with `ok` exactly
 `false`, a `result` that is absent or exactly `{}`, and a catalog-shaped
 `error_code` (upper snake case, at most 100 characters) has no result to validate.

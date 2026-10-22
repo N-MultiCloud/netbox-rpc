@@ -288,6 +288,15 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   triggers protect the ledger below the ORM.
 - Event append failures must fail closed. Do not log-and-drop an execution
   event after sequence collisions or database errors.
+- Every failure code that reaches `RPCExecution.error_code` must be catalog-shaped:
+  upper snake case and at most 100 characters, the column width. `event_store`
+  applies this rule in `_append_and_project` to every `ExecutionFailed` and
+  `ExecutionEnqueueFailed` event, whatever its source, including the backend
+  error body, exception codes, and the ordinary backend failure response. A code
+  that does not fit is replaced by `RPC_EXECUTION_FAILED`, or by
+  `RPC_ENQUEUE_FAILED` for an enqueue failure. Do not add a second definition of
+  the shape; reuse `_is_catalog_error_code`. Ledger rows written before the rule
+  still rebuild with their stored codes.
 - API create/enqueue/cancel paths and RQ execution dispatch are command-side
   behavior in `netbox_rpc.application.command_handlers`. Execution detail/list
   and execution-events endpoints are query-side behavior, PUT/PATCH and DELETE

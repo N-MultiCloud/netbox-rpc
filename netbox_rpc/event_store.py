@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import re
@@ -86,7 +87,7 @@ _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
 # Catalog error codes are upper snake case. The RPCExecution.error_code column
 # is CharField(max_length=100), so only a code of this shape may be persisted as
-# the execution error. See _skips_result_validation().
+# the execution error. See _persistable_failure_event().
 _BACKEND_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,99}")
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 # Appended by redact_event_value() to any string it truncates. A single named
@@ -429,10 +430,43 @@ def ledger_normalized_params(normalized_params: dict[str, Any]) -> dict[str, Any
     return dict(redacted.get("normalized_params") or {})
 
 
+_EXECUTION_FAILED_CODE = "RPC_EXECUTION_FAILED"
+_ENQUEUE_FAILED_CODE = "RPC_ENQUEUE_FAILED"
+
+
+def _is_catalog_error_code(code: object) -> bool:
+    """True only for a code that fits RPCExecution.error_code: catalog shape and column width."""
+    return isinstance(code, str) and _BACKEND_ERROR_CODE_RE.fullmatch(code) is not None
+
+
+def _persistable_failure_event(
+    event: domain_events.DomainEvent,
+) -> domain_events.DomainEvent:
+    """Return a failure event whose code is safe to project onto the execution.
+
+    The projection writes ``code`` to ``RPCExecution.error_code``. Every failure
+    event passes through ``_append_and_project``, so bounding the code here covers
+    every writer. A code that is not catalog-shaped, or that is longer than the
+    column, is replaced by the fixed fallback. The raw value is not kept: no
+    legitimate backend code fails the shape, and echoing unchecked backend text
+    into the ledger would add a leak channel.
+    """
+    if isinstance(event, domain_events.ExecutionFailed):
+        fallback = _EXECUTION_FAILED_CODE
+    elif isinstance(event, domain_events.ExecutionEnqueueFailed):
+        fallback = _ENQUEUE_FAILED_CODE
+    else:
+        return event
+    if _is_catalog_error_code(event.code):
+        return event
+    return dataclasses.replace(event, code=fallback)
+
+
 def _append_and_project(
     execution: RPCExecution,
     event: domain_events.DomainEvent,
 ) -> RPCExecutionEvent:
+    event = _persistable_failure_event(event)
     string_limits = None
     if isinstance(
         event,
@@ -710,9 +744,7 @@ def _skips_result_validation(
         return False
     if result_present and not (isinstance(raw_result, dict) and not raw_result):
         return False
-    return isinstance(error_code, str) and bool(
-        _BACKEND_ERROR_CODE_RE.fullmatch(error_code)
-    )
+    return _is_catalog_error_code(error_code)
 
 
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
