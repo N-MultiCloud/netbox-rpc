@@ -15,6 +15,7 @@ from utilities.forms.fields import (
 from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
 from .current_access import reload_requesting_user
 from .transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
+from .transport import lowering_is_refused
 from .models import (
     RPCBackend,
     RPCExecution,
@@ -99,10 +100,10 @@ class RPCProcedureForm(NetBoxModelForm):
             may_approve=may_approve,
         ):
             raise AbortRequest(UNPIN_DENIED_MESSAGE)
-        if (
-            stored.approval_required is True
-            and self.cleaned_data.get("approval_required") is False
-            and not may_approve
+        if lowering_is_refused(
+            previously_set=stored.approval_required,
+            requested=self.cleaned_data.get("approval_required"),
+            may_approve=may_approve,
         ):
             raise AbortRequest(APPROVAL_DENIED_MESSAGE)
 

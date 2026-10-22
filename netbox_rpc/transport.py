@@ -134,30 +134,51 @@ def ansible_context_from_platform_map(mapping: object, platform_slug: object) ->
     return context
 
 
+def lowering_is_refused(
+    *,
+    previously_set: object,
+    requested: object,
+    may_approve: bool,
+) -> bool:
+    """Return True when an edit lowers a protected safety flag without approval.
+
+    The protected flags are ``transport_pinned`` and ``approval_required``. Only a
+    change from True to a falsy value is governed. Keeping the flag, omitting the
+    field, creating a procedure, and lowering the flag with the approve permission
+    are all allowed. A present falsy value is treated as lowering, so an unexpected
+    type fails closed.
+    """
+    if previously_set is not True or requested is None:
+        return False
+    if requested:
+        return False
+    return not may_approve
+
+
 def unpin_is_refused(
     *,
     previously_pinned: object,
     requested_pinned: object,
     may_approve: bool,
 ) -> bool:
-    """Return True when an edit would un-pin a transport-pinned procedure.
-
-    Only a change from pinned to unpinned is governed. Keeping the pin, omitting
-    the field, creating a procedure, and un-pinning by a user who holds the
-    approve permission are all allowed. A present falsy value is treated as
-    un-pinning, so an unexpected type fails closed.
-    """
-    if previously_pinned is not True or requested_pinned is None:
-        return False
-    if requested_pinned:
-        return False
-    return not may_approve
+    """Return True when an edit would un-pin a transport-pinned procedure."""
+    return lowering_is_refused(
+        previously_set=previously_pinned,
+        requested=requested_pinned,
+        may_approve=may_approve,
+    )
 
 
 APPROVE_RPC_PROCEDURE = "netbox_rpc.approve_rpcprocedure"
 UNPIN_DENIED_MESSAGE = (
     "Only users with netbox_rpc.approve_rpcprocedure can un-pin a "
     "transport-pinned RPC procedure."
+)
+# Same text as the admin form's message in forms.py. The form keeps its own
+# constant, and a pure test asserts that the two strings are equal.
+APPROVAL_DENIED_MESSAGE = (
+    "Only users with netbox_rpc.approve_rpcprocedure can disable "
+    "approval for an existing RPC procedure."
 )
 
 

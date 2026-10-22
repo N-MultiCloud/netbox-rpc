@@ -23,6 +23,7 @@ from ..models import (
 )
 from ..current_access import reload_requesting_user
 from ..transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
+from ..transport import APPROVAL_DENIED_MESSAGE, lowering_is_refused
 
 
 class RpcPluginSettingsSerializer(NetBoxModelSerializer):
@@ -196,9 +197,11 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
 
     def validate(self, attrs):
         # NetBox's parent validate() writes the submitted values onto
-        # self.instance, so the stored pin and the approve decision are taken
-        # before it runs. The approve check is scoped to the stored row.
+        # self.instance, so the stored pin, the stored approval requirement, and
+        # the approve decision are taken before it runs. The approve check is
+        # scoped to the stored row.
         previously_pinned = getattr(self.instance, "transport_pinned", None)
+        previously_required = getattr(self.instance, "approval_required", None)
         request = self.context.get("request")
         may_approve = may_approve_procedure(
             getattr(request, "user", None), self.instance
@@ -206,36 +209,54 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
         attrs = super().validate(attrs)
         # NetBox sets ``self.instance`` for single and bulk updates alike, so
         # this covers every REST write to an existing procedure.
+        refused = {}
         if unpin_is_refused(
             previously_pinned=previously_pinned,
             requested_pinned=attrs.get("transport_pinned"),
             may_approve=may_approve,
         ):
-            raise serializers.ValidationError(
-                {"transport_pinned": UNPIN_DENIED_MESSAGE}
-            )
+            refused["transport_pinned"] = UNPIN_DENIED_MESSAGE
+        if lowering_is_refused(
+            previously_set=previously_required,
+            requested=attrs.get("approval_required"),
+            may_approve=may_approve,
+        ):
+            refused["approval_required"] = APPROVAL_DENIED_MESSAGE
+        if refused:
+            raise serializers.ValidationError(refused)
         return attrs
 
     def update(self, instance, validated_data):
         requested = validated_data.get("transport_pinned")
+        requested_required = validated_data.get("approval_required")
         request_user = getattr(self.context.get("request"), "user", None)
-        # Lock the stored row for the rest of the write. The pin, the approve scope,
-        # and the grants are all read after the lock, not from the copies read
-        # before this request.
+        # Lock the stored row for the rest of the write. The pin, the approval
+        # requirement, the approve scope, and the grants are all read after the
+        # lock, not from the copies read before this request.
         with transaction.atomic():
             stored = type(instance).objects.select_for_update().get(pk=instance.pk)
             user = reload_requesting_user(request_user)
+            refused = {}
             if unpin_is_refused(
                 previously_pinned=stored.transport_pinned,
                 requested_pinned=requested,
                 may_approve=may_approve_procedure(user, stored),
             ):
-                raise serializers.ValidationError(
-                    {"transport_pinned": UNPIN_DENIED_MESSAGE}
-                )
+                refused["transport_pinned"] = UNPIN_DENIED_MESSAGE
+            if lowering_is_refused(
+                previously_set=stored.approval_required,
+                requested=requested_required,
+                may_approve=may_approve_procedure(user, stored),
+            ):
+                refused["approval_required"] = APPROVAL_DENIED_MESSAGE
+            if refused:
+                raise serializers.ValidationError(refused)
             if requested is None:
                 # Omitting the pin must not write back a stale copy of it.
                 instance.transport_pinned = stored.transport_pinned
+            if requested_required is None:
+                # The approval requirement follows the same rule as the pin.
+                instance.approval_required = stored.approval_required
             return super().update(instance, validated_data)
 
 class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):

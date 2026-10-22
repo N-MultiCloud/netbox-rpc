@@ -1532,9 +1532,10 @@ and claim. A rollback of migration `0075` clears the pin and is refused the
 same way until the row is re-pinned.
 
 Un-pinning through the admin form or the REST API also requires the
-`netbox_rpc.approve_rpcprocedure` permission on that procedure. The check runs
+`netbox_rpc.approve_rpcprocedure` permission on that procedure. The same rule
+applies to lowering `approval_required` from `True` to `False`. The check runs
 again under a row lock at write time, so a concurrent write cannot clear a pin
-that was set after the request read the procedure.
+or the approval requirement that was set after the request read the procedure.
 
 For network procedures the target device's NetBox **Platform** is resolved
 through an operator-editable map (following the official `netbox.netbox`
@@ -1819,7 +1820,9 @@ persists it in the job `data` JSON for retry/debug recovery.
 NetBox edit views attach the active request to RPC form instances so form-level
 security policy can evaluate the requesting user. `RPCProcedureForm` blocks
 changing an existing procedure from `approval_required=True` to `False` unless
-the user has `netbox_rpc.approve_rpcprocedure`. `RPCLinuxServiceAllowlistForm`
+the user has `netbox_rpc.approve_rpcprocedure`. The REST serializer applies the
+same rule to single and bulk updates, and refuses with a 400 response that leaves
+the stored row unchanged. `RPCLinuxServiceAllowlistForm`
 scopes `ssh_credential_override` choices with
 `DeviceCredential.objects.restrict(user, "view")` and falls back to an empty
 queryset if no request context is available.
