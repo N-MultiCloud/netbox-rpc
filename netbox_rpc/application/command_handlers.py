@@ -674,7 +674,18 @@ def create_execution(
         raise PermissionDenied("execute_rpcprocedure permission is required.")
     serializer.is_valid(raise_exception=True)
     procedure = serializer.validated_data["procedure"]
-    params = serializer.validated_data.get("params") or {}
+    raw_params = serializer.validated_data.get("params") or {}
+    # Refuse a supplied non-object before any copy or coercion. dict() would turn
+    # a list of pairs into a mapping and bypass the type check, and would raise a
+    # bare TypeError or ValueError for scalars and strings.
+    if not isinstance(raw_params, dict):
+        raise drf_serializers.ValidationError(
+            {"params": "Parameters must be a JSON object."}
+        )
+    # Work on a copy. The platform-owned stamps below, and the password scrub in
+    # _validate_creation_payload, must never mutate the caller's mapping: a shared
+    # or retried input dict would otherwise carry a stale stamp into the next call.
+    params = dict(raw_params)
     # Keep one linked object so all later platform-owned stamps are persisted.
     serializer.validated_data["params"] = params
     _validate_creation_admission(procedure, params)

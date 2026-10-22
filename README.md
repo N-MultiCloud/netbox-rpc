@@ -1782,7 +1782,9 @@ guards before an execution record is created and the RQ job is enqueued:
    with that permission may record
    `approved → queued` and enqueue it.
 3. **Params schema** — when a procedure defines `params_schema`, submitted
-   `params` are validated against the JSON Schema before proceeding.
+   `params` are validated against the JSON Schema before proceeding. `params`
+   must be a JSON object when supplied; a missing or empty value counts as `{}`,
+   and any other truthy value is refused before the parameters are copied.
 
 These guards run at the API layer, not the model layer, because the serializer
 receives the procedure as a foreign-key ID and the schema/enabled/approval

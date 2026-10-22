@@ -17,8 +17,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pytest-asyncio requests jinja2 jsonschema ruff
-      - run: ruff check netbox_rpc tests
+      # Same hash-locked closure as the Gitea pure-domain job (pytest, pytest-asyncio,
+      # pydantic, pyyaml, cryptography, jsonschema, and the rest), so collection does
+      # not depend on unlocked, partial installs.
+      - run: "pip install --require-hashes --only-binary=:all: -r .gitea/ci-requirements.lock"
+      - run: pip install ruff==0.16.2
+      # The rule set is pinned here, not left to ruff's defaults, which change between
+      # releases. The classic gate (E4, E7, E9, F) is extended with correctness checks
+      # that report nothing on this tree: pylint errors (PLE), bugbear checks (B006 and
+      # B023 among them), and ruff's correctness subset (RUF008, RUF009, RUF016, RUF018,
+      # RUF024). The broader default rule set is tracked in a follow-up issue.
+      - run: ruff check --select E4,E7,E9,F,PLE,B006,B012,B020,B023,B025,B029,B030,B031,B032,B035,B039,RUF008,RUF009,RUF016,RUF018,RUF024 netbox_rpc tests
       - run: python -m compileall netbox_rpc tests
       - run: pytest tests/ -q
 

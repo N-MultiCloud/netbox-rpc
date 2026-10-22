@@ -128,7 +128,9 @@ class CredentialDispatchTests(CredentialAuthorityFixture, TestCase):
             with self.subTest(configured=configured):
                 execution = self._admit()
 
-                def setting(name, default=None):
+                # Bind the loop value at definition time. The closure is also
+                # called only inside this iteration, so behaviour is unchanged.
+                def setting(name, default=None, *, configured=configured):
                     if name == dl._TTL_SETTING:
                         return configured
                     return configured_setting(name, default)

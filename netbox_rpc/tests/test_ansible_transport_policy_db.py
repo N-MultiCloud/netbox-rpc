@@ -28,6 +28,10 @@ CURRENT_PINNED_PROCEDURES = (
         "os.linux_debian_13.preflight_akvorado",
     ),
     (
+        "os.linux.proxmox.oci_registry_pull",
+        "os.linux_proxmox.oci_registry_pull",
+    ),
+    (
         "os.linux.ubuntu.24.upgrade_26.run_upgrade",
         "os.linux.ubuntu.24.upgrade_26.run_upgrade",
     ),
@@ -44,8 +48,40 @@ CURRENT_PINNED_PROCEDURES = (
         "os.linux.ubuntu.26.samba_ad_dc.verify",
     ),
     (
+        "service.gitea.actions_runner.diagnose_org_ci_runner",
+        "service.gitea.actions_runner.diagnose_org_ci_runner",
+    ),
+    (
+        "service.gitea.actions_runner.diagnose_user_ci_runner",
+        "service.gitea.actions_runner.diagnose_user_ci_runner",
+    ),
+    (
+        "service.gitea.actions_runner.protected_pair.prove",
+        "service.gitea.actions_runner.protected_pair.prove",
+    ),
+    (
+        "service.gitea.actions_runner.protected_pair.provision",
+        "service.gitea.actions_runner.protected_pair.provision",
+    ),
+    (
         "service.gitea.actions_runner.provision_org_ci_runner",
         "service.gitea.actions_runner.provision_org_ci_runner",
+    ),
+    (
+        "service.gitea.actions_runner.recover_org_ci_runner",
+        "service.gitea.actions_runner.recover_org_ci_runner",
+    ),
+    (
+        "service.gitea.actions_runner.recover_user_ci_runner",
+        "service.gitea.actions_runner.recover_user_ci_runner",
+    ),
+    (
+        "service.netbox.production.restart_rq_worker",
+        "service.netbox.production.restart_rq_worker",
+    ),
+    (
+        "service.netbox.production.status_rq_worker",
+        "service.netbox.production.status_rq_worker",
     ),
     (
         "service.netbox.staging.deploy_dns_pair",
@@ -54,6 +90,18 @@ CURRENT_PINNED_PROCEDURES = (
     (
         "service.netbox.staging.rotate_backend_token",
         "service.netbox.staging.rotate_backend_token",
+    ),
+    (
+        "service.pbs.1.datastore_from_disk",
+        "service.pbs.1.datastore_from_disk",
+    ),
+    (
+        "service.proxbox_api.release_images.inspect",
+        "service.proxbox_api.release_images.inspect",
+    ),
+    (
+        "service.proxbox_api.release_images.recover",
+        "service.proxbox_api.release_images.recover",
     ),
 )
 
@@ -92,18 +140,22 @@ class AnsibleFirstPolicySeedTests(TestCase):
     def test_only_declared_procedures_are_pinned_in_the_current_catalog(self):
         """Mutation guard: pinning everything would silently disable the policy.
 
-        Migration 0075 introduced the first two pins. Later reviewed migrations
-        added seven procedures whose transport is also contractually fixed. The
-        fresh database must contain exactly that complete declared set.
+        Each reviewed migration that pins a procedure declares it in
+        CURRENT_PINNED_PROCEDURES. The fresh database must contain exactly that
+        declared set. A new pin, or a dropped one, fails the guard, and the
+        message names every missing and every unexpected pin.
         """
 
-        pinned = list(
-            RPCProcedure.objects.filter(transport_pinned=True)
-            .order_by("name")
-            .values_list("name", "handler_id")
+        pinned = set(
+            RPCProcedure.objects.filter(transport_pinned=True).values_list(
+                "name", "handler_id"
+            )
         )
-        assert len(pinned) == len(CURRENT_PINNED_PROCEDURES), pinned
-        assert pinned == list(CURRENT_PINNED_PROCEDURES), pinned
+        declared = set(CURRENT_PINNED_PROCEDURES)
+        assert pinned == declared, {
+            "missing_pins": sorted(declared - pinned),
+            "unexpected_pins": sorted(pinned - declared),
+        }
 
     def test_the_migration_rewrote_no_procedure_driver(self):
         """The policy is a setting, not a per-row rewrite.

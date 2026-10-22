@@ -10,6 +10,7 @@ creation is capability-gated and, for ``provision``, follows the single-operator
 
 from __future__ import annotations
 
+import copy
 from unittest import mock
 
 from django.test import TestCase
@@ -35,6 +36,12 @@ EXPECTED_GATING = {
     VERIFY: ("read", False, 180),
 }
 SECRET_WORDS = ("password", "passwd", "passphrase", "secret", "token", "hash")
+
+
+class _FakeJob:
+    """Stands in for the RQ job that RPCExecutionJob.enqueue returns (integer pk)."""
+
+    pk = 22200
 
 
 def _property_names(schema):
@@ -166,12 +173,14 @@ class _ProtectedProvisionTestCase(TestCase):
 
     def _serializer(self, procedure=None, params=None):
         procedure = procedure or self.provision
+        # A fresh copy per request: the class-level PARAMS must never be shared
+        # between tests or calls, whatever create_execution does with its input.
         return RPCExecutionSerializer(
             data={
                 "procedure_id": procedure.pk,
                 "assigned_object_type": "dcim.device",
                 "assigned_object_id": self.device.pk,
-                "params": self.PARAMS if params is None else params,
+                "params": copy.deepcopy(self.PARAMS if params is None else params),
             }
         )
 
@@ -245,12 +254,14 @@ class SingleActorCreationTests(_ProtectedProvisionTestCase):
 
 class ConcurrencyFenceTests(_ProtectedProvisionTestCase):
     @mock.patch("netbox_rpc.application.command_handlers._verify_backend_capability")
-    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
+    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue", return_value=_FakeJob())
     def test_a_second_open_provision_for_the_same_target_is_refused(self, _e, _v):
         first = command_handlers.create_execution(
             serializer=self._serializer(), user=self.requester
         )
-        assert first.status == RPCExecution.STATUS_PENDING_APPROVAL
+        # Single-operator gate: the provision is queued and enqueued at once.
+        first.refresh_from_db()
+        assert first.status == RPCExecution.STATUS_QUEUED
 
         with self.assertRaises(ValidationError):
             command_handlers.create_execution(
@@ -259,7 +270,7 @@ class ConcurrencyFenceTests(_ProtectedProvisionTestCase):
         assert RPCExecution.objects.filter(procedure=self.provision).count() == 1
 
     @mock.patch("netbox_rpc.application.command_handlers._verify_backend_capability")
-    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
+    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue", return_value=_FakeJob())
     def test_a_terminal_provision_does_not_block_a_new_request(self, _e, _v):
         first = command_handlers.create_execution(
             serializer=self._serializer(), user=self.requester
@@ -271,7 +282,39 @@ class ConcurrencyFenceTests(_ProtectedProvisionTestCase):
         second = command_handlers.create_execution(
             serializer=self._serializer(), user=self.requester
         )
-        assert second.status == RPCExecution.STATUS_PENDING_APPROVAL
+        second.refresh_from_db()
+        assert second.status == RPCExecution.STATUS_QUEUED
+
+
+class NonObjectParamsRefusedTests(_ProtectedProvisionTestCase):
+    @mock.patch("netbox_rpc.capabilities.fetch_backend_capabilities", return_value=None)
+    @mock.patch("netbox_rpc.jobs.RPCExecutionJob.enqueue")
+    def test_truthy_non_object_params_are_refused_before_backend_access(
+        self, enqueue, fetch
+    ):
+        # Each value is truthy, so the empty-value default does not apply. Under
+        # dict(), scalars and strings raised a bare TypeError or ValueError. The last
+        # value is a complete parameter set in list-of-pairs form: dict() would turn it
+        # into a valid mapping that passes the schema, so only the type guard refuses it.
+        values = (
+            7,
+            "text",
+            ["domain", "ad.example.com"],
+            [["domain", "x"]],
+            True,
+            list(self.PARAMS.items()),
+        )
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError) as refused:
+                    command_handlers.create_execution(
+                        serializer=self._serializer(params=value),
+                        user=self.requester,
+                    )
+                assert "must be a JSON object" in str(refused.exception.detail)
+        fetch.assert_not_called()
+        enqueue.assert_not_called()
+        assert not RPCExecution.objects.filter(procedure=self.provision).exists()
 
 
 class CapabilityFixtureTests(TestCase):

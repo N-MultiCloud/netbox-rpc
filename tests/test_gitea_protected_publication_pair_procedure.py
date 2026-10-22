@@ -105,33 +105,35 @@ def _load_migration(
 def _valid_result(procedure: str) -> dict[str, object]:
     operation = "prove" if procedure == contract.PROVE_PROCEDURE else "provision"
     runner_ids = {"builder": 1, "publisher": 2, "validator": 3}
-    role = lambda name: {
-        "runner_id": runner_ids[name],
-        "runner_name": f"ci-release-{name}-netbox-rpc-backend",
-        "labels": [f"release-{name}"],
-        "online": True,
-        "busy": False,
-        "service_active": True,
-        "service_user": f"nmc-rpc-release-{name}",
-        "service_name": f"nmc-rpc-release-{name}.service",
-        "process_identity": f"pid:{runner_ids[name]}",
-        "workspace_root": f"/var/lib/nmc-rpc-release-{name}/work",
-        "state_root": f"/var/lib/nmc-rpc-release-{name}",
-        "cache_root": f"/var/cache/nmc-rpc-release-{name}",
-        "config_path": f"/etc/nmc-protected-publication/{name}.yaml",
-        "launcher_sha256": (
-            "7cc722a0de44af661d299c0b86eeee03231f993effa517718e48a45c2c188ef1"
-        ),
-        "scope_owner": "N-MultiCloud",
-        "scope_type": "organization",
-        "scope_sha256": "b" * 64,
-        "runtime_inventory_sha256": contract.RUNTIME_INVENTORY_SHA256,
-        "accepts_pull_requests": False,
-        "control_plane_https": "same-origin-gitea-only",
-        "candidate_build_network": "none",
-        "package_write_credential_present": False,
-        "package_mutation": "broker-socket-only" if name == "publisher" else "none",
-    }
+    def role(name: str) -> dict[str, object]:
+        return {
+            "runner_id": runner_ids[name],
+            "runner_name": f"ci-release-{name}-netbox-rpc-backend",
+            "labels": [f"release-{name}"],
+            "online": True,
+            "busy": False,
+            "service_active": True,
+            "service_user": f"nmc-rpc-release-{name}",
+            "service_name": f"nmc-rpc-release-{name}.service",
+            "process_identity": f"pid:{runner_ids[name]}",
+            "workspace_root": f"/var/lib/nmc-rpc-release-{name}/work",
+            "state_root": f"/var/lib/nmc-rpc-release-{name}",
+            "cache_root": f"/var/cache/nmc-rpc-release-{name}",
+            "config_path": f"/etc/nmc-protected-publication/{name}.yaml",
+            "launcher_sha256": (
+                "7cc722a0de44af661d299c0b86eeee03231f993effa517718e48a45c2c188ef1"
+            ),
+            "scope_owner": "N-MultiCloud",
+            "scope_type": "organization",
+            "scope_sha256": "b" * 64,
+            "runtime_inventory_sha256": contract.RUNTIME_INVENTORY_SHA256,
+            "accepts_pull_requests": False,
+            "control_plane_https": "same-origin-gitea-only",
+            "candidate_build_network": "none",
+            "package_write_credential_present": False,
+            "package_mutation": "broker-socket-only" if name == "publisher" else "none",
+        }
+
     return {
         "ok": True,
         "schema_version": 1,

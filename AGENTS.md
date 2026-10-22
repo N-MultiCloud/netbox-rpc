@@ -2904,6 +2904,12 @@ guards before enqueueing:
    the submitted `params` dict is validated with `jsonschema.validate()` before
    the execution record is created.
 
+`params` must be a JSON object when it is supplied. A missing or empty value is
+treated as `{}`. Any other truthy value, such as a scalar, a string, or an array
+(including an array of pairs), is refused with a validation error before the
+parameters are copied, so no coercion can turn it into a mapping. Platform stamps
+are written to a copy of the caller's parameters, never to the caller's dictionary.
+
 If the RQ/Redis enqueue call fails, `create()` marks the execution
 `STATUS_FAILED` with `error_code="RPC_ENQUEUE_FAILED"` instead of leaving it
 permanently in `STATUS_QUEUED`.

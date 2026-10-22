@@ -215,3 +215,22 @@ class ExecutionDetailCommandOutputTests(TestCase):
         assert "ApprovalRequested" in event_html
         assert "<script>" not in event_html
         assert "&lt;script&gt;" in event_html
+
+    def test_event_row_renders_no_edit_or_delete_action(self):
+        # The ledger is append-only and has no edit or delete route, so the rendered
+        # execution page must not link to either action for an event row.
+        proc = make_procedure("os.linux.test.detail.events.no_actions")
+        execution = _make_execution(proc, user=self.user)
+        event = RPCExecutionEvent.objects.create(
+            execution=execution,
+            sequence=1,
+            event="ApprovalRequested",
+            message="Awaiting a second actor",
+            data={"actor": "operator"},
+        )
+
+        html = self._detail_html(execution)
+
+        event_url = reverse("plugins:netbox_rpc:rpcexecutionevent", args=[event.pk])
+        assert f"{event_url}edit/" not in html
+        assert f"{event_url}delete/" not in html

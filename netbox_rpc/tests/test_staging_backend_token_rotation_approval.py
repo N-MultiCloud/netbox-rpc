@@ -202,18 +202,60 @@ class StagingBackendTokenRotationApprovalTests(TestCase):
             requested_by=self.requester,
         ).exists()
 
-    def test_requester_cannot_approve_or_enqueue_their_own_request(self):
+    def test_superuser_requester_may_self_approve_under_the_documented_exception(self):
+        # AGENTS.md, "Staging Backend Token Rotation": a NetBox superuser may
+        # self-approve this procedure, and the same approved_by identity is recorded.
         execution, _ = self._request()
+
+        approved, enqueue = self._approve(execution, user=self.requester)
+
+        approved.refresh_from_db()
+        assert approved.status == RPCExecution.STATUS_QUEUED
+        assert approved.requested_by_id == self.requester.pk
+        assert approved.approved_by_id == self.requester.pk
+        assert approved.job_id == _FakeJob.pk
+        assert event_names(approved) == [
+            "ExecutionRequested",
+            "ApprovalRequested",
+            "ExecutionApproved",
+            "ExecutionQueued",
+            "JobEnqueued",
+        ]
+        approval_event = approved.events.get(event="ExecutionApproved")
+        assert approval_event.data["reason"] == (
+            command_handlers._STAGING_ROTATION_APPROVAL_REASON
+        )
+        enqueue.assert_called_once()
+
+    def test_non_superuser_requester_cannot_approve_or_enqueue_their_own_request(self):
+        from dcim.models import Device
+
+        # Correctly scoped identity: execute and approve on this exact procedure,
+        # plus view access, so the refusal comes from segregation of duties.
+        user = make_user("staging-token-plain-requester", superuser=False)
+        for model, actions, constraints in (
+            (RPCProcedure, ("execute",), {"id": self.procedure.pk}),
+            (RPCProcedure, ("approve",), {"id": self.procedure.pk}),
+            (RPCProcedure, ("view",), {"id": self.procedure.pk}),
+            (Device, ("view",), {"id": self.device.pk}),
+        ):
+            _grant(user, model=model, actions=actions, constraints=constraints)
+        # Re-fetch so the cached object permissions include the new grants.
+        user = make_user("staging-token-plain-requester", superuser=False)
+        execution, _ = self._request(user=user)
 
         with (
             mock.patch(
                 "netbox_rpc.jobs.RPCExecutionJob.enqueue",
                 return_value=_FakeJob(),
             ) as enqueue,
-            self.assertRaises(ValidationError),
+            self.assertRaises(ValidationError) as refused,
         ):
-            command_handlers.approve_execution(execution, self.requester)
+            command_handlers.approve_execution(execution, user)
 
+        # Pin the refusal to segregation of duties, so an earlier capability,
+        # normalization, or snapshot failure cannot satisfy this test.
+        assert "segregation of duties" in str(refused.exception.detail)
         execution.refresh_from_db()
         assert execution.status == RPCExecution.STATUS_PENDING_APPROVAL
         assert execution.approved_by_id is None

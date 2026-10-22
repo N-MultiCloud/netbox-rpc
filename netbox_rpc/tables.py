@@ -251,6 +251,10 @@ class RPCExecutionTable(NetBoxTable):
 class RPCExecutionEventTable(NetBoxTable):
     execution = tables.Column(linkify=True)
     level = columns.ChoiceFieldColumn()
+    # RPCExecutionEvent rows are append-only, and the plugin registers no edit or
+    # delete route for them. NetBox's default ActionsColumn would reverse
+    # ``rpcexecutionevent_edit`` and raise NoReverseMatch, so render no row actions.
+    actions = columns.ActionsColumn(actions=())
 
     class Meta(NetBoxTable.Meta):
         model = RPCExecutionEvent
