@@ -974,6 +974,7 @@ def _apply_driver_pipeline_overrides(
 
 _TARGET_SNAPSHOT_MAX_FIELDS = 100
 _TARGET_SNAPSHOT_MAX_VALUE_LEN = 1024
+_TARGET_SNAPSHOT_MAX_DEPTH = 4
 # Field/custom-field names whose values must never be serialized into the
 # snapshot. Biased toward over-redaction (omitting a field is safe; leaking a
 # secret is not).
@@ -1017,6 +1018,33 @@ def _json_safe_scalar(value: Any) -> Any:
     return safe
 
 
+def _json_safe_value(value: Any, depth: int = 0) -> Any:
+    """Return a bounded, JSON-safe copy of a target field value.
+
+    Dictionaries and lists keep their structure, so the key-based redaction that
+    runs on the persisted ledger applies at every depth. A text copy would hide
+    those keys from that redaction.
+    """
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]
+    if depth >= _TARGET_SNAPSHOT_MAX_DEPTH:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            str(key)[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]: _json_safe_value(item, depth + 1)
+            for key, item in list(value.items())[:_TARGET_SNAPSHOT_MAX_FIELDS]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_safe_value(item, depth + 1)
+            for item in list(value)[:_TARGET_SNAPSHOT_MAX_FIELDS]
+        ]
+    return _json_safe_scalar(value)
+
+
 def _target_field_items(obj: Any):
     """Yield ``(name, value)`` for the object's concrete fields.
 
@@ -1039,6 +1067,11 @@ def _target_field_items(obj: Any):
                 yield key, value
 
 
+# Structured target fields that are carried by a dedicated mapping. Copying them
+# as text would bypass the key-based redaction applied to that mapping.
+_STRUCTURED_SNAPSHOT_FIELDS = frozenset({"custom_field_data"})
+
+
 def _build_target_object_snapshot(obj: Any) -> dict[str, Any] | None:
     """Bounded, redacted, JSON-safe snapshot of the run's NetBox target object."""
 
@@ -1046,11 +1079,15 @@ def _build_target_object_snapshot(obj: Any) -> dict[str, Any] | None:
         return None
     snapshot: dict[str, Any] = {}
     for name, value in _target_field_items(obj):
-        if name.startswith("_") or _SENSITIVE_FIELD_RE.search(name):
+        if (
+            name.startswith("_")
+            or name in _STRUCTURED_SNAPSHOT_FIELDS
+            or _SENSITIVE_FIELD_RE.search(name)
+        ):
             continue
         if len(snapshot) >= _TARGET_SNAPSHOT_MAX_FIELDS:
             break
-        snapshot[name] = _json_safe_scalar(value)
+        snapshot[name] = _json_safe_value(value)
 
     pk = getattr(obj, "pk", None)
     snapshot.setdefault("id", pk if pk is not None else getattr(obj, "id", None))
@@ -1063,7 +1100,7 @@ def _build_target_object_snapshot(obj: Any) -> dict[str, Any] | None:
     custom_fields = getattr(obj, "custom_field_data", None)
     if isinstance(custom_fields, dict) and custom_fields:
         redacted_cf = {
-            key: _json_safe_scalar(value)
+            key: _json_safe_value(value)
             for key, value in list(custom_fields.items())[:_TARGET_SNAPSHOT_MAX_FIELDS]
             if not _SENSITIVE_FIELD_RE.search(str(key))
         }

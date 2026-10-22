@@ -65,7 +65,14 @@ SAFE_REFERENCE_KEYS = {
     "password_sha256",
     "restconf_credential_pk",
     "rpc_ssh_credential_pk",
+    # The strict host-key policy flag is a non-secret boolean chosen by the
+    # operator. The backend needs it as a real boolean, so it must persist as
+    # one rather than as "[REDACTED]".
+    "rpc_ssh_strict_host_key_checking",
 }
+# Policy flags that are stored as booleans. A non-boolean value under one of these
+# names is redacted at every depth, even though the name is also a safe reference key.
+_BOOLEAN_POLICY_KEYS = frozenset({"rpc_ssh_strict_host_key_checking"})
 MAX_EVENT_STRING_LENGTH = 4096
 MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
@@ -149,7 +156,16 @@ def redact_event_value(
     string_limits: dict[StringLimitPath, int] | None = None,
     path: StringLimitPath = (),
 ) -> object:
+    if parent_key and parent_key.lower() in _BOOLEAN_POLICY_KEYS:
+        # Checked before the safe-key exemption, so the boolean boundary holds
+        # at every depth, including nested target data such as custom fields.
+        return value if isinstance(value, bool) else "[REDACTED]"
     if parent_key and _is_sensitive_key(parent_key):
+        if isinstance(value, bool):
+            # A boolean cannot carry secret material. Replacing it with a string
+            # would break the typed field that consumes it, for example a
+            # StrictBool host-key policy, so the boolean is kept as it is.
+            return value
         from .credential_contract import public_credential_metadata
 
         public_metadata = public_credential_metadata(value, parent_key)

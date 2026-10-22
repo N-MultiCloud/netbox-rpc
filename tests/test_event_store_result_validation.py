@@ -1831,3 +1831,180 @@ def test_absent_result_without_ok_keeps_the_existing_failure_rules(
     assert events[0].event_name == "ExecutionFailed"
     assert events[0].code == BACKEND_FAILURE_CODE
     assert events[0].message == "Resolved SSH credentials are invalid."
+
+
+# ---------------------------------------------------------------------------
+# Non-secret policy booleans survive redaction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_strict_host_key_flag_persists_as_a_boolean(event_store_module, flag: bool) -> None:
+    """A Proxmox endpoint execution keeps the operator's host-key policy flag.
+
+    The key name contains "key", so the redaction rule used to replace the flag
+    with "[REDACTED]". The backend then received a string for a StrictBool field.
+    """
+
+    event_store, _events = event_store_module
+    normalized = {
+        "target": "pve-node-01",
+        "rpc_ssh_host": "10.0.30.10",
+        "rpc_ssh_port": 22,
+        "rpc_ssh_credential_pk": 7,
+        "rpc_ssh_known_hosts_entry": "pve-node-01 ssh-ed25519 AAAA",
+        "rpc_ssh_strict_host_key_checking": flag,
+    }
+
+    persisted = event_store.redact_event_data({"normalized_params": normalized})
+
+    assert persisted["normalized_params"] == normalized
+
+
+def test_boolean_under_a_sensitive_key_is_never_replaced_by_a_string(
+    event_store_module,
+) -> None:
+    """A boolean cannot carry secret material, so it is not redacted."""
+
+    event_store, _events = event_store_module
+    payload = {"ssh_private_key_required": True, "ssh_password_set": False}
+
+    assert event_store.redact_event_data(payload) == payload
+
+
+def test_string_and_integer_under_a_sensitive_key_are_still_redacted(
+    event_store_module,
+) -> None:
+    """The boolean guard does not widen redaction to other value types."""
+
+    event_store, _events = event_store_module
+
+    assert event_store.redact_event_data({"rpc_ssh_password": "hunter2"}) == {
+        "rpc_ssh_password": "[REDACTED]"
+    }
+    assert event_store.redact_event_data({"ssh_token_ttl": 3600}) == {
+        "ssh_token_ttl": "[REDACTED]"
+    }
+
+
+def test_replayed_projection_keeps_the_boolean_flag(event_store_module) -> None:
+    """The projection rebuilt from the redacted ledger keeps the flag as a bool."""
+
+    from netbox_rpc.domain import events as domain_events
+    from netbox_rpc.domain.projection import ProjectionState, apply
+
+    event_store, _events = event_store_module
+    event = domain_events.ParametersNormalized(
+        normalized_params={
+            "rpc_ssh_strict_host_key_checking": False,
+            "rpc_ssh_credential_pk": 7,
+        },
+        resolved_command_hash="a" * 64,
+    )
+
+    persisted = event_store.redact_event_data(event.data)
+    replayed = domain_events.ParametersNormalized.from_data(persisted)
+    state = apply(ProjectionState(), replayed)
+
+    assert state.normalized_params["rpc_ssh_strict_host_key_checking"] is False
+
+
+FLAG_NAME = "rpc_ssh_strict_host_key_checking"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("opaque-secret-text", id="string"),
+        pytest.param(0, id="zero"),
+        pytest.param(1, id="one"),
+        pytest.param({"nested": "x"}, id="object"),
+        pytest.param(["x"], id="list"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_non_boolean_under_the_policy_flag_is_redacted_at_every_depth(
+    event_store_module,
+    value: object,
+) -> None:
+    """Target custom fields are operator text, so only a boolean may persist.
+
+    The flag name is also a safe reference key. Without the boundary check, a
+    custom field with this name would persist its text unredacted at any depth.
+    """
+
+    event_store, _events = event_store_module
+    payload = {
+        "normalized_params": {"_target_object": {"custom_fields": {FLAG_NAME: value}}}
+    }
+
+    redacted = event_store.redact_event_data(payload)
+
+    custom_fields = redacted["normalized_params"]["_target_object"]["custom_fields"]
+    assert custom_fields[FLAG_NAME] == "[REDACTED]"
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_boolean_under_the_policy_flag_survives_at_every_depth(
+    event_store_module,
+    flag: bool,
+) -> None:
+    event_store, _events = event_store_module
+    payload = {
+        "normalized_params": {"_target_object": {"custom_fields": {FLAG_NAME: flag}}}
+    }
+
+    assert event_store.redact_event_data(payload) == payload
+
+
+def test_integers_zero_and_one_under_a_sensitive_key_are_redacted(
+    event_store_module,
+) -> None:
+    """Truth-value equality must not stand in for the boolean type check."""
+
+    event_store, _events = event_store_module
+
+    for value in (0, 1):
+        assert event_store.redact_event_data({"ssh_token_ttl": value}) == {
+            "ssh_token_ttl": "[REDACTED]"
+        }
+
+
+def test_replayed_projection_redacts_nested_opaque_text_under_the_flag_name(
+    event_store_module,
+) -> None:
+    from netbox_rpc.domain import events as domain_events
+    from netbox_rpc.domain.projection import ProjectionState, apply
+
+    event_store, _events = event_store_module
+    event = domain_events.ParametersNormalized(
+        normalized_params={
+            "_target_object": {"custom_fields": {FLAG_NAME: "opaque-secret-text"}}
+        },
+        resolved_command_hash="a" * 64,
+    )
+
+    persisted = event_store.redact_event_data(event.data)
+    replayed = domain_events.ParametersNormalized.from_data(persisted)
+    state = apply(ProjectionState(), replayed)
+
+    assert state.normalized_params["_target_object"]["custom_fields"][FLAG_NAME] == (
+        "[REDACTED]"
+    )
+    assert "opaque-secret-text" not in repr(state)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({FLAG_NAME.upper(): "opaque-secret-text"}, id="mixed-case"),
+        pytest.param({f" {FLAG_NAME} ": "opaque-secret-text"}, id="whitespace-wrapped"),
+        pytest.param({FLAG_NAME: ["opaque-secret-text"]}, id="nested-list"),
+        pytest.param({"items": [{FLAG_NAME: "opaque-secret-text"}]}, id="inherited-parent"),
+        pytest.param({"result": {FLAG_NAME: "opaque-secret-text"}}, id="result-payload"),
+    ],
+)
+def test_policy_flag_variants_never_persist_opaque_text(event_store_module, payload) -> None:
+    event_store, _events = event_store_module
+
+    assert "opaque-secret-text" not in repr(event_store.redact_event_data(payload))

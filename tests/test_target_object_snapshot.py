@@ -210,3 +210,111 @@ def test_apply_is_noop_when_target_missing(norm) -> None:
     normalized = {"command_fingerprint": {"handler_id": "h"}}
     norm._apply_target_object_context(execution, normalized)
     assert "_target_object" not in normalized
+
+
+_FLAG = "rpc_ssh_strict_host_key_checking"
+_CANARY = "opaque-secret-text"
+
+
+def test_snapshot_keeps_custom_fields_only_as_the_structured_mapping(norm) -> None:
+    """The raw custom field data must not be copied as text.
+
+    A stringified dictionary would carry every custom field name and value past
+    the key-based redaction that applies to the structured ``custom_fields``
+    mapping.
+    """
+
+    class _Target:
+        """A stand-in whose text form is its name, as a NetBox object is."""
+
+        def __init__(self, **fields: object) -> None:
+            self.__dict__.update(fields)
+
+        def __str__(self) -> str:
+            return str(self.name)
+
+    obj = _Target(
+        pk=42, name="switch-a", custom_field_data={_FLAG: _CANARY, "site": "lab"}
+    )
+
+    snap = norm._build_target_object_snapshot(obj)
+
+    assert "custom_field_data" not in snap
+    assert not any(isinstance(value, str) and _FLAG in value for value in snap.values())
+    assert snap["custom_fields"][_FLAG] == _CANARY
+
+
+class _NamedTarget:
+    """A stand-in whose text form is its name, as a NetBox object is."""
+
+    def __init__(self, **fields: object) -> None:
+        self.__dict__.update(fields)
+
+    def __str__(self) -> str:
+        return str(self.name)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        pytest.param("custom_field_data", {"settings": {_FLAG: _CANARY}}, id="custom-nested-object"),
+        pytest.param("custom_field_data", {"settings": [{_FLAG: _CANARY}]}, id="custom-list-of-objects"),
+        pytest.param("local_context_data", {"settings": {_FLAG: _CANARY}}, id="generic-nested-object"),
+    ],
+)
+def test_nested_custom_field_text_never_reaches_the_ledger_or_projection(
+    norm, monkeypatch, field_name, value
+) -> None:
+    """Snapshot, redaction, and projection together must not persist the canary."""
+
+    from contextlib import nullcontext
+
+    from netbox_rpc.domain import events as domain_events
+    from netbox_rpc.domain.projection import ProjectionState, apply
+
+    monkeypatch.setattr(
+        sys.modules["django.db"],
+        "transaction",
+        SimpleNamespace(atomic=lambda: nullcontext()),
+        raising=False,
+    )
+    monkeypatch.delitem(sys.modules, "netbox_rpc.event_store", raising=False)
+    event_store = importlib.import_module("netbox_rpc.event_store")
+
+    obj = _NamedTarget(pk=42, name="switch-a", **{field_name: value})
+    snap = norm._build_target_object_snapshot(obj)
+    if field_name == "custom_field_data":
+        assert isinstance(snap["custom_fields"]["settings"], (dict, list))
+    else:
+        assert isinstance(snap[field_name]["settings"], dict)
+
+    event = domain_events.ParametersNormalized(
+        normalized_params={"_target_object": snap},
+        resolved_command_hash="a" * 64,
+    )
+    persisted = event_store.redact_event_data(event.data)
+    state = apply(ProjectionState(), domain_events.ParametersNormalized.from_data(persisted))
+
+    assert _CANARY not in repr(persisted)
+    assert _CANARY not in repr(state)
+
+
+def test_json_value_copy_truncates_deep_nesting(norm) -> None:
+    deep = {"a": {"b": {"c": {"d": {"secret": "x"}}}}}
+
+    out = norm._json_safe_value(deep)
+
+    assert "[truncated]" in repr(out)
+    assert "secret" not in repr(out)
+
+
+def test_json_value_copy_keeps_tuples_as_lists(norm) -> None:
+    assert norm._json_safe_value(("a", "b")) == ["a", "b"]
+
+
+def test_json_value_copy_turns_other_objects_into_text(norm) -> None:
+    class _Opaque:
+        def __str__(self) -> str:
+            return "opaque-text"
+
+    assert norm._json_safe_value(_Opaque()) == "opaque-text"

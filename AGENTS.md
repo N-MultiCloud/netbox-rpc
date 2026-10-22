@@ -292,7 +292,12 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   ledger are immutable history), and the event API must remain read-only.
 - Event data and backend result projections must be redacted and bounded. Store
   credential references, `payload_hash` values, and command fingerprints, not
-  secrets, private key material, or unbounded raw command output.
+  secrets, private key material, or unbounded raw command output. A boolean under a sensitive key name is kept as it is, because a boolean cannot carry secret
+  material. The strict host-key flag name is also a boolean policy key: any non-boolean value under
+  it is redacted at every depth, including nested target data such as custom fields, even though
+  the name is listed in `SAFE_REFERENCE_KEYS`. Target snapshots carry custom fields only as the structured
+  `custom_fields` mapping, and nested JSON keeps its structure, so the key-based redaction applies at
+  every depth. A dictionary or list is never copied as text, because a text copy would bypass that redaction.
 - Every present backend `result` must validate against the procedure's
   `result_schema`, including false outer envelopes. A truthy response may append
   `ExecutionSucceeded` only after validation; a false response remains failed
