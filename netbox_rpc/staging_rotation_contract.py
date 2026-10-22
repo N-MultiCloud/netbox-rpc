@@ -22,6 +22,12 @@ TRANSPORT_DRIVER = "asyncssh"
 TRANSPORT_DRIVER_CHAIN: list[str] = []
 OUTPUT_PARSER = "none"
 OUTPUT_SCHEMA: dict[str, Any] = {}
+# Declared transport pin, bound into PROCEDURE_POLICY below. Migration 0075 sets
+# the live row to True. Binding the value makes the row a checked input: a row
+# flipped to False is refused at admission, approval, and worker claim. A 0075
+# rollback clears the row, and that state is refused too, so dispatch resumes
+# only after a reviewed re-pin (fail closed), never by falling back silently.
+TRANSPORT_PINNED = True
 
 COMMAND_CONTRACT = [
     {
@@ -119,6 +125,7 @@ PROCEDURE_POLICY = {
     "approval_required": APPROVAL_REQUIRED,
     "transport_driver": TRANSPORT_DRIVER,
     "transport_driver_chain": TRANSPORT_DRIVER_CHAIN,
+    "transport_pinned": TRANSPORT_PINNED,
     "output_parser": OUTPUT_PARSER,
     "output_schema": OUTPUT_SCHEMA,
     "command_contract_sha256": canonical_sha256(COMMAND_CONTRACT),

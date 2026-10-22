@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import runpy
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError, validate
+from test_akvorado_creation_guards import command_handlers_module  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0068_seed_staging_backend_token_rotation"
@@ -18,6 +20,8 @@ DNS_PROCEDURE_ID = "service.netbox.staging.deploy_dns_pair"
 PROCEDURE_ID = "service.netbox.staging.rotate_backend_token"
 PARAM_KEYS: set[str] = set()
 RESULT_KEYS = {"ok", "procedure", "target", "rotated", "stage"}
+MIGRATIONS = ROOT / "netbox_rpc" / "migrations"
+COMMAND_HANDLERS = ROOT / "netbox_rpc" / "application" / "command_handlers.py"
 
 
 @pytest.fixture()
@@ -212,7 +216,9 @@ def test_staging_rotation_policy_and_schema_contract(migration) -> None:
             )
         },
         "command_contract_sha256": runtime_contract["COMMAND_CONTRACT_SHA256"],
+        "transport_pinned": True,
     }
+    assert runtime_contract["TRANSPORT_PINNED"] is True
     assert runtime_contract["COMMAND_CONTRACT"] == [
         {"sequence": 1, **migration._REPRESENTATIVE_COMMAND}
     ]
@@ -221,6 +227,110 @@ def test_staging_rotation_policy_and_schema_contract(migration) -> None:
     assert len(runtime_contract["PROCEDURE_POLICY_SHA256"]) == 64
     assert len(runtime_contract["PARAMS_SCHEMA_SHA256"]) == 64
     assert len(runtime_contract["RESULT_SCHEMA_SHA256"]) == 64
+
+
+def _seeded_pinned_handler_ids() -> frozenset[str]:
+    """Read migration 0075's PINNED_HANDLER_IDS literal without importing it."""
+    tree = ast.parse(
+        (MIGRATIONS / "0075_seed_ansible_first_policy.py").read_text(encoding="utf-8")
+    )
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "PINNED_HANDLER_IDS"
+            for target in node.targets
+        ):
+            return frozenset(ast.literal_eval(node.value))
+    raise AssertionError("PINNED_HANDLER_IDS is missing from migration 0075")
+
+
+# Pins that 0075 seeds for a procedure a protected contract governs. The
+# contract must declare each one as True.
+# Pins that 0075 seeds with no protected contract. The row pin is their only
+# binding; #246 gates un-pinning, and a contract-bound follow-up is still open.
+ROW_ONLY_PINS = frozenset({"os.linux.ubuntu.24.upgrade_26.run_upgrade"})
+
+
+def test_declared_pins_match_0075_in_both_directions() -> None:
+    runtime_contract = runpy.run_path(
+        str(ROOT / "netbox_rpc/staging_rotation_contract.py")
+    )
+    declared = {PROCEDURE_ID: runtime_contract["TRANSPORT_PINNED"]}
+    assert all(value is True for value in declared.values())
+    assert _seeded_pinned_handler_ids() == frozenset(declared) | ROW_ONLY_PINS
+
+
+def test_no_later_migration_touches_the_staging_pin() -> None:
+    offenders = []
+    for path in sorted(MIGRATIONS.glob("*.py")):
+        prefix = path.name[:4]
+        if not prefix.isdigit() or int(prefix) <= 75:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if PROCEDURE_ID in text and "transport_pinned" in text:
+            offenders.append(path.name)
+    assert offenders == []
+
+
+POLICY_CHECKPOINTS = (
+    "_prepare_creation_authorization",  # admission
+    "_approve_protected_execution",  # approval
+    "_reject_invalid_protected_claim",  # worker claim, rejects drift
+    "_require_current_protected_approval",  # worker claim, before lease
+)
+
+
+def test_every_checkpoint_calls_the_shared_pin_check() -> None:
+    tree = ast.parse(COMMAND_HANDLERS.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for name in POLICY_CHECKPOINTS:
+        called = {
+            node.func.id
+            for node in ast.walk(functions[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_require_protected_procedure_policy" in called, name
+
+
+def _staging_policy_procedure(*, transport_pinned: bool) -> SimpleNamespace:
+    contract = runpy.run_path(str(ROOT / "netbox_rpc/staging_rotation_contract.py"))
+    commands = [SimpleNamespace(**row) for row in contract["COMMAND_CONTRACT"]]
+    return SimpleNamespace(
+        name=PROCEDURE_ID,
+        handler_id=contract["HANDLER_ID"],
+        version=contract["VERSION"],
+        enabled=True,
+        target_models=contract["TARGET_MODELS"],
+        effect=contract["EFFECT"],
+        timeout_seconds=contract["TIMEOUT_SECONDS"],
+        approval_required=contract["APPROVAL_REQUIRED"],
+        transport_driver=contract["TRANSPORT_DRIVER"],
+        transport_driver_chain=contract["TRANSPORT_DRIVER_CHAIN"],
+        output_parser=contract["OUTPUT_PARSER"],
+        output_schema=contract["OUTPUT_SCHEMA"],
+        params_schema=contract["PARAMS_SCHEMA"],
+        result_schema=contract["RESULT_SCHEMA"],
+        transport_pinned=transport_pinned,
+        commands=SimpleNamespace(
+            all=lambda: SimpleNamespace(order_by=lambda _field: commands)
+        ),
+    )
+
+
+def test_shared_check_refuses_an_unpinned_row_and_accepts_the_declared_pin(
+    command_handlers_module,  # noqa: F811 - fixture name, resolved by pytest
+) -> None:
+    command_handlers, drf_refusal, _ = command_handlers_module
+    command_handlers._require_staging_rotation_procedure_policy(
+        _staging_policy_procedure(transport_pinned=True)
+    )
+    with pytest.raises(drf_refusal):
+        command_handlers._require_staging_rotation_procedure_policy(
+            _staging_policy_procedure(transport_pinned=False)
+        )
 
 
 def test_staging_rotation_accepts_no_caller_routing_params(migration) -> None:

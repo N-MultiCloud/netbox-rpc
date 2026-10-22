@@ -630,6 +630,16 @@ snapshot binds a concrete backend row and the non-secret backend URL/TLS
 identity, plus the full transport/output/representative-command policy. A job
 payload cannot override that destination after approval.
 
+The contract declares `TRANSPORT_PINNED = True` and binds it into its
+`PROCEDURE_POLICY`, so the live row's `transport_pinned` must stay `True`.
+Admission and approval refuse a row flipped to `False` with a validation
+error, and worker claim fails the execution with `RPC_APPROVAL_INVALIDATED`.
+Migration `0075`'s reverse clears that flag, so a rollback fails closed.
+Restore dispatch by re-pinning the row through a reviewed change, never by
+unpinning it. Binding the pin changed `PROCEDURE_POLICY_SHA256`, so a request
+created before this change no longer matches the live policy hash. It is
+invalidated at approval or claim and must be requested again.
+
 Creation records `ExecutionRequested` then `ApprovalRequested`, persists an
 immutable non-secret approval snapshot, returns `pending_approval`, and does
 not enqueue. It rejects backend/request/trace/comments/tags/custom-field
@@ -2830,8 +2840,11 @@ own model data:
 
   The pin is a **declared property**, not a name list consulted at dispatch, so
   a future procedure with the same requirement opts out by setting the flag.
-  Neither pinned procedure's normalized payload changes, so their approval
-  snapshots and policy hashes are unaffected.
+  The staging contract declares its pin and binds it into its policy hash, so
+  that hash changed with the binding. `run_upgrade` has no protected contract
+  and stays row-pinned only. The approve-permission gate for un-pinning in the
+  admin form and the API is tracked separately, and a contract-bound
+  protection for `run_upgrade` is follow-up work.
 - **`normalized_params["_ansible"]` — NetBox Platform → Ansible connection.**
   The execution backend has no view of what a target *is* (its SSH credential
   carries no platform), so when the resolved chain contains an Ansible driver,

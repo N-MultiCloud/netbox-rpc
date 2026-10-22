@@ -603,12 +603,50 @@ class StagingBackendTokenRotationApprovalTests(TestCase):
         assert approved.status == RPCExecution.STATUS_FAILED
         assert approved.error_code == "RPC_APPROVAL_INVALIDATED"
 
+    def test_pin_flipped_after_request_is_refused_at_approval(self):
+        execution, _ = self._request()
+        self.procedure.transport_pinned = False
+        self.procedure.save(update_fields=["transport_pinned"])
+
+        with self.assertRaises(ValidationError):
+            self._approve(execution)
+        execution.refresh_from_db()
+        assert execution.status == RPCExecution.STATUS_PENDING_APPROVAL
+
+    @mock.patch("netbox_rpc.jobs._call_backend")
+    @mock.patch.object(command_handlers, "resolve_backend")
+    def test_pin_flipped_after_approval_is_refused_before_lease_or_backend(
+        self,
+        resolve_backend,
+        call_backend,
+    ):
+        resolve_backend.return_value = BackendTarget(
+            url="https://backend.example",
+            headers={},
+            verify_ssl=True,
+        )
+        execution, _ = self._request()
+        approved, _ = self._approve(execution)
+        self.procedure.transport_pinned = False
+        self.procedure.save(update_fields=["transport_pinned"])
+
+        key_patch, _ = _configure_signing_key("43" * 32)
+        with key_patch:
+            command_handlers.run_execution(approved)
+
+        call_backend.assert_not_called()
+        approved.refresh_from_db()
+        assert approved.status == RPCExecution.STATUS_FAILED
+        assert approved.error_code == "RPC_APPROVAL_INVALIDATED"
+        assert "DispatchLeaseIssued" not in event_names(approved)
+
     def test_transport_and_output_policy_drift_is_rejected_at_admission(self):
         mutations = (
             ("transport_driver", "paramiko"),
             ("transport_driver_chain", ["paramiko"]),
             ("output_parser", "json"),
             ("output_schema", {"type": "object"}),
+            ("transport_pinned", False),
         )
         for field, hostile_value in mutations:
             with self.subTest(field=field):

@@ -1518,6 +1518,11 @@ Procedures marked `transport_pinned` are excluded: two ship pinned because they
 disable transport fallback entirely, and one of them additionally needs
 credential isolation Ansible cannot reproduce.
 
+The staging rotation contract also declares its pin and binds it into its
+policy hash, so a row edited to unpinned is refused at admission, approval,
+and claim. A rollback of migration `0075` clears the pin and is refused the
+same way until the row is re-pinned.
+
 For network procedures the target device's NetBox **Platform** is resolved
 through an operator-editable map (following the official `netbox.netbox`
 collection's conventions) and passed to the executor as the Ansible network OS
