@@ -2930,6 +2930,20 @@ from `approval_required=True` to `False` unless the user has
 `ssh_credential_override` field with `DeviceCredential.objects.restrict(user,
 "view")`; never use an unrestricted `DeviceCredential.objects.all()` queryset.
 
+Un-pinning an existing procedure is gated the same way. A change of
+`transport_pinned` from `True` to `False` needs `netbox_rpc.approve_rpcprocedure`
+in both the admin form (`RPCProcedureForm._refuse_transport_unpin`) and the REST
+serializer (`RPCProcedureSerializer.validate`). Both call
+`netbox_rpc.transport.unpin_is_refused`. The approve check is scoped to the
+stored procedure through `netbox_rpc.transport.may_approve_procedure`. Creating a
+procedure with `False`,
+keeping the pin, and a PATCH that omits the field stay allowed. The pin and the approve
+scope are read again from the locked row when the write happens (REST `update()` and the
+form's `save()`), because the copy read earlier can be stale. The requesting user is reloaded
+after the lock, because NetBox caches object-permission grants on the user instance.
+A PATCH that omits
+the pin keeps the stored value instead of writing back a copy it read earlier.
+
 ## Migration Safety
 
 - Seed data migrations inline their data directly; they must not import live

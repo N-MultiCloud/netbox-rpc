@@ -403,7 +403,7 @@ def test_approval_required_downgrade_requires_approve_permission() -> None:
     forms = read("netbox_rpc/forms.py")
 
     assert 'cleaned_data.get("approval_required") is not False' in forms
-    assert 'user.has_perm("netbox_rpc.approve_rpcprocedure")' in forms
+    assert "if may_approve_procedure(user, self.instance):" in forms
     assert "can disable " in forms
     assert "approval for an existing RPC procedure" in forms
 

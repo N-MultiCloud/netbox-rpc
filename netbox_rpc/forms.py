@@ -1,9 +1,11 @@
 from typing import Protocol, cast
 
 from django import forms
+from django.db import transaction
 from dcim.models import Device
 from ipam.models import IPAddress
 from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
+from utilities.exceptions import AbortRequest
 from utilities.forms.fields import (
     CommentField,
     DynamicModelChoiceField,
@@ -11,6 +13,8 @@ from utilities.forms.fields import (
 )
 
 from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
+from .current_access import reload_requesting_user
+from .transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
 from .models import (
     RPCBackend,
     RPCExecution,
@@ -26,6 +30,10 @@ from .models import (
 )
 
 REQUEST_ATTR = "_netbox_rpc_request"
+APPROVAL_DENIED_MESSAGE = (
+    "Only users with netbox_rpc.approve_rpcprocedure can disable "
+    "approval for an existing RPC procedure."
+)
 
 
 class _PermissionUser(Protocol):
@@ -44,12 +52,18 @@ class RPCProcedureForm(NetBoxModelForm):
     comments = CommentField()
 
     def clean(self) -> dict[str, object] | None:
-        cleaned_data = super().clean()
+        super().clean()
+        # NetBox's form mixins return None from clean(), which would skip the
+        # checks below. Django keeps the validated values in self.cleaned_data,
+        # so the checks read that dict.
+        cleaned_data = self.cleaned_data
         if not cleaned_data:
             return cleaned_data
 
         if not self.instance.pk:
             return cleaned_data
+
+        self._refuse_transport_unpin(cleaned_data)
 
         if self.instance.approval_required is not True:
             return cleaned_data
@@ -58,17 +72,49 @@ class RPCProcedureForm(NetBoxModelForm):
             return cleaned_data
 
         user = _request_user(self.instance)
-        if user is not None and user.has_perm("netbox_rpc.approve_rpcprocedure"):
+        if may_approve_procedure(user, self.instance):
             return cleaned_data
 
-        raise forms.ValidationError(
-            {
-                "approval_required": (
-                    "Only users with netbox_rpc.approve_rpcprocedure can disable "
-                    "approval for an existing RPC procedure."
-                )
-            }
-        )
+        raise forms.ValidationError({"approval_required": APPROVAL_DENIED_MESSAGE})
+
+    def save(self, commit: bool = True):
+        if not self.instance.pk:
+            return super().save(commit=commit)
+        # The edit view calls save() inside its transaction. The gate runs again
+        # here under a row lock, because the copy read in clean() can be stale.
+        with transaction.atomic():
+            self._refuse_unpin_under_lock()
+            return super().save(commit=commit)
+
+    def _refuse_unpin_under_lock(self) -> None:
+        # The approve scope is read from the locked row as it is now, not from the
+        # copy read in clean(), because the scope can change before the lock is taken.
+        stored = RPCProcedure.objects.select_for_update().get(pk=self.instance.pk)
+        # Reloaded after the lock: NetBox caches grants on the request user.
+        user = reload_requesting_user(_request_user(self.instance))
+        may_approve = may_approve_procedure(user, stored)
+        if unpin_is_refused(
+            previously_pinned=stored.transport_pinned,
+            requested_pinned=self.cleaned_data.get("transport_pinned"),
+            may_approve=may_approve,
+        ):
+            raise AbortRequest(UNPIN_DENIED_MESSAGE)
+        if (
+            stored.approval_required is True
+            and self.cleaned_data.get("approval_required") is False
+            and not may_approve
+        ):
+            raise AbortRequest(APPROVAL_DENIED_MESSAGE)
+
+    def _refuse_transport_unpin(self, cleaned_data: dict[str, object]) -> None:
+        user = _request_user(self.instance)
+        may_approve = may_approve_procedure(user, self.instance)
+        if unpin_is_refused(
+            previously_pinned=self.instance.transport_pinned,
+            requested_pinned=cleaned_data.get("transport_pinned"),
+            may_approve=may_approve,
+        ):
+            raise forms.ValidationError({"transport_pinned": UNPIN_DENIED_MESSAGE})
 
     class Meta:
         model = RPCProcedure

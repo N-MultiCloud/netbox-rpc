@@ -132,3 +132,45 @@ def ansible_context_from_platform_map(mapping: object, platform_slug: object) ->
     if isinstance(become, bool):
         context["become"] = become
     return context
+
+
+def unpin_is_refused(
+    *,
+    previously_pinned: object,
+    requested_pinned: object,
+    may_approve: bool,
+) -> bool:
+    """Return True when an edit would un-pin a transport-pinned procedure.
+
+    Only a change from pinned to unpinned is governed. Keeping the pin, omitting
+    the field, creating a procedure, and un-pinning by a user who holds the
+    approve permission are all allowed. A present falsy value is treated as
+    un-pinning, so an unexpected type fails closed.
+    """
+    if previously_pinned is not True or requested_pinned is None:
+        return False
+    if requested_pinned:
+        return False
+    return not may_approve
+
+
+APPROVE_RPC_PROCEDURE = "netbox_rpc.approve_rpcprocedure"
+UNPIN_DENIED_MESSAGE = (
+    "Only users with netbox_rpc.approve_rpcprocedure can un-pin a "
+    "transport-pinned RPC procedure."
+)
+
+
+def may_approve_procedure(user: object, procedure: object) -> bool:
+    """Return True when ``user`` may approve changes to ``procedure``.
+
+    NetBox's has_perm() ignores object constraints when no object is passed, so
+    the check names the stored procedure. A missing user or procedure fails
+    closed.
+    """
+    if user is None or procedure is None:
+        return False
+    has_perm = getattr(user, "has_perm", None)
+    if not callable(has_perm):
+        return False
+    return bool(has_perm(APPROVE_RPC_PROCEDURE, procedure))

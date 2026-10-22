@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from netbox.api.fields import ContentTypeField
 from netbox.api.gfk_fields import GFKSerializerField
@@ -20,6 +21,8 @@ from ..models import (
     RPCTargetBinding,
     RpcPluginSettings,
 )
+from ..current_access import reload_requesting_user
+from ..transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
 
 
 class RpcPluginSettingsSerializer(NetBoxModelSerializer):
@@ -191,6 +194,49 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
         )
         brief_fields = ("id", "url", "display", "name", "handler_id", "enabled")
 
+    def validate(self, attrs):
+        # NetBox's parent validate() writes the submitted values onto
+        # self.instance, so the stored pin and the approve decision are taken
+        # before it runs. The approve check is scoped to the stored row.
+        previously_pinned = getattr(self.instance, "transport_pinned", None)
+        request = self.context.get("request")
+        may_approve = may_approve_procedure(
+            getattr(request, "user", None), self.instance
+        )
+        attrs = super().validate(attrs)
+        # NetBox sets ``self.instance`` for single and bulk updates alike, so
+        # this covers every REST write to an existing procedure.
+        if unpin_is_refused(
+            previously_pinned=previously_pinned,
+            requested_pinned=attrs.get("transport_pinned"),
+            may_approve=may_approve,
+        ):
+            raise serializers.ValidationError(
+                {"transport_pinned": UNPIN_DENIED_MESSAGE}
+            )
+        return attrs
+
+    def update(self, instance, validated_data):
+        requested = validated_data.get("transport_pinned")
+        request_user = getattr(self.context.get("request"), "user", None)
+        # Lock the stored row for the rest of the write. The pin, the approve scope,
+        # and the grants are all read after the lock, not from the copies read
+        # before this request.
+        with transaction.atomic():
+            stored = type(instance).objects.select_for_update().get(pk=instance.pk)
+            user = reload_requesting_user(request_user)
+            if unpin_is_refused(
+                previously_pinned=stored.transport_pinned,
+                requested_pinned=requested,
+                may_approve=may_approve_procedure(user, stored),
+            ):
+                raise serializers.ValidationError(
+                    {"transport_pinned": UNPIN_DENIED_MESSAGE}
+                )
+            if requested is None:
+                # Omitting the pin must not write back a stale copy of it.
+                instance.transport_pinned = stored.transport_pinned
+            return super().update(instance, validated_data)
 
 class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(

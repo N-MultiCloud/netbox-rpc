@@ -1523,6 +1523,11 @@ policy hash, so a row edited to unpinned is refused at admission, approval,
 and claim. A rollback of migration `0075` clears the pin and is refused the
 same way until the row is re-pinned.
 
+Un-pinning through the admin form or the REST API also requires the
+`netbox_rpc.approve_rpcprocedure` permission on that procedure. The check runs
+again under a row lock at write time, so a concurrent write cannot clear a pin
+that was set after the request read the procedure.
+
 For network procedures the target device's NetBox **Platform** is resolved
 through an operator-editable map (following the official `netbox.netbox`
 collection's conventions) and passed to the executor as the Ansible network OS
