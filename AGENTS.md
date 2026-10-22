@@ -3424,3 +3424,7 @@ nms git api POST /repos/N-MultiCloud/netbox-rpc/actions/workflows/deploy-product
 deploy-target status.
 
 For comprehensive deploy infrastructure documentation, see `/root/personal-context/nmulticloud-context/CLAUDE.md` section "Automatic Plugin Deployment to Production".
+
+## Fixed IAM UI control
+
+Use the parameter-free `service.keycloak.iam_ui.*` procedures for dedicated IAM host operations on device 44 only. Keep catalog and runtime semantic contracts aligned. Every write requires approval, current strict target-owned SSH credentials, and pinned AsyncSSH without fallback. Preserve production port 2222. Never introduce caller host, command, credential, or timeout selectors. Unknown completion requires inspect before retry. See `docs/iam-ui-control.md`.
