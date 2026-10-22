@@ -158,7 +158,7 @@ def test_dns_staging_deploy_seed_refuses_adoption_and_is_irreversible(
     ]
 
 
-def test_staging_rotation_policy_and_schema_contract(migration) -> None:
+def test_staging_rotation_policy_defaults(migration) -> None:
     defaults = migration._PROCEDURE_DEFAULTS
 
     assert migration._PROCEDURE_NAME == PROCEDURE_ID
@@ -174,6 +174,10 @@ def test_staging_rotation_policy_and_schema_contract(migration) -> None:
     assert defaults["transport_driver_chain"] == []
     assert defaults["output_parser"] == "none"
     assert defaults["output_schema"] == {}
+
+
+def test_staging_rotation_schemas_are_closed(migration) -> None:
+    defaults = migration._PROCEDURE_DEFAULTS
 
     params_schema = defaults["params_schema"]
     result_schema = defaults["result_schema"]
@@ -193,6 +197,12 @@ def test_staging_rotation_policy_and_schema_contract(migration) -> None:
         "complete",
         "indeterminate",
     ]
+
+
+def test_staging_rotation_runtime_contract_matches_seed(migration) -> None:
+    defaults = migration._PROCEDURE_DEFAULTS
+    params_schema = defaults["params_schema"]
+    result_schema = defaults["result_schema"]
 
     runtime_contract = runpy.run_path(
         str(ROOT / "netbox_rpc/staging_rotation_contract.py")

@@ -1,0 +1,931 @@
+"""Characterization of every outcome path of record_backend_response (issue #409).
+
+Each case records one backend response against one execution and compares the
+resulting ledger outcome with a fixed literal. The literals were transcribed once
+from the behavior of the revision before the refactor, so the refactor must keep
+them unchanged. Timestamps are excluded from the comparison.
+"""
+
+from __future__ import annotations
+
+import copy
+from unittest import mock
+
+from django.test import TestCase
+
+from netbox_rpc import event_store
+from netbox_rpc.domain import events as domain_events
+from netbox_rpc.domain.aggregate import RPCExecutionAggregate
+from netbox_rpc.models import RPCExecution
+
+from ._common import device_ct, make_procedure, make_user
+
+TIMESTAMP_KEYS = frozenset({"finished_at", "started_at"})
+
+ORDINARY = "os.linux.test.echo"
+STAGING = "service.netbox.staging.rotate_backend_token"
+DNS = "service.netbox.staging.deploy_dns_pair"
+GITEA = "service.gitea.production.upgrade_1_27_1"
+INFLUX = "os.linux.debian.13.install_influxdb3_core"
+WIDE = "os.linux.test.wide"
+PROTECTED_RESTART = "service.netbox.production.restart_rq_worker"
+OCI_PULL = "os.linux.proxmox.oci_registry_pull"
+# A procedure name of its own, so that its result schema is created with the row.
+SCHEMA_ECHO = "os.linux.test.schema_echo"
+COMMIT = "c" * 40
+
+STAGING_OK = {
+    "ok": True,
+    "procedure": STAGING,
+    "target": "nms-front-door",
+    "rotated": True,
+    "stage": "complete",
+}
+DNS_OK = {
+    "ok": True,
+    "procedure": DNS,
+    "target": "nms-front-door",
+    "deployed": True,
+    "stage": "complete",
+    "commit_sha": COMMIT,
+}
+GITEA_FAILED = {
+    "ok": False,
+    "procedure": GITEA,
+    "target": "Gitea",
+    "changed": False,
+    "healthy": False,
+    "stage": "execute",
+}
+GITEA_OK = {
+    "ok": True,
+    "procedure": GITEA,
+    "target": "Gitea",
+    "changed": True,
+    "healthy": True,
+    "stage": "complete",
+}
+INFLUX_OK = {
+    "ok": True,
+    "procedure": INFLUX,
+    "target": "instance",
+    "installed": True,
+    "package_version": "3.11.0",
+    "service_state": "active",
+    "service_enabled": "enabled",
+    "http_bind": "127.0.0.1:8181",
+    "node_id": "node1",
+    "data_dir": "/var/lib/influxdb3",
+    "config_path": "/etc/influxdb3/influxdb3-core.conf",
+    "plugins_enabled": False,
+    "package_held": True,
+    "ready": True,
+    "stage": "complete",
+}
+WIDE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "log": {"type": "string", "maxLength": 5000, "pattern": "^a+$"},
+    },
+    "required": ["log"],
+    "additionalProperties": False,
+}
+
+# The "expected" field is filled once from the base revision.
+CASES = [
+    {
+        "name": "ordinary-success-object-result",
+        "procedure": ORDINARY,
+        "response": {"ok": True, "result": {"stdout": "ok"}},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'stdout': 'ok'}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'stdout': 'ok'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-success-result-absent",
+        "procedure": ORDINARY,
+        "response": {"ok": True},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-success-list-result",
+        "procedure": ORDINARY,
+        "response": {"ok": True, "result": ["x"]},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-success-backend-events-filtered",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": True,
+            "result": {"stdout": "ok"},
+            "events": [
+                {"event": "Progress", "level": "warning", "message": "step", "data": {"k": "v"}},
+                "not-a-dict",
+                {"message": "no name, no level, no data"},
+                {"event": "E" * 150, "level": "info", "message": "long name", "data": "x"},
+            ],
+        },
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'k': 'v'},
+                     'event': 'Backend::Progress',
+                     'level': 'warning',
+                     'message': 'step'},
+                    {'data': {},
+                     'event': 'Backend::BackendEventRecorded',
+                     'level': 'info',
+                     'message': 'no name, no level, no data'},
+                    {'data': {},
+                     'event': 'Backend::EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE',
+                     'level': 'info',
+                     'message': 'long name'},
+                    {'data': {'result': {'stdout': 'ok'}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'stdout': 'ok'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-events-not-a-list-are-ignored",
+        "procedure": ORDINARY,
+        "response": {"ok": True, "result": {}, "events": {"event": "not-a-list"}},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-events-capped-at-fifty",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": True,
+            "result": {},
+            "events": [{"event": f"E{index:02d}"} for index in range(55)],
+        },
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {}, 'event': 'Backend::E00', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E01', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E02', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E03', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E04', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E05', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E06', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E07', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E08', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E09', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E10', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E11', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E12', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E13', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E14', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E15', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E16', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E17', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E18', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E19', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E20', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E21', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E22', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E23', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E24', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E25', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E26', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E27', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E28', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E29', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E30', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E31', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E32', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E33', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E34', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E35', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E36', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E37', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E38', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E39', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E40', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E41', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E42', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E43', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E44', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E45', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E46', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E47', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E48', 'level': 'info', 'message': ''},
+                    {'data': {}, 'event': 'Backend::E49', 'level': 'info', 'message': ''},
+                    {'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-catalog-failure-absent-result-skips-validation",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": False,
+            "error_code": "RPC_BACKEND_DOWN",
+            "error_message": "Backend is down.",
+            "events": [{"event": "Progress"}],
+        },
+        "expected": {'error_code': 'RPC_BACKEND_DOWN',
+         'error_message': 'Backend reported RPC_BACKEND_DOWN.',
+         'events': [{'data': {'code': 'RPC_BACKEND_DOWN',
+                              'error_message': 'Backend reported RPC_BACKEND_DOWN.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend reported RPC_BACKEND_DOWN.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-catalog-failure-empty-result-skips-validation",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": False,
+            "result": {},
+            "error_code": "RPC_BACKEND_DOWN",
+            "error_message": "Backend is down.",
+            "events": [{"event": "Progress"}],
+        },
+        "expected": {'error_code': 'RPC_BACKEND_DOWN',
+         'error_message': 'Backend reported RPC_BACKEND_DOWN.',
+         'events': [{'data': {'code': 'RPC_BACKEND_DOWN',
+                              'error_message': 'Backend reported RPC_BACKEND_DOWN.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend reported RPC_BACKEND_DOWN.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-catalog-failure-with-result-is-validated",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": False,
+            "result": {"stage": "execute"},
+            "error_code": "RPC_BACKEND_DOWN",
+            "error_message": "Backend failed.",
+        },
+        "expected": {'error_code': 'RPC_BACKEND_DOWN',
+         'error_message': 'Backend failed.',
+         'events': [{'data': {'code': 'RPC_BACKEND_DOWN',
+                              'error_message': 'Backend failed.',
+                              'result': {'stage': 'execute'},
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend failed.'}],
+         'result': {'stage': 'execute'},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-non-catalog-code-without-result",
+        "procedure": ORDINARY,
+        "response": {"ok": False, "error_code": "rpc_lower", "error_message": "Backend failed."},
+        "expected": {'error_code': 'RPC_EXECUTION_FAILED',
+         'error_message': 'Backend failed.',
+         'events': [{'data': {'code': 'RPC_EXECUTION_FAILED',
+                              'error_message': 'Backend failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-empty-code",
+        "procedure": ORDINARY,
+        "response": {"ok": False, "error_message": "No code supplied."},
+        "expected": {'error_code': 'RPC_EXECUTION_FAILED',
+         'error_message': 'No code supplied.',
+         'events': [{'data': {'code': 'RPC_EXECUTION_FAILED',
+                              'error_message': 'No code supplied.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'No code supplied.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-null-ok-is-a-failure",
+        "procedure": ORDINARY,
+        "response": {"ok": None, "error_code": "RPC_BACKEND_DOWN", "error_message": "Null ok."},
+        "expected": {'error_code': 'RPC_BACKEND_DOWN',
+         'error_message': 'Null ok.',
+         'events': [{'data': {'code': 'RPC_BACKEND_DOWN',
+                              'error_message': 'Null ok.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Null ok.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-string-ok-is-truthy",
+        "procedure": ORDINARY,
+        "response": {"ok": "true", "result": {}},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-failure-with-null-result",
+        "procedure": ORDINARY,
+        "response": {
+            "ok": False,
+            "result": None,
+            "error_code": "RPC_BACKEND_DOWN",
+            "error_message": "Null result.",
+        },
+        "expected": {'error_code': 'RPC_BACKEND_DOWN',
+         'error_message': 'Null result.',
+         'events': [{'data': {'code': 'RPC_BACKEND_DOWN',
+                              'error_message': 'Null result.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Null result.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "staging-success",
+        "procedure": STAGING,
+        "response": {"ok": True, "result": STAGING_OK},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'ok': True,
+                                         'procedure': 'service.netbox.staging.rotate_backend_token',
+                                         'rotated': True,
+                                         'stage': 'complete',
+                                         'target': 'nms-front-door'},
+                              'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'ok': True,
+                    'procedure': 'service.netbox.staging.rotate_backend_token',
+                    'rotated': True,
+                    'stage': 'complete',
+                    'target': 'nms-front-door'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "staging-envelope-state-mismatch",
+        "procedure": STAGING,
+        "response": {
+            "ok": True,
+            "result": {**STAGING_OK, "ok": False, "rotated": False, "stage": "execute"},
+        },
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.ok: envelope state mismatch.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.ok: envelope '
+                                               'state mismatch.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.ok: envelope state '
+                                'mismatch.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "staging-closed-failure-is-recorded",
+        "procedure": STAGING,
+        "response": {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": STAGING,
+                "target": "nms-front-door",
+                "rotated": False,
+                "stage": "execute",
+            },
+            "error_code": "RPC_REMOTE_FAILED",
+            "error_message": "Closed backend failure.",
+        },
+        "expected": {'error_code': 'RPC_REMOTE_FAILED',
+         'error_message': 'Closed backend failure.',
+         'events': [{'data': {'code': 'RPC_REMOTE_FAILED',
+                              'error_message': 'Closed backend failure.',
+                              'result': {'ok': False,
+                                         'procedure': 'service.netbox.staging.rotate_backend_token',
+                                         'rotated': False,
+                                         'stage': 'execute',
+                                         'target': 'nms-front-door'},
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Closed backend failure.'}],
+         'result': {'ok': False,
+                    'procedure': 'service.netbox.staging.rotate_backend_token',
+                    'rotated': False,
+                    'stage': 'execute',
+                    'target': 'nms-front-door'},
+         'status': 'failed'},
+    },
+    {
+        "name": "staging-backend-events-are-forbidden",
+        "procedure": STAGING,
+        "response": {"ok": True, "result": STAGING_OK, "events": [{"event": "Progress"}]},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at events: protected events are forbidden.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at events: protected '
+                                               'events are forbidden.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at events: protected events are '
+                                'forbidden.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "dns-success",
+        "procedure": DNS,
+        "params": {"commit_sha": COMMIT},
+        "response": {"ok": True, "result": DNS_OK},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'commit_sha': 'cccccccccccccccccccccccccccccccccccccccc',
+                                         'deployed': True,
+                                         'ok': True,
+                                         'procedure': 'service.netbox.staging.deploy_dns_pair',
+                                         'stage': 'complete',
+                                         'target': 'nms-front-door'},
+                              'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'commit_sha': 'cccccccccccccccccccccccccccccccccccccccc',
+                    'deployed': True,
+                    'ok': True,
+                    'procedure': 'service.netbox.staging.deploy_dns_pair',
+                    'stage': 'complete',
+                    'target': 'nms-front-door'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "dns-commit-mismatch",
+        "procedure": DNS,
+        "params": {"commit_sha": COMMIT},
+        "response": {"ok": True, "result": {**DNS_OK, "commit_sha": "d" * 40}},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at commit_sha.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at commit_sha.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at commit_sha.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "dns-backend-events-are-forbidden",
+        "procedure": DNS,
+        "params": {"commit_sha": COMMIT},
+        "response": {"ok": True, "result": DNS_OK, "events": [{"event": "Progress"}]},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at events: protected events are forbidden.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at events: protected '
+                                               'events are forbidden.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at events: protected events are '
+                                'forbidden.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "gitea-diagnosed-failure",
+        "procedure": GITEA,
+        "response": {"ok": False, "result": GITEA_FAILED},
+        "expected": {'error_code': 'RPC_GITEA_UPGRADE_PRE_MUTATION_FAILURE',
+         'error_message': 'Production Gitea upgrade failed before guest mutation.',
+         'events': [{'data': {'code': 'RPC_GITEA_UPGRADE_PRE_MUTATION_FAILURE',
+                              'error_message': 'Production Gitea upgrade failed before guest mutation.',
+                              'result': {'changed': False,
+                                         'healthy': False,
+                                         'ok': False,
+                                         'procedure': 'service.gitea.production.upgrade_1_27_1',
+                                         'stage': 'execute',
+                                         'target': 'Gitea'},
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Production Gitea upgrade failed before guest mutation.'}],
+         'result': {'changed': False,
+                    'healthy': False,
+                    'ok': False,
+                    'procedure': 'service.gitea.production.upgrade_1_27_1',
+                    'stage': 'execute',
+                    'target': 'Gitea'},
+         'status': 'failed'},
+    },
+    {
+        "name": "gitea-success",
+        "procedure": GITEA,
+        "response": {"ok": True, "result": GITEA_OK},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'changed': True,
+                                         'healthy': True,
+                                         'ok': True,
+                                         'procedure': 'service.gitea.production.upgrade_1_27_1',
+                                         'stage': 'complete',
+                                         'target': 'Gitea'},
+                              'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'changed': True,
+                    'healthy': True,
+                    'ok': True,
+                    'procedure': 'service.gitea.production.upgrade_1_27_1',
+                    'stage': 'complete',
+                    'target': 'Gitea'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "gitea-unexpected-response-key",
+        "procedure": GITEA,
+        "response": {"ok": False, "result": GITEA_FAILED, "error_code": "RPC_X"},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at response: unexpected property.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at response: unexpected '
+                                               'property.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at response: unexpected property.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "influx-envelope-state-mismatch",
+        "procedure": INFLUX,
+        "response": {"ok": True, "result": {"ok": False}},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.ok: envelope state mismatch.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.ok: envelope '
+                                               'state mismatch.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.ok: envelope state '
+                                'mismatch.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "influx-closed-failure",
+        "procedure": INFLUX,
+        "response": {"ok": False, "result": {"ok": False}, "error_code": "RPC_X", "error_message": "Failed."},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result: required validation failed.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result: required '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result: required validation '
+                                'failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "influx-success",
+        "procedure": INFLUX,
+        "response": {"ok": True, "result": INFLUX_OK},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'config_path': '/etc/influxdb3/influxdb3-core.conf',
+                                         'data_dir': '/var/lib/influxdb3',
+                                         'http_bind': '127.0.0.1:8181',
+                                         'installed': True,
+                                         'node_id': 'node1',
+                                         'ok': True,
+                                         'package_held': True,
+                                         'package_version': '3.11.0',
+                                         'plugins_enabled': False,
+                                         'procedure': 'os.linux.debian.13.install_influxdb3_core',
+                                         'ready': True,
+                                         'service_enabled': 'enabled',
+                                         'service_state': 'active',
+                                         'stage': 'complete',
+                                         'target': 'instance'},
+                              'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'config_path': '/etc/influxdb3/influxdb3-core.conf',
+                    'data_dir': '/var/lib/influxdb3',
+                    'http_bind': '127.0.0.1:8181',
+                    'installed': True,
+                    'node_id': 'node1',
+                    'ok': True,
+                    'package_held': True,
+                    'package_version': '3.11.0',
+                    'plugins_enabled': False,
+                    'procedure': 'os.linux.debian.13.install_influxdb3_core',
+                    'ready': True,
+                    'service_enabled': 'enabled',
+                    'service_state': 'active',
+                    'stage': 'complete',
+                    'target': 'instance'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "ordinary-success-error-code-is-ignored",
+        "procedure": ORDINARY,
+        "response": {"ok": True, "result": {}, "error_code": "RPC_X", "error_message": "Ignored."},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {}, 'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "gitea-unlisted-state-uses-fallback-code",
+        "procedure": GITEA,
+        "response": {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "procedure": GITEA,
+                "target": "Gitea",
+                "changed": False,
+                "healthy": True,
+                "stage": "execute",
+            },
+        },
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result: oneOf validation failed.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result: oneOf '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result: oneOf validation failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "wide-value-within-limit",
+        "procedure": WIDE,
+        "schema": WIDE_SCHEMA,
+        "response": {"ok": True, "result": {"log": "a" * 4000}},
+        "expected": {'error_code': '',
+         'error_message': '',
+         'events': [{'data': {'result': {'log': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'},
+                              'status': 'succeeded'},
+                     'event': 'ExecutionSucceeded',
+                     'level': 'info',
+                     'message': 'RPC execution completed.'}],
+         'result': {'log': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'},
+         'status': 'succeeded'},
+    },
+    {
+        "name": "wide-value-truncation-breaks-pattern",
+        "procedure": WIDE,
+        "schema": WIDE_SCHEMA,
+        "response": {"ok": True, "result": {"log": "a" * 5100}},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.log: pattern validation failed.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.log: pattern '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.log: pattern validation '
+                                'failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "wide-value-type-violation",
+        "procedure": WIDE,
+        "schema": WIDE_SCHEMA,
+        "response": {"ok": True, "result": {"log": 5}},
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.log: type validation failed.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.log: type '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.log: type validation '
+                                'failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        "name": "ordinary-schema-mismatch-keeps-progress-events",
+        "procedure": SCHEMA_ECHO,
+        "schema": {
+            "type": "object",
+            "properties": {"stdout": {"type": "string"}},
+            "required": ["stdout"],
+            "additionalProperties": False,
+        },
+        "response": {
+            "ok": True,
+            "result": {"stdout": 5},
+            "events": [{"event": "Progress", "level": "warning", "message": "step", "data": {"k": "v"}}],
+        },
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.stdout: type validation failed.',
+         'events': [{'data': {'k': 'v'},
+                     'event': 'Backend::Progress',
+                     'level': 'warning',
+                     'message': 'step'},
+                    {'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.stdout: type '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.stdout: type validation '
+                                'failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        # Pins the current masking of a protected failure that carries no result.
+        # A later change to this behaviour must update this case deliberately.
+        "name": "protected-ok-false-without-result-is-masked",
+        "procedure": PROTECTED_RESTART,
+        "response": {
+            "ok": False,
+            "error_code": "RPC_SSH_SERVICE_NOT_CONFIGURED",
+            "error_message": "SSH service is not configured for example-target.",
+        },
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result: required validation failed.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result: required '
+                                               'validation failed.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result: required validation '
+                                'failed.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+    {
+        # Pins the current masking of a protected failure with an empty result object.
+        # A later change to this behaviour must update this case deliberately.
+        "name": "protected-ok-false-empty-result-is-masked",
+        "procedure": OCI_PULL,
+        "response": {
+            "ok": False,
+            "result": {},
+            "events": [],
+            "error_code": "RPC_PROXMOX_OCI_PULL_POLICY_INVALID",
+            "error_message": "Proxmox OCI registry pull policy validation failed.",
+        },
+        "expected": {'error_code': 'RPC_RESULT_SCHEMA_MISMATCH',
+         'error_message': 'Backend result schema mismatch at result.ok: envelope state mismatch.',
+         'events': [{'data': {'code': 'RPC_RESULT_SCHEMA_MISMATCH',
+                              'error_message': 'Backend result schema mismatch at result.ok: envelope '
+                                               'state mismatch.',
+                              'status': 'failed'},
+                     'event': 'ExecutionFailed',
+                     'level': 'error',
+                     'message': 'Backend result schema mismatch at result.ok: envelope state '
+                                'mismatch.'}],
+         'result': {},
+         'status': 'failed'},
+    },
+]
+
+
+def _snapshot(execution: RPCExecution, baseline: int) -> dict:
+    execution.refresh_from_db()
+    events = []
+    for record in execution.events.order_by("sequence")[baseline:]:
+        data = {
+            key: value
+            for key, value in (record.data or {}).items()
+            if key not in TIMESTAMP_KEYS
+        }
+        events.append(
+            {
+                "event": record.event,
+                "level": record.level,
+                "message": record.message,
+                "data": data,
+            }
+        )
+    return {
+        "status": execution.status,
+        "error_code": execution.error_code,
+        "error_message": execution.error_message,
+        "result": execution.result,
+        "events": events,
+    }
+
+
+class RecordBackendResponseOutcomeTests(TestCase):
+    def _started(self, case: dict) -> tuple[RPCExecution, int]:
+        procedure = make_procedure(case["procedure"], **(
+            {"result_schema": case["schema"]} if "schema" in case else {}
+        ))
+        execution = RPCExecution.objects.create(
+            procedure=procedure,
+            assigned_object_type=device_ct(),
+            assigned_object_id=1,
+            requested_by=make_user(),
+            params=dict(case.get("params") or {}),
+        )
+        aggregate = RPCExecutionAggregate(execution)
+        aggregate.queue()
+        aggregate.start()
+        return execution, execution.events.count()
+
+    def test_every_outcome_matches_the_recorded_behavior(self):
+        for case in CASES:
+            with self.subTest(case=case["name"]):
+                execution, baseline = self._started(case)
+                RPCExecutionAggregate(execution).record_backend_response(
+                    copy.deepcopy(case["response"])
+                )
+                self.assertEqual(_snapshot(execution, baseline), case["expected"])
+
+    def test_terminal_append_failure_rolls_back_the_backend_progress_events(self):
+        # The progress events and the terminal event share one atomic block, so a
+        # failure of the terminal append must leave no progress event behind.
+        execution, baseline = self._started({"procedure": ORDINARY})
+        response = {
+            "ok": True,
+            "result": {},
+            "events": [{"event": "Progress", "level": "info", "message": "step", "data": {}}],
+        }
+        real_append = event_store._append_and_project
+
+        def fail_on_terminal_event(target, event):
+            if isinstance(event, (domain_events.ExecutionSucceeded, domain_events.ExecutionFailed)):
+                raise RuntimeError("terminal append failed")
+            return real_append(target, event)
+
+        with mock.patch.object(
+            event_store, "_append_and_project", side_effect=fail_on_terminal_event
+        ):
+            with self.assertRaises(RuntimeError):
+                RPCExecutionAggregate(execution).record_backend_response(response)
+        execution.refresh_from_db()
+        self.assertEqual(execution.status, RPCExecution.STATUS_RUNNING)
+        self.assertEqual(execution.events.count(), baseline)

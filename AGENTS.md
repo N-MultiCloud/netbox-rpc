@@ -288,6 +288,12 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   triggers protect the ledger below the ORM.
 - Event append failures must fail closed. Do not log-and-drop an execution
   event after sequence collisions or database errors.
+- `event_store.record_backend_response()` is pinned by the outcome matrix in
+  `netbox_rpc/tests/test_record_backend_response_outcomes.py`. Each backend
+  response path has one expected ledger snapshot. A change to any recorded
+  outcome, including the backend-event gate and the second validation pass on
+  the persisted result, must update that matrix in the same change and state
+  the reason.
 - Every failure code that reaches `RPCExecution.error_code` must be catalog-shaped:
   upper snake case and at most 100 characters, the column width. `event_store`
   applies this rule in `_append_and_project` to every `ExecutionFailed` and

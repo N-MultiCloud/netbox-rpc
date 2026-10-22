@@ -85,9 +85,8 @@ def test_approval_is_checked_against_the_stored_procedure(
     assert may_approve_procedure(user, procedure) is expected
 
 
-def test_form_and_serializer_share_the_rule() -> None:
+def test_form_shares_the_unpin_rule() -> None:
     forms = _read("netbox_rpc/forms.py")
-    serializers = _read("netbox_rpc/api/serializers.py")
 
     assert (
         "from .transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, "
@@ -103,6 +102,14 @@ def test_form_and_serializer_share_the_rule() -> None:
     assert "self._refuse_unpin_under_lock()" in forms
     assert "def _refuse_unpin_under_lock(self) -> None:" in forms
     assert "select_for_update()" in forms
+    assert "may_approve = may_approve_procedure(user, stored)" in forms
+    assert "user = reload_requesting_user(_request_user(self.instance))" in forms
+    assert "from .current_access import reload_requesting_user" in forms
+
+
+def test_serializer_shares_the_unpin_rule() -> None:
+    serializers = _read("netbox_rpc/api/serializers.py")
+
     assert (
         "from ..transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, "
         "unpin_is_refused" in serializers
@@ -120,10 +127,6 @@ def test_form_and_serializer_share_the_rule() -> None:
     assert "may_approve=may_approve_procedure(user, stored)" in block
     assert "user = reload_requesting_user(request_user)" in block
     assert "from ..current_access import reload_requesting_user" in serializers
-    assert "may_approve = may_approve_procedure(user, stored)" in forms
-    assert "user = reload_requesting_user(_request_user(self.instance))" in forms
-    assert "from .current_access import reload_requesting_user" in forms
-
 
 def test_update_decides_the_pin_rule_after_taking_the_row_lock() -> None:
     # A decision made before the lock would read the pin the request was prepared

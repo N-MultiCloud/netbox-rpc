@@ -747,23 +747,215 @@ def _skips_result_validation(
     return _is_catalog_error_code(error_code)
 
 
-def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
-    procedure_name = str(
-        getattr(getattr(execution, "procedure", None), "name", "") or ""
-    )
-    is_staging_rotation = procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN
-    is_dns_staging_deploy = procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR
-    is_protected_procedure = procedure_name in PROTECTED_APPROVAL_PROCEDURE_NAMES
-    is_gitea_upgrade = procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1
+@dataclasses.dataclass(frozen=True)
+class _ResponseContract:
+    """The validation contract that applies to one procedure's backend response."""
+
+    is_staging_rotation: bool
+    is_dns_staging_deploy: bool
+    is_protected: bool
+    is_gitea_upgrade: bool
+    requires_envelope_state_match: bool
+
+    @property
+    def has_dedicated_validation(self) -> bool:
+        return (
+            self.is_gitea_upgrade
+            or self.is_staging_rotation
+            or self.is_dns_staging_deploy
+            or self.requires_envelope_state_match
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class _BackendOutcome:
+    """The backend response fields that decide the terminal ledger event."""
+
+    ok: bool
+    result: dict[str, Any]
+    has_nested_result: bool
+    error_code: str
+    error_message: str
+    skip_result_validation: bool
+
+
+def _response_contract(procedure_name: str) -> _ResponseContract:
+    is_protected = procedure_name in PROTECTED_APPROVAL_PROCEDURE_NAMES
     # Protected procedures and the InfluxDB installers carry a closed oneOf
     # success envelope in their result_schema, which only constrains the nested
     # object. Requiring outer/nested agreement prevents an ok=true wrapper around
     # a failed operation from being recorded as success.
     requires_envelope_state_match = (
-        is_protected_procedure
+        is_protected
         or procedure_name in AKVORADO_BOOTSTRAP_DEBIAN13_PROCEDURE_NAMES
         or procedure_name in INFLUXDB3_DEBIAN13_PROCEDURE_NAMES
     )
+    return _ResponseContract(
+        is_staging_rotation=procedure_name == NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
+        is_dns_staging_deploy=procedure_name == NETBOX_STAGING_DEPLOY_DNS_PAIR,
+        is_protected=is_protected,
+        is_gitea_upgrade=procedure_name == GITEA_PRODUCTION_UPGRADE_1_27_1,
+        requires_envelope_state_match=requires_envelope_state_match,
+    )
+
+
+def _backend_failure_fields(
+    response: dict[str, Any],
+    raw_result: object,
+    contract: _ResponseContract,
+) -> tuple[str, str]:
+    """Return the failure code and message. Gitea diagnostics come from its own catalog."""
+    if contract.is_gitea_upgrade and isinstance(raw_result, dict):
+        from .gitea_upgrade_contract import result_diagnostics
+
+        return result_diagnostics(raw_result)
+    return (
+        str(response.get("error_code") or ""),
+        str(response.get("error_message") or ""),
+    )
+
+
+def _dns_staging_response_mismatch(
+    execution: RPCExecution,
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    schema_mismatch = _protected_backend_response_mismatch(response, raw_result)
+    expected_commit = (
+        execution.params.get("commit_sha") if isinstance(execution.params, dict) else None
+    )
+    if (
+        not schema_mismatch
+        and isinstance(raw_result, dict)
+        and raw_result.get("commit_sha") != expected_commit
+    ):
+        return "Backend result schema mismatch at commit_sha."
+    return schema_mismatch
+
+
+def _envelope_response_mismatch(
+    execution: RPCExecution,
+    contract: _ResponseContract,
+    response: dict[str, Any],
+    raw_result: object,
+) -> str:
+    """Return the envelope mismatch that the procedure's closed contract requires, or ""."""
+    if contract.is_gitea_upgrade:
+        return _gitea_backend_response_mismatch(response, raw_result)
+    if contract.is_staging_rotation:
+        return _staging_backend_response_mismatch(response, raw_result)
+    if contract.is_dns_staging_deploy:
+        return _dns_staging_response_mismatch(execution, response, raw_result)
+    if contract.requires_envelope_state_match:
+        return _envelope_ok_state_mismatch(response, raw_result)
+    return ""
+
+
+def _response_schema_mismatch(
+    execution: RPCExecution,
+    contract: _ResponseContract,
+    response: dict[str, Any],
+    raw_result: object,
+    result: dict[str, Any],
+    string_limits: dict[StringLimitPath, int],
+    should_validate: bool,
+) -> str:
+    """Return the first schema mismatch for the response, or an empty string.
+
+    #215 round 3: validate the raw, untouched backend result -- not a
+    length-clamped copy. A schema property only ends up in string_limits
+    when its maxLength was deliberately widened above MAX_EVENT_STRING_LENGTH
+    (see _collect_schema_string_limits) -- i.e. it was opted into holding
+    large diagnostic content (a log tail, a config dump) specifically so it
+    would NOT be silently truncated. Clamping the value *before* validating
+    it (the round-2 approach) could hide a genuine pattern/enum/type
+    violation that only appears in the truncated tail, and the persisted
+    value (content + "...[truncated]") could itself exceed the schema's own
+    maxLength -- a record marked ExecutionSucceeded storing a value that
+    would fail the schema it was validated against. Instead,
+    _backend_result_schema_mismatch() validates the complete raw value
+    against a schema copy with maxLength removed only at these specific
+    wide-override paths (_relax_schema_string_lengths) -- every other
+    validator (pattern/enum/type/required/...) still runs at full fidelity
+    against the untouched string, everywhere in the schema. The
+    persisted/redacted `result` is separately clamped to fit its
+    schema bound by _result_schema_string_limits() reserving room for the
+    truncation marker, so what is validated and what is persisted can never
+    disagree about whether a wide field is oversized.
+
+    The second pass validates the redacted, truncated value against the
+    unrelaxed schema, because the raw value passing the relaxed schema does not
+    guarantee that the persisted value passes it. The truncation marker is not
+    necessarily inside a field's pattern, so a truncated value can break a pattern
+    that the raw value satisfied. Keep this pass.
+    """
+    schema_mismatch = _envelope_response_mismatch(execution, contract, response, raw_result)
+    if not should_validate or schema_mismatch:
+        return schema_mismatch
+    schema_mismatch = _backend_result_schema_mismatch(
+        execution,
+        raw_result,
+        string_limits=string_limits,
+    )
+    if schema_mismatch:
+        return schema_mismatch
+    return _backend_result_schema_mismatch(execution, result)
+
+
+def _backend_progress_event(item: dict[str, Any]) -> domain_events.BackendEventRecorded:
+    raw_name = str(item.get("event") or "BackendEventRecorded")
+    backend_name = _BACKEND_EVENT_PREFIX + raw_name[: 100 - len(_BACKEND_EVENT_PREFIX)]
+    data = item.get("data")
+    return domain_events.BackendEventRecorded(
+        event_level=str(item.get("level") or "info"),
+        backend_event=backend_name,
+        event_message=str(item.get("message") or ""),
+        backend_data=data if isinstance(data, dict) else {},
+    )
+
+
+def _record_backend_progress_events(execution: RPCExecution, response: dict[str, Any]) -> None:
+    raw_events = response.get("events") or []
+    backend_events = raw_events[:MAX_BACKEND_EVENTS] if isinstance(raw_events, list) else []
+    for item in backend_events:
+        if isinstance(item, dict):
+            _append_and_project(execution, _backend_progress_event(item))
+
+
+def _record_backend_terminal_event(
+    execution: RPCExecution,
+    outcome: _BackendOutcome,
+    schema_mismatch: str,
+    finished_at: Any,
+) -> None:
+    if outcome.ok and not schema_mismatch:
+        _append_and_project(
+            execution,
+            domain_events.ExecutionSucceeded(result=outcome.result, finished_at=finished_at),
+        )
+        return
+    error_code, error_message = outcome.error_code, outcome.error_message
+    if schema_mismatch:
+        error_code, error_message = RESULT_SCHEMA_MISMATCH_CODE, schema_mismatch
+    elif outcome.skip_result_validation:
+        # Free text from this kind of failure is not retained. The catalog code
+        # is the whole diagnostic.
+        error_message = f"Backend reported {error_code}."
+    keep_result = outcome.has_nested_result and not schema_mismatch
+    _append_and_project(
+        execution,
+        domain_events.ExecutionFailed(
+            error_message=_bounded_event_message(error_message) or "RPC execution failed.",
+            code=error_code or "RPC_EXECUTION_FAILED",
+            finished_at=finished_at,
+            result=outcome.result if keep_result else {},
+        ),
+    )
+
+
+def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
+    procedure_name = str(getattr(getattr(execution, "procedure", None), "name", "") or "")
+    contract = _response_contract(procedure_name)
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
     string_limits = _result_schema_string_limits(execution)
@@ -771,98 +963,36 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         raw_result if isinstance(raw_result, dict) else {},
         string_limits=string_limits,
     )
-    if is_gitea_upgrade and isinstance(raw_result, dict):
-        from .gitea_upgrade_contract import result_diagnostics
-
-        error_code, error_message = result_diagnostics(raw_result)
-    else:
-        error_code = str(response.get("error_code") or "")
-        error_message = str(response.get("error_message") or "")
-    # #215 round 3: validate the raw, untouched backend result -- not a
-    # length-clamped copy. A schema property only ends up in string_limits
-    # when its maxLength was deliberately widened above MAX_EVENT_STRING_LENGTH
-    # (see _collect_schema_string_limits) -- i.e. it was opted into holding
-    # large diagnostic content (a log tail, a config dump) specifically so it
-    # would NOT be silently truncated. Clamping the value *before* validating
-    # it (the round-2 approach) could hide a genuine pattern/enum/type
-    # violation that only appears in the truncated tail, and the persisted
-    # value (content + "...[truncated]") could itself exceed the schema's own
-    # maxLength -- a record marked ExecutionSucceeded storing a value that
-    # would fail the schema it was validated against. Instead,
-    # _backend_result_schema_mismatch() validates the complete raw value
-    # against a schema copy with maxLength removed only at these specific
-    # wide-override paths (_relax_schema_string_lengths) -- every other
-    # validator (pattern/enum/type/required/...) still runs at full fidelity
-    # against the untouched string, everywhere in the schema. The
-    # persisted/redacted `result` above is separately clamped to fit its
-    # schema bound by _result_schema_string_limits() reserving room for the
-    # truncation marker, so what is validated and what is persisted can never
-    # disagree about whether a wide field is oversized.
-    has_nested_result = isinstance(raw_result, dict)
+    error_code, error_message = _backend_failure_fields(response, raw_result, contract)
     result_is_present = "result" in response
-    has_dedicated_validation = (
-        is_gitea_upgrade
-        or is_staging_rotation
-        or is_dns_staging_deploy
-        or requires_envelope_state_match
-    )
     skip_result_validation = _skips_result_validation(
         ok=response.get("ok"),
         result_present=result_is_present,
         raw_result=raw_result,
         error_code=response.get("error_code"),
-        has_dedicated_validation=has_dedicated_validation,
+        has_dedicated_validation=contract.has_dedicated_validation,
     )
-    should_validate_result = not skip_result_validation and (
-        ok or result_is_present or requires_envelope_state_match
+    should_validate = not skip_result_validation and (
+        ok or result_is_present or contract.requires_envelope_state_match
     )
-    schema_mismatch = ""
-    if is_gitea_upgrade:
-        schema_mismatch = _gitea_backend_response_mismatch(response, raw_result)
-    elif is_staging_rotation:
-        schema_mismatch = _staging_backend_response_mismatch(response, raw_result)
-    elif is_dns_staging_deploy:
-        schema_mismatch = _protected_backend_response_mismatch(response, raw_result)
-        expected_commit = (
-            execution.params.get("commit_sha")
-            if isinstance(execution.params, dict)
-            else None
-        )
-        if (
-            not schema_mismatch
-            and isinstance(raw_result, dict)
-            and raw_result.get("commit_sha") != expected_commit
-        ):
-            schema_mismatch = "Backend result schema mismatch at commit_sha."
-    elif requires_envelope_state_match:
-        schema_mismatch = _envelope_ok_state_mismatch(response, raw_result)
-    if should_validate_result and not schema_mismatch:
-        schema_mismatch = _backend_result_schema_mismatch(
-            execution,
-            raw_result,
-            string_limits=string_limits,
-        )
-    if should_validate_result and not schema_mismatch:
-        # #215 round 3 follow-up (adversarial review): the raw value passing
-        # the relaxed schema does not guarantee the *persisted* value does.
-        # redact_event_value() truncates any string longer than its limit by
-        # appending "...[truncated]" -- for a field with a `pattern` (or other
-        # non-length constraint) alongside its maxLength, a raw value that
-        # satisfies `pattern` can stop satisfying it once the marker is
-        # appended (e.g. pattern "^a+$" matches "aaaa...a" but not
-        # "aaaa...a...[truncated]"). This applies to any string field that
-        # gets truncated -- both the deliberately-widened paths in
-        # string_limits AND any field truncated only by the
-        # MAX_EVENT_STRING_LENGTH default -- not just the #215 wide-override
-        # case. Re-validate the truncated/redacted `result` against the real,
-        # unrelaxed schema: `_result_schema_string_limits()` already reserved
-        # marker headroom so a truncated value never exceeds its own
-        # maxLength, so this second pass only re-checks pattern/enum/type/...
-        # against what will actually be stored. A record must never be marked
-        # ExecutionSucceeded while storing data that fails the schema it
-        # claims to satisfy.
-        schema_mismatch = _backend_result_schema_mismatch(execution, result)
+    schema_mismatch = _response_schema_mismatch(
+        execution,
+        contract,
+        response,
+        raw_result,
+        result,
+        string_limits,
+        should_validate,
+    )
     finished_at = timezone.now()
+    outcome = _BackendOutcome(
+        ok=ok,
+        result=result,
+        has_nested_result=isinstance(raw_result, dict),
+        error_code=error_code,
+        error_message=error_message,
+        skip_result_validation=skip_result_validation,
+    )
     with transaction.atomic():
         # The privileged staging rotation contract permits no backend events.
         # Its entire durable result surface is the closed five-field tuple;
@@ -872,60 +1002,9 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         # behavior. A failure on the catalog-code path records no backend
         # progress events either: their free text can carry credentials, and
         # the catalog code is the whole diagnostic for that failure.
-        if not is_protected_procedure and not skip_result_validation:
-            raw_backend_events = response.get("events") or []
-            backend_events = (
-                raw_backend_events[:MAX_BACKEND_EVENTS]
-                if isinstance(raw_backend_events, list)
-                else []
-            )
-            for item in backend_events:
-                if not isinstance(item, dict):
-                    continue
-                raw_backend_name = str(item.get("event") or "BackendEventRecorded")
-                backend_name = (
-                    _BACKEND_EVENT_PREFIX
-                    + raw_backend_name[: 100 - len(_BACKEND_EVENT_PREFIX)]
-                )
-                _append_and_project(
-                    execution,
-                    domain_events.BackendEventRecorded(
-                        event_level=str(item.get("level") or "info"),
-                        backend_event=backend_name,
-                        event_message=str(item.get("message") or ""),
-                        backend_data=item.get("data")
-                        if isinstance(item.get("data"), dict)
-                        else {},
-                    ),
-                )
-        if ok and not schema_mismatch:
-            _append_and_project(
-                execution,
-                domain_events.ExecutionSucceeded(
-                    result=result,
-                    finished_at=finished_at,
-                ),
-            )
-        else:
-            if schema_mismatch:
-                error_code = RESULT_SCHEMA_MISMATCH_CODE
-                error_message = schema_mismatch
-            elif skip_result_validation:
-                # Free text from this kind of failure is not retained. The
-                # catalog code is the whole diagnostic.
-                error_message = f"Backend reported {error_code}."
-            _append_and_project(
-                execution,
-                domain_events.ExecutionFailed(
-                    error_message=_bounded_event_message(error_message)
-                    or "RPC execution failed.",
-                    code=error_code or "RPC_EXECUTION_FAILED",
-                    finished_at=finished_at,
-                    result=(
-                        result if has_nested_result and not schema_mismatch else {}
-                    ),
-                ),
-            )
+        if not contract.is_protected and not skip_result_validation:
+            _record_backend_progress_events(execution, response)
+        _record_backend_terminal_event(execution, outcome, schema_mismatch, finished_at)
 
 
 def _envelope_ok_state_mismatch(
