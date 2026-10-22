@@ -97,21 +97,51 @@ MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 _TRUNCATION_MARKER = "...[truncated]"
 _MAX_REDACTION_DEPTH = 32
 StringLimitPath = tuple[str, ...]
-_SECRET_CONTENT_RE = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
-    r"|(?m:^([ \t]*)[\"']?[A-Za-z0-9_.-]*"
+# Secret-content patterns for persisted text. Every alternative is linear in the input
+# length: key runs are possessive, and each keyed alternative starts only at a token
+# boundary (lookbehind). A complete PEM block is consumed through its END line; an
+# unclosed block runs to the end of the text. Quoted values run to the closing quote
+# (escapes and doubled quotes included) or to the end of the input; an unquoted value
+# runs to the end of its line. An exact nms-secret pointer is exempted at the value
+# level (see _redact_secret_text), never inside the pattern.
+_SECRET_KEY_FRAGMENT = (
     r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*:\s*[|>]"
-    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?"
-    r"$(?:\n(?:\1[ \t].*|[ \t]*$))*)"
-    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+?(?=\r?$))"
-    r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)[\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
-    r"access[-_]?key|private[-_]?key|credential)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']+)"
-    r"|(?i:\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@)"
 )
+_SECRET_KEY_RUN = r"[A-Za-z0-9_.-]*+"
+_SECRET_CONTENT_RE = re.compile(
+    # The END label must equal the BEGIN label; a different PRIVATE KEY footer is body.
+    r"-----BEGIN (?P<pem>(?=[A-Z0-9 ]*?PRIVATE KEY)[A-Z0-9 ]{1,128}+)-----"
+    r"[\s\S]*?(?:-----END (?P=pem)-----|\Z)"
+    # A label longer than the bound redacts to the end of the text.
+    r"|-----BEGIN (?=[A-Z0-9 ]*?PRIVATE KEY)[A-Z0-9 ]*+-----[\s\S]*"
+    # A line break is CR LF, CR, or LF; a block scalar body may follow a header with any of them.
+    r"|(?<![^\r\n])(?P<yaml_indent>[ \t]*)(?:-[ \t]+)*"
+    r"(?=[\"']?[A-Za-z0-9_.-]*?" + _SECRET_KEY_FRAGMENT + r")"
+    r"[\"']?" + _SECRET_KEY_RUN + r"[\"']?\s*:\s*[|>]"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?(?=\r|\n|\Z)"
+    r"(?:(?:\r\n|\r(?!\n)|\n)(?:(?P=yaml_indent)[ \t][^\r\n]*|[ \t]*(?=\r|\n|\Z)))*"
+    r"|(?im:\b(?:authorization|bearer)\s*[:=]\s*[^\r\n]+?(?=\r?$))"
+    r"|(?im:(?:^[ \t]*|[,{]\s*|-\s+)?(?<![A-Za-z0-9_.-])"
+    r"(?=[\"']?[A-Za-z0-9_.-]*?" + _SECRET_KEY_FRAGMENT + r")"
+    r"[\"']?" + _SECRET_KEY_RUN + r"[\"']?\s*+[:=]\s*+"
+    r"(?:\"(?:\"\"|\\(?:[\s\S]|\Z)|[^\"\\])*\"?"
+    r"|'(?:''|\\(?:[\s\S]|\Z)|[^'\\])*'?"
+    r"|[^\r\n]+))"
+    r"|(?i:(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*+://[^\s/:@]+:[^\s/@]+@)"
+)
+
+
+def _redact_secret_text(text: str) -> str:
+    """Redact secret content in persisted text, keeping a whole-value pointer.
+
+    An nms-secret pointer that is the entire text is a reference, not secret material,
+    so it is persisted unchanged. A pointer that is part of other text is redacted
+    like any other value.
+    """
+    if NMS_SECRET_REFERENCE_RE.fullmatch(text):
+        return text
+    return _SECRET_CONTENT_RE.sub("[REDACTED]", text)
 
 
 class RPCEventStoreError(RuntimeError):
@@ -157,7 +187,7 @@ def _redact_event_text(
     string_limits: dict[StringLimitPath, int] | None,
     path: StringLimitPath,
 ) -> str:
-    text = _SECRET_CONTENT_RE.sub("[REDACTED]", str(value))
+    text = _redact_secret_text(str(value))
     max_length = (string_limits or {}).get(path, MAX_EVENT_STRING_LENGTH)
     if len(text) > max_length:
         return f"{text[:max_length]}{_TRUNCATION_MARKER}"
@@ -280,7 +310,7 @@ def redact_event_data(
 
 def _bounded_event_message(message: object) -> str:
     """Redact and hard-cap an event message independently of event data."""
-    redacted = _SECRET_CONTENT_RE.sub("[REDACTED]", str(message or ""))
+    redacted = _redact_secret_text(str(message or ""))
     if len(redacted) <= MAX_EVENT_STRING_LENGTH:
         return redacted
     content_limit = max(MAX_EVENT_STRING_LENGTH - len(_TRUNCATION_MARKER), 0)

@@ -302,6 +302,11 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   `custom_fields` mapping, and nested JSON keeps its structure, so the key-based redaction applies at
   every depth. A dictionary or list is never copied as text, because a text copy would bypass that redaction.
   Event redaction traverses every mapping, list, tuple, set, and frozenset, and never stringifies a container.
+- Secret-content patterns applied to persisted text redact a secret-like assignment anywhere
+  in the text, including quoted values through their closing quote, and a complete PEM block
+  through its END line (an unclosed block runs to the end of the text). An exact
+  `nms-secret:<uuid>` pointer is a reference, not secret material, and is persisted. Every
+  alternative is linear in the input length; keep it that way when editing the pattern.
 - Every present backend `result` must validate against the procedure's
   `result_schema`, including false outer envelopes. A truthy response may append
   `ExecutionSucceeded` only after validation; a false response remains failed

@@ -246,7 +246,8 @@ class RebuildOracleTests(TestCase):
         ex.refresh_from_db()
         normalized = ex.events.get(event="ParametersNormalized")
         rebuilt = event_store.rebuild_projection(ex)
-        expected = '[REDACTED]"\n'
+        # A quoted value is redacted through its closing quote (issue 399).
+        expected = "[REDACTED]\n"
         assert normalized.data["normalized_params"]["config_content"] == expected
         assert ex.normalized_params["config_content"] == expected
         assert rebuilt.normalized_params["config_content"] == expected
