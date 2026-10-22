@@ -239,7 +239,11 @@ Command-side behavior lives in `netbox_rpc.application.command_handlers`:
   false envelopes. A truthy response can append `ExecutionSucceeded` only
   after validation; a false response keeps `failed` status but projects its
   valid closed result. Mismatch appends `ExecutionFailed` with
-  `RPC_RESULT_SCHEMA_MISMATCH` and no malformed result. A resolver exception
+  `RPC_RESULT_SCHEMA_MISMATCH` and no malformed result. One exception applies to
+  ordinary procedures: a backend response with `ok` exactly `false`, an absent or
+  `{}` result, and a catalog-shaped `error_code` keeps that code and records the
+  fixed message `Backend reported <code>.`. It records no backend free text or
+  progress events and reports no mismatch. A resolver exception
   after claim is reduced to bounded `RPC_BACKEND_RESOLUTION_FAILED`, appends a
   terminal failure, and cannot strand the execution in `running` or contact a
   capability/dispatch endpoint;

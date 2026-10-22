@@ -720,6 +720,20 @@ not discarded. A mismatch emits `ExecutionFailed` with
 diagnostic. Event messages are independently redacted and hard-capped at 4096
 characters.
 
+One exception applies to ordinary procedures. A backend response with `ok` exactly
+`false`, a `result` that is absent or exactly `{}`, and a catalog-shaped
+`error_code` (upper snake case, at most 100 characters) has no result to validate.
+That failure keeps the backend `error_code` and records the fixed message
+`Backend reported <code>.`. It records no backend free text and no backend progress
+events, and it reports no `RPC_RESULT_SCHEMA_MISMATCH`. Dedicated closed-contract
+procedures, successes, a missing, null, or non-boolean `ok`, a string `ok`, an
+explicit `null` result, every other result value, and failures whose code is
+missing, has a trailing character, or is not catalog-shaped keep the existing
+validation rules. A present result is validated against the procedure schema. An absent result is validated only for a successful response or a dedicated closed contract, so an absent result on a failure of an ordinary procedure reports no mismatch. On the other failure paths that keep the backend message, the
+message is bounded to 4096 characters and passed through the event redaction
+rules, and backend progress events are recorded. Those redaction rules do not
+match every credential format, so treat that message as untrusted text.
+
 `RPCProcedure`, `RPCLinuxServiceAllowlist`, `RPCBackend`, and `RPCIntent`
 (with its `RPCIntentProcedure` through model) are deliberate
 reference-data/configuration entities. They remain ordinary NetBox CRUD models,

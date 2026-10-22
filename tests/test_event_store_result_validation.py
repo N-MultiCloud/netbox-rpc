@@ -1501,3 +1501,333 @@ def test_akvorado_preflight_public_host_identity_survives_projection(
     assert events[0].event_name == "ExecutionSucceeded"
     assert events[0].result["known_hosts_entry"] == known_host
     assert events[0].result["host_key_fingerprint"] == fingerprint
+
+
+# ---------------------------------------------------------------------------
+# A failure with no result keeps the backend error code.
+# ---------------------------------------------------------------------------
+
+BACKEND_FAILURE_CODE = "RPC_SSH_CREDENTIALS_INVALID"
+BACKEND_FAILURE_MESSAGE = "SSH failed with password=hunter2-secret"
+EXPECTED_FAILURE_MESSAGE = f"Backend reported {BACKEND_FAILURE_CODE}."
+ORDINARY_PROCEDURE_NAME = "os.linux.proxmox.qemu_vm_lifecycle"
+# A closed schema: {} fails the required field, and any non-object fails type.
+STRICT_ORDINARY_SCHEMA = {
+    "type": "object",
+    "required": ["stage"],
+    "properties": {"stage": {"type": "string"}},
+    "additionalProperties": False,
+}
+
+
+def _ordinary_execution(procedure_name: str = ORDINARY_PROCEDURE_NAME):
+    return SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=procedure_name,
+            result_schema=STRICT_ORDINARY_SCHEMA,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            {
+                "ok": False,
+                "result": {},
+                "error_code": BACKEND_FAILURE_CODE,
+                "error_message": BACKEND_FAILURE_MESSAGE,
+            },
+            id="empty-object-result",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "error_code": BACKEND_FAILURE_CODE,
+                "error_message": BACKEND_FAILURE_MESSAGE,
+            },
+            id="absent-result",
+        ),
+    ],
+)
+def test_empty_failure_keeps_the_backend_error_code(
+    event_store_module,
+    response: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(_ordinary_execution(), response)
+
+    assert len(events) == 1
+    failure = events[0]
+    assert failure.event_name == "ExecutionFailed"
+    assert failure.code == BACKEND_FAILURE_CODE
+    # The backend free text is not retained on this path.
+    assert failure.message == EXPECTED_FAILURE_MESSAGE
+    assert failure.result == {}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"ok": False, "result": {}}, id="no-backend-code"),
+        pytest.param(
+            {"ok": False, "result": {}, "error_code": "rpc_lowercase_code"},
+            id="non-catalog-code",
+        ),
+        pytest.param(
+            {"ok": False, "result": {}, "error_code": "X" * 101},
+            id="code-longer-than-the-column",
+        ),
+        pytest.param(
+            {"ok": False, "result": None, "error_code": BACKEND_FAILURE_CODE},
+            id="explicit-null-result",
+        ),
+        pytest.param(
+            {"ok": False, "result": [], "error_code": BACKEND_FAILURE_CODE},
+            id="empty-list-result",
+        ),
+        pytest.param(
+            {"ok": False, "result": "", "error_code": BACKEND_FAILURE_CODE},
+            id="empty-string-result",
+        ),
+        pytest.param(
+            {"ok": False, "result": 0, "error_code": BACKEND_FAILURE_CODE},
+            id="zero-result",
+        ),
+        pytest.param(
+            {"ok": False, "result": False, "error_code": BACKEND_FAILURE_CODE},
+            id="false-result",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "result": {"stage": 5},
+                "error_code": BACKEND_FAILURE_CODE,
+            },
+            id="non-empty-malformed-result",
+        ),
+        pytest.param(
+            {"result": {}, "error_code": BACKEND_FAILURE_CODE},
+            id="missing-ok",
+        ),
+        pytest.param(
+            {"ok": None, "result": {}, "error_code": BACKEND_FAILURE_CODE},
+            id="null-ok",
+        ),
+        pytest.param(
+            {"ok": 0, "result": {}, "error_code": BACKEND_FAILURE_CODE},
+            id="zero-ok",
+        ),
+        pytest.param(
+            {"ok": True, "result": {}, "error_code": BACKEND_FAILURE_CODE},
+            id="success-is-always-validated",
+        ),
+        pytest.param(
+            {"ok": "false", "result": {}, "error_code": BACKEND_FAILURE_CODE},
+            id="string-ok",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "result": {},
+                "error_code": BACKEND_FAILURE_CODE + "\n",
+            },
+            id="code-with-trailing-newline",
+        ),
+    ],
+)
+def test_other_result_shapes_still_report_schema_mismatch(
+    event_store_module,
+    response: dict[str, object],
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(_ordinary_execution(), response)
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_protected_failure_without_result_keeps_its_closed_contract(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+    contract = importlib.import_module("netbox_rpc.staging_rotation_contract")
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(
+            name=contract.PROCEDURE_NAME,
+            result_schema=contract.RESULT_SCHEMA,
+        )
+    )
+
+    event_store.record_backend_response(
+        execution,
+        {
+            "ok": False,
+            "result": {},
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": BACKEND_FAILURE_MESSAGE,
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == event_store.RESULT_SCHEMA_MISMATCH_CODE
+
+
+def test_valid_failure_result_redacts_the_backend_message_by_event_rules(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {
+            "ok": False,
+            "result": {"stage": "execute"},
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": "token=hunter2-secret rejected",
+        },
+    )
+
+    failure = events[0]
+    assert failure.code == BACKEND_FAILURE_CODE
+    assert failure.result == {"stage": "execute"}
+    assert "hunter2-secret" not in failure.message
+    assert failure.message == "[REDACTED] rejected"
+
+
+def test_valid_failure_result_caps_the_backend_message(
+    event_store_module,
+) -> None:
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {
+            "ok": False,
+            "result": {"stage": "execute"},
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": "x" * 5000,
+        },
+    )
+
+    failure = events[0]
+    assert len(failure.message) == event_store.MAX_EVENT_STRING_LENGTH
+    assert failure.message.endswith("...[truncated]")
+
+
+def test_backend_failure_projects_its_error_code_and_message(
+    event_store_module,
+) -> None:
+    from netbox_rpc.domain.projection import rebuild
+    from netbox_rpc.domain.value_objects import ExecutionStatus
+
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {
+            "ok": False,
+            "result": {},
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": BACKEND_FAILURE_MESSAGE,
+        },
+    )
+
+    state = rebuild(events)
+    assert state.status == ExecutionStatus.FAILED.value
+    assert state.error_code == BACKEND_FAILURE_CODE
+    assert state.error_message == EXPECTED_FAILURE_MESSAGE
+
+
+SECRET_EVENT_TEXTS = [
+    pytest.param(
+        "SSH failed with password=hunter2-secret",
+        "hunter2-secret",
+        id="inline-password",
+    ),
+    pytest.param(
+        'auth failed credential="correct horse battery staple"',
+        "correct horse battery staple",
+        id="quoted-credential",
+    ),
+    pytest.param(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n"
+        "-----END OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAA",
+        id="pem-block",
+    ),
+]
+
+
+@pytest.mark.parametrize(("secret_text", "secret_marker"), SECRET_EVENT_TEXTS)
+def test_empty_failure_records_no_backend_text_in_any_event(
+    event_store_module,
+    secret_text: str,
+    secret_marker: str,
+) -> None:
+    from netbox_rpc.domain.projection import rebuild
+
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {
+            "ok": False,
+            "result": {},
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": secret_text,
+            "events": [
+                {
+                    "event": "Ssh.Connect",
+                    "level": "error",
+                    "message": secret_text,
+                    "data": {"detail": secret_text},
+                }
+            ],
+        },
+    )
+
+    assert [event.event_name for event in events] == ["ExecutionFailed"]
+    for event in events:
+        assert secret_marker not in repr(event)
+    assert secret_marker not in repr(rebuild(events))
+
+
+def test_catalog_code_at_the_column_limit_is_kept(event_store_module) -> None:
+    event_store, events = event_store_module
+    code = "A" * 100
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {"ok": False, "result": {}, "error_code": code},
+    )
+
+    assert len(events) == 1
+    assert events[0].code == code
+    assert events[0].message == f"Backend reported {code}."
+
+
+def test_absent_result_without_ok_keeps_the_existing_failure_rules(
+    event_store_module,
+) -> None:
+    # The exception does not change this rule: a failure with no ok value and
+    # no result is not validated, so no mismatch is reported.
+    event_store, events = event_store_module
+
+    event_store.record_backend_response(
+        _ordinary_execution(),
+        {
+            "error_code": BACKEND_FAILURE_CODE,
+            "error_message": "Resolved SSH credentials are invalid.",
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0].event_name == "ExecutionFailed"
+    assert events[0].code == BACKEND_FAILURE_CODE
+    assert events[0].message == "Resolved SSH credentials are invalid."

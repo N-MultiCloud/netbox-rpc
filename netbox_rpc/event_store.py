@@ -75,6 +75,10 @@ _BACKEND_EVENT_PREFIX = "Backend::"
 _LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "content")
 _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
 RESULT_SCHEMA_MISMATCH_CODE = "RPC_RESULT_SCHEMA_MISMATCH"
+# Catalog error codes are upper snake case. The RPCExecution.error_code column
+# is CharField(max_length=100), so only a code of this shape may be persisted as
+# the execution error. See _skips_result_validation().
+_BACKEND_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,99}")
 MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 # Appended by redact_event_value() to any string it truncates. A single named
 # constant so _result_schema_string_limits() (#215 round 3) can reserve
@@ -525,6 +529,34 @@ def record_execution_expired(
         )
 
 
+def _skips_result_validation(
+    *,
+    ok: object,
+    result_present: bool,
+    raw_result: object,
+    error_code: object,
+    has_dedicated_validation: bool,
+) -> bool:
+    """Return True for a failure whose backend error code is the real cause.
+
+    The response must be a failure: ``ok`` is exactly ``False``. Its ``result``
+    must be absent or exactly ``{}``. Its ``error_code`` must be catalog-shaped.
+    Such a failure has no result to validate, and a schema mismatch would hide
+    the backend code behind RPC_RESULT_SCHEMA_MISMATCH. Every other shape keeps
+    the existing validation rules, including successes; a missing, null, or non-boolean ``ok``; an explicit
+    ``null`` result; any other result value, including ``[]``, ``""``, ``0``
+    and ``False``; a missing or non-catalog code; and protected or special
+    procedures with a dedicated closed result contract.
+    """
+    if has_dedicated_validation or ok is not False:
+        return False
+    if result_present and not (isinstance(raw_result, dict) and not raw_result):
+        return False
+    return isinstance(error_code, str) and bool(
+        _BACKEND_ERROR_CODE_RE.fullmatch(error_code)
+    )
+
+
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
     procedure_name = str(
         getattr(getattr(execution, "procedure", None), "name", "") or ""
@@ -578,7 +610,22 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     # disagree about whether a wide field is oversized.
     has_nested_result = isinstance(raw_result, dict)
     result_is_present = "result" in response
-    should_validate_result = ok or result_is_present or requires_envelope_state_match
+    has_dedicated_validation = (
+        is_gitea_upgrade
+        or is_staging_rotation
+        or is_dns_staging_deploy
+        or requires_envelope_state_match
+    )
+    skip_result_validation = _skips_result_validation(
+        ok=response.get("ok"),
+        result_present=result_is_present,
+        raw_result=raw_result,
+        error_code=response.get("error_code"),
+        has_dedicated_validation=has_dedicated_validation,
+    )
+    should_validate_result = not skip_result_validation and (
+        ok or result_is_present or requires_envelope_state_match
+    )
     schema_mismatch = ""
     if is_gitea_upgrade:
         schema_mismatch = _gitea_backend_response_mismatch(response, raw_result)
@@ -632,8 +679,10 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         # accepting arbitrary progress events would create an unnecessary
         # secret-leak and database-amplification channel before the response
         # itself is accepted. Other procedures retain their existing event
-        # behavior.
-        if not is_protected_procedure:
+        # behavior. A failure on the catalog-code path records no backend
+        # progress events either: their free text can carry credentials, and
+        # the catalog code is the whole diagnostic for that failure.
+        if not is_protected_procedure and not skip_result_validation:
             raw_backend_events = response.get("events") or []
             backend_events = (
                 raw_backend_events[:MAX_BACKEND_EVENTS]
@@ -671,10 +720,15 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
             if schema_mismatch:
                 error_code = RESULT_SCHEMA_MISMATCH_CODE
                 error_message = schema_mismatch
+            elif skip_result_validation:
+                # Free text from this kind of failure is not retained. The
+                # catalog code is the whole diagnostic.
+                error_message = f"Backend reported {error_code}."
             _append_and_project(
                 execution,
                 domain_events.ExecutionFailed(
-                    error_message=error_message or "RPC execution failed.",
+                    error_message=_bounded_event_message(error_message)
+                    or "RPC execution failed.",
                     code=error_code or "RPC_EXECUTION_FAILED",
                     finished_at=finished_at,
                     result=(

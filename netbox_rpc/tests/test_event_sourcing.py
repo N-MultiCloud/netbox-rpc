@@ -76,6 +76,7 @@ class EventStoreProjectionTests(TestCase):
         aggregate.record_backend_response(
             {
                 "ok": False,
+                "result": {"stage": "execute"},
                 "error_code": "RPC_VALIDATION_FAILED",
                 "error_message": "password: hunter2",
                 "events": [
@@ -107,6 +108,41 @@ class EventStoreProjectionTests(TestCase):
                 "data": failure.data,
             }
         )
+
+    def test_empty_failure_keeps_the_catalog_code_and_records_no_backend_text(self):
+        ex = make_execution()
+        aggregate = RPCExecutionAggregate(ex)
+        aggregate.queue()
+        aggregate.start()
+        aggregate.record_backend_response(
+            {
+                "ok": False,
+                "result": {},
+                "error_code": "RPC_SSH_CREDENTIALS_INVALID",
+                "error_message": "SSH failed with password=hunter2",
+                "events": [
+                    {
+                        "level": "info",
+                        "event": "BackendProgress",
+                        "message": "password=hunter2",
+                        "data": {"detail": "password=hunter2"},
+                    }
+                ],
+            }
+        )
+
+        ex.refresh_from_db()
+        assert ex.status == RPCExecution.STATUS_FAILED
+        assert ex.error_code == "RPC_SSH_CREDENTIALS_INVALID"
+        assert ex.error_message == "Backend reported RPC_SSH_CREDENTIALS_INVALID."
+        assert ex.result == {}
+        assert not ex.events.filter(event="Backend::BackendProgress").exists()
+        failure = ex.events.get(event="ExecutionFailed")
+        assert failure.message == "Backend reported RPC_SSH_CREDENTIALS_INVALID."
+        for event in ex.events.all():
+            assert "hunter2" not in event.message
+            assert "hunter2" not in str(event.data)
+        assert event_store.rebuild_projection(ex) == ProjectionState.from_execution(ex)
 
     def test_event_message_is_independently_hard_capped(self):
         ex = make_execution()
