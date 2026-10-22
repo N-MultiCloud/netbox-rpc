@@ -5,7 +5,7 @@ import dataclasses
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from itertools import islice
 from typing import Any
@@ -81,6 +81,14 @@ MAX_EVENT_LIST_ITEMS = 50
 MAX_EVENT_DICT_ITEMS = 100
 MAX_BACKEND_EVENTS = 50
 _BACKEND_EVENT_PREFIX = "Backend::"
+# A secret-bearing mapping name is persisted as a keyed placeholder. The salt is
+# purpose-specific: it keys this digest only, so no other keyed digest can be
+# replayed as a mapping-name placeholder.
+_EVENT_MAPPING_NAME_SALT = "netbox_rpc.event_mapping_name.v1"
+_MAPPING_NAME_PLACEHOLDER_PREFIX = "[REDACTED-NAME:"
+# Levels the model stores (RPCExecutionEvent.LEVEL_CHOICES; a DB-tier test keeps the
+# two in step). Any other level is recorded as info.
+_EVENT_LEVELS = frozenset({"debug", "info", "warning", "error"})
 # Keep in sync with the Akvorado and InfluxDB normalization-layer content limits.
 _LARGE_NORMALIZED_CONTENT_FIELDS = ("config_content", "content")
 _LARGE_NORMALIZED_CONTENT_LIMIT = 1024 * 1024
@@ -133,16 +141,37 @@ _SECRET_CONTENT_RE = re.compile(
 )
 
 
-def _redact_secret_text(text: str) -> str:
-    """Redact secret content in persisted text, keeping a whole-value pointer.
+# One substitution can expose a new assignment: a PEM block replaced by its marker
+# can leave a secret assignment that the same pass did not match. Persisted text is
+# therefore redacted to a fixed point. The passes are bounded, so the cost stays
+# linear, and text that still changes after them is replaced whole.
+_SECRET_TEXT_PASSES = 4
 
-    An nms-secret pointer that is the entire text is a reference, not secret material,
-    so it is persisted unchanged. A pointer that is part of other text is redacted
-    like any other value.
+
+def _redact_bounded(text: str, bound: Callable[[str], str]) -> str:
+    """Redact secret content and bound the text, repeating until the result is stable.
+
+    Each pass substitutes secret content and then applies the bound, as the base
+    pipeline did when it redacted and truncated a value twice. The bound stays inside
+    the loop, so content beyond it is dropped before a later pass can move it inside
+    the bound. An nms-secret pointer that is the entire text is a reference, not secret
+    material, so it is returned unchanged. Text still changing after the bounded
+    passes is replaced whole.
     """
     if NMS_SECRET_REFERENCE_RE.fullmatch(text):
         return text
-    return _SECRET_CONTENT_RE.sub("[REDACTED]", text)
+    current = text
+    for _ in range(_SECRET_TEXT_PASSES):
+        bounded = bound(_SECRET_CONTENT_RE.sub("[REDACTED]", current))
+        if bounded == current:
+            return current
+        current = bounded
+    return "[REDACTED]"
+
+
+def _redact_secret_text(text: str) -> str:
+    """Redact secret content in persisted text to a fixed point, without a length bound."""
+    return _redact_bounded(text, lambda value: value)
 
 
 class RPCEventStoreError(RuntimeError):
@@ -197,11 +226,14 @@ def _redact_event_text(
     string_limits: dict[StringLimitPath, int] | None,
     path: StringLimitPath,
 ) -> str:
-    text = _redact_secret_text(str(value))
     max_length = (string_limits or {}).get(path, MAX_EVENT_STRING_LENGTH)
-    if len(text) > max_length:
-        return f"{text[:max_length]}{_TRUNCATION_MARKER}"
-    return text
+
+    def bound(text: str) -> str:
+        if len(text) > max_length:
+            return f"{text[:max_length]}{_TRUNCATION_MARKER}"
+        return text
+
+    return _redact_bounded(str(value), bound)
 
 
 def _redact_event_mapping(
@@ -224,19 +256,84 @@ def _redact_event_mapping(
         window = list(islice(value.items(), MAX_EVENT_DICT_ITEMS + 1))
         entries = window[:MAX_EVENT_DICT_ITEMS]
         truncated = len(window) > MAX_EVENT_DICT_ITEMS
+    # Sensitivity checks and string limits read each name as written; only the
+    # persisted key changes, to a keyed placeholder for a secret-bearing name.
     redacted: dict[str, object] = {}
-    for key, item in sorted(entries, key=lambda pair: str(pair[0])):
-        key_text = str(key)
-        redacted[key_text] = redact_event_value(
+    for persisted, name, item in _persisted_mapping_entries(entries):
+        redacted[persisted] = redact_event_value(
             item,
-            parent_key=key_text,
+            parent_key=name,
             string_limits=string_limits,
-            path=(*path, key_text),
+            path=(*path, name),
             depth=depth + 1,
         )
     if truncated:
         redacted["_truncated"] = True
     return redacted
+
+
+def _persisted_mapping_entries(
+    entries: list[tuple[object, object]],
+) -> list[tuple[str, str, object]]:
+    """Return ``(persisted name, name as written, value)`` in name order.
+
+    A secret-bearing name is persisted as a keyed placeholder that neither collides
+    with a non-secret name of the mapping nor with another placeholder, so no value
+    is dropped and no non-secret key is overwritten.
+    """
+    named = [(str(key), item) for key, item in entries]
+    secret_names = {name for name, _item in named if _mapping_name_is_secret_bearing(name)}
+    taken = {name for name, _item in named if name not in secret_names}
+    resolved: list[tuple[str, str, object]] = []
+    for name, item in sorted(named, key=lambda entry: entry[0]):
+        if name in secret_names:
+            persisted = _unused_placeholder(name, taken)
+            taken.add(persisted)
+        else:
+            persisted = name
+        resolved.append((persisted, name, item))
+    return resolved
+
+
+def _mapping_name_is_secret_bearing(name: str) -> bool:
+    """True when a mapping name holds secret content the ledger must not store."""
+    return _redact_secret_text(name) != name
+
+
+def _keyed_mapping_name(name: str) -> str:
+    """Return the keyed placeholder for a secret-bearing mapping name.
+
+    The digest is salted_hmac over the complete name, keyed with the deployment
+    secret and a purpose-specific salt. The stored copy therefore does not reveal
+    the name, and an unkeyed guess cannot be checked offline. The placeholder does
+    not match the shared pattern, so redaction keeps it unchanged on later passes.
+    """
+    from django.utils.crypto import salted_hmac
+
+    digest = salted_hmac(_EVENT_MAPPING_NAME_SALT, name, algorithm="sha256")
+    return f"{_MAPPING_NAME_PLACEHOLDER_PREFIX}{digest.hexdigest()}]"
+
+
+def _unused_placeholder(name: str, taken: set[str]) -> str:
+    """Return the placeholder for ``name`` that no persisted name in the mapping uses.
+
+    The loop runs at most once per taken name, so its cost is bounded by the
+    mapping window, not by the size of the names.
+    """
+    placeholder = _keyed_mapping_name(name)
+    candidate = placeholder
+    suffix = 1
+    while candidate in taken:
+        suffix += 1
+        candidate = f"{placeholder}#{suffix}"
+    return candidate
+
+
+def _event_level(value: object) -> str:
+    """Return the level the ledger stores: a supported model level, otherwise info."""
+    if isinstance(value, str) and value in _EVENT_LEVELS:
+        return value
+    return "info"
 
 
 def _is_truncation_marker(item: object) -> bool:
@@ -352,11 +449,14 @@ def redact_event_data(
 
 def _bounded_event_message(message: object) -> str:
     """Redact and hard-cap an event message independently of event data."""
-    redacted = _redact_secret_text(str(message or ""))
-    if len(redacted) <= MAX_EVENT_STRING_LENGTH:
-        return redacted
     content_limit = max(MAX_EVENT_STRING_LENGTH - len(_TRUNCATION_MARKER), 0)
-    return f"{redacted[:content_limit]}{_TRUNCATION_MARKER}"
+
+    def bound(text: str) -> str:
+        if len(text) <= MAX_EVENT_STRING_LENGTH:
+            return text
+        return f"{text[:content_limit]}{_TRUNCATION_MARKER}"
+
+    return _redact_bounded(str(message or ""), bound)
 
 
 def _next_event_sequence(execution: RPCExecution) -> int:
@@ -379,6 +479,7 @@ def append_execution_event(
 ) -> RPCExecutionEvent:
     """Append one durable execution event with per-execution sequence ordering."""
     sequence = _next_event_sequence(execution)
+    level = _event_level(level)
     event_data = redact_event_data(data, string_limits=string_limits)
     redacted_message = _bounded_event_message(message)
     payload_hash = _stable_hash(
@@ -604,15 +705,10 @@ def record_execution_succeeded(
 ) -> None:
     finished_at = timezone.now()
     with transaction.atomic():
+        # _append_and_project redacts the result once, with the result's schema limits.
         _append_and_project(
             execution,
-            domain_events.ExecutionSucceeded(
-                result=redact_event_data(
-                    result,
-                    string_limits=_result_schema_string_limits(execution),
-                ),
-                finished_at=finished_at,
-            ),
+            domain_events.ExecutionSucceeded(result=result, finished_at=finished_at),
         )
 
 
@@ -903,11 +999,16 @@ def _response_schema_mismatch(
 
 
 def _backend_progress_event(item: dict[str, Any]) -> domain_events.BackendEventRecorded:
+    # The name is redacted and bounded in the same passes, so a secret that straddles
+    # the bound cannot survive as its clear prefix.
     raw_name = str(item.get("event") or "BackendEventRecorded")
-    backend_name = _BACKEND_EVENT_PREFIX + raw_name[: 100 - len(_BACKEND_EVENT_PREFIX)]
+    name_limit = 100 - len(_BACKEND_EVENT_PREFIX)
+    backend_name = _BACKEND_EVENT_PREFIX + _redact_bounded(
+        raw_name, lambda text: text[:name_limit]
+    )
     data = item.get("data")
     return domain_events.BackendEventRecorded(
-        event_level=str(item.get("level") or "info"),
+        event_level=_event_level(item.get("level")),
         backend_event=backend_name,
         event_message=str(item.get("message") or ""),
         backend_data=data if isinstance(data, dict) else {},
@@ -953,16 +1054,30 @@ def _record_backend_terminal_event(
     )
 
 
+def _ledger_result(
+    result: dict[str, Any],
+    string_limits: dict[StringLimitPath, int],
+) -> dict[str, Any]:
+    """Return ``result`` as the ledger stores it under an execution event.
+
+    _append_and_project redacts the event data once, with the result's paths prefixed
+    by "result". This is that same computation, so the value validated here is the
+    value stored there. A second redaction is not a no-op for a secret-bearing name
+    whose schema limit has moved to its placeholder, so the terminal event carries the
+    raw result and is redacted exactly once.
+    """
+    prefixed = {("result", *path): limit for path, limit in string_limits.items()}
+    return redact_event_data({"result": result}, string_limits=prefixed)["result"]
+
+
 def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -> None:
     procedure_name = str(getattr(getattr(execution, "procedure", None), "name", "") or "")
     contract = _response_contract(procedure_name)
     ok = bool(response.get("ok"))
     raw_result = response.get("result")
     string_limits = _result_schema_string_limits(execution)
-    result = redact_event_data(
-        raw_result if isinstance(raw_result, dict) else {},
-        string_limits=string_limits,
-    )
+    persisted_result = raw_result if isinstance(raw_result, dict) else {}
+    ledger_result = _ledger_result(persisted_result, string_limits)
     error_code, error_message = _backend_failure_fields(response, raw_result, contract)
     result_is_present = "result" in response
     skip_result_validation = _skips_result_validation(
@@ -980,14 +1095,14 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
         contract,
         response,
         raw_result,
-        result,
+        ledger_result,
         string_limits,
         should_validate,
     )
     finished_at = timezone.now()
     outcome = _BackendOutcome(
         ok=ok,
-        result=result,
+        result=persisted_result,
         has_nested_result=isinstance(raw_result, dict),
         error_code=error_code,
         error_message=error_message,

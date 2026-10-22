@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.util
 import sys
@@ -11,6 +12,27 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def _stored_result_appender(module, events):
+    """Record each domain event as the ledger stores it.
+
+    _append_and_project redacts the event data once, so a terminal result is stored in
+    the form _ledger_result computes. The stub applies that same step to the result
+    field and records the event, so assertions read the persisted value.
+    """
+
+    def append(execution, event):
+        if dataclasses.is_dataclass(event) and any(
+            field.name == "result" for field in dataclasses.fields(event)
+        ):
+            stored = module._ledger_result(
+                event.result, module._result_schema_string_limits(execution)
+            )
+            event = dataclasses.replace(event, result=stored)
+        events.append(event)
+
+    return append
 
 
 @pytest.fixture()
@@ -48,7 +70,7 @@ def event_store_module(monkeypatch: pytest.MonkeyPatch):
     module = importlib.import_module("netbox_rpc.event_store")
     events = []
     monkeypatch.setattr(
-        module, "_append_and_project", lambda execution, event: events.append(event)
+        module, "_append_and_project", _stored_result_appender(module, events)
     )
     yield module, events
 
@@ -2034,3 +2056,33 @@ def test_redaction_of_a_bounded_mapping_does_not_depend_on_key_order(event_store
     assert once["_truncated"] is True
     assert len(once) == event_store.MAX_EVENT_DICT_ITEMS + 1
     assert event_store.redact_event_value(reordered) == once
+
+
+def test_secret_assignment_exposed_by_a_pem_replacement_is_redacted_in_one_call(
+    event_store_module,
+) -> None:
+    """Redaction reaches a fixed point, so a second pass cannot expose anything new."""
+    event_store, _events = event_store_module
+    pem_tail = (
+        "-----BEGIN PRIVATE KEY-----\nkey-body\n-----END PRIVATE KEY-----token=fake-tail-secret"
+    )
+
+    redacted = event_store.redact_event_data({"note": pem_tail})
+
+    assert redacted == {"note": "[REDACTED][REDACTED]"}
+    assert event_store.redact_event_data(redacted) == redacted
+
+
+def test_secret_body_beyond_the_bound_is_not_pulled_inside_it(event_store_module) -> None:
+    """Content beyond the bound is dropped before a later pass can reach it."""
+    event_store, _events = event_store_module
+    tail = (
+        "-----BEGIN PRIVATE KEY-----\nkey-body\n-----END PRIVATE KEY-----token="
+        + "a" * 5000
+        + " password: |\n  fake-tail-secret\n"
+    )
+
+    redacted = event_store.redact_event_data({"note": tail})
+
+    assert redacted == {"note": "[REDACTED][REDACTED]"}
+    assert "fake-tail-secret" not in repr(redacted)

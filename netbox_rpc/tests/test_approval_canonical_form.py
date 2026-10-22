@@ -15,7 +15,7 @@ from netbox_rpc import event_store
 from netbox_rpc import staging_rotation_contract as contract
 from netbox_rpc import jobs
 from netbox_rpc.application import command_handlers
-from netbox_rpc.domain.normalization import _apply_target_object_context
+from netbox_rpc.domain.normalization import RPCExecutionError, _apply_target_object_context
 from netbox_rpc.models import RPCBackend, RPCExecution, RPCProcedure, RPCProcedureCommand
 
 from ._common import make_device, make_execution, make_user
@@ -71,6 +71,54 @@ class ApprovalCanonicalFormTests(TestCase):
 
         self.assertNotIn("fake-approval-probe-value", repr(approval.normalized_params))
         self.assertEqual(approval.normalized_params, execution.normalized_params)
+
+    def test_new_approval_matches_the_claim_time_recomputation_for_a_secret_mapping_name(
+        self,
+    ):
+        normalized = {
+            "probe_mapping": {"password=fake-approval-name-value": "routine value"},
+            "command_fingerprint": {},
+        }
+        execution, approval = self._requested_with_approval(normalized)
+
+        claim_time = command_handlers._ledger_command_source(normalized)
+        current = command_handlers._approval_protected_payload(execution, claim_time)
+
+        self.assertTrue(approval.matches_current(current))
+        self.assertNotIn("fake-approval-name-value", repr(approval.normalized_params))
+
+    def test_approval_from_before_the_placeholder_rule_fails_closed_at_claim_time(self):
+        # Documented expected difference. An approval created before the placeholder
+        # rule hashed the mapping name as written. The claim-time recomputation applies
+        # the placeholder rule, so the approval is refused and must be requested again.
+        normalized = {
+            "probe_mapping": {"password=fake-approval-name-value": "routine value"},
+            "command_fingerprint": {},
+        }
+        with mock.patch.object(
+            event_store, "_keyed_mapping_name", side_effect=lambda name: name
+        ):
+            execution, approval = self._requested_with_approval(normalized)
+
+        claim_time = command_handlers._ledger_command_source(normalized)
+        current = command_handlers._approval_protected_payload(execution, claim_time)
+        self.assertFalse(approval.matches_current(current))
+
+        # The policy and identity gates are not under test here, so they are stubbed to
+        # pass. The hash comparison that refuses the approval is the real code path.
+        with (
+            mock.patch.object(command_handlers, "_require_protected_procedure_policy"),
+            mock.patch.object(
+                command_handlers,
+                "_approval_identities_are_authorized",
+                return_value=True,
+            ),
+            self.assertRaises(RPCExecutionError) as raised,
+        ):
+            command_handlers._require_current_protected_approval(
+                execution, claim_time, backend_target=None
+            )
+        self.assertEqual(raised.exception.code, "RPC_APPROVAL_INVALIDATED")
 
     def test_changing_an_unredacted_parameter_invalidates_the_approval(self):
         normalized = {

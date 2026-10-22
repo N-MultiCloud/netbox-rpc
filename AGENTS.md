@@ -329,6 +329,26 @@ mutation is forbidden because it can bypass family-specific persistence guards.
 - The approval row stores the ledger form of the normalized parameters (the redaction and the
   bounds the ledger applies), and the approval hash covers that form. The request-time hash, the
   lease-time check, and the projection therefore compare the same value.
+- A secret-bearing mapping name (a key whose text matches the shared secret pattern) is persisted
+  in the ledger as a keyed placeholder, `[REDACTED-NAME:<hex>]`, not as written. The digest is
+  `salted_hmac` over the complete name with the purpose-specific salt
+  `netbox_rpc.event_mapping_name.v1`, keyed from SECRET_KEY. Rotating SECRET_KEY therefore changes
+  these placeholders for new writes, and pending approvals that hold one are invalidated, as the
+  target-snapshot digests already are. Sensitivity checks and string limits still read the name as
+  written. A placeholder never overwrites a non-secret key of the same mapping; a `#n` suffix keeps
+  two placeholders apart. A result is redacted once, by the event append, and the schema check
+  validates that same computation, so the value validated is the value stored. A closed result
+  schema that declares a secret-bearing property name cannot accept the placeholder key, so such a
+  result fails closed with `RPC_RESULT_SCHEMA_MISMATCH`. Persisted text is redacted in bounded passes:
+  each pass substitutes secret content and then applies the length bound, the order the base pipeline
+  used, until the result is stable, and text still changing after the passes is replaced whole. Backend
+  progress event names use the same passes, and a backend level outside the model's choices is recorded
+  as `info`.
+- Rows written before this rule keep their stored form and still rebuild and verify; no migration
+  rewrites them. The one expected difference is an approval whose parameters held a secret-bearing
+  mapping name and that was requested before this rule. Its approve action refuses it ("a new
+  request is required") and the claim-time check refuses it with `RPC_APPROVAL_INVALIDATED`, so the
+  requester must submit a new request. Both refusals fail closed.
 - Every present backend `result` must validate against the procedure's
   `result_schema`, including false outer envelopes. A truthy response may append
   `ExecutionSucceeded` only after validation; a false response remains failed

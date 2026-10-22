@@ -21,6 +21,7 @@ matter most:
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib
 import importlib.util
 import re
@@ -859,6 +860,27 @@ def test_malformed_or_oversized_results_fail_schema_validation(
 # --------------------------------------------------------------------------- #
 
 
+def _stored_result_appender(module, events):
+    """Record each domain event as the ledger stores it.
+
+    _append_and_project redacts the event data once, so a terminal result is stored in
+    the form _ledger_result computes. The stub applies that same step to the result
+    field and records the event, so assertions read the persisted value.
+    """
+
+    def append(execution, event):
+        if dataclasses.is_dataclass(event) and any(
+            field.name == "result" for field in dataclasses.fields(event)
+        ):
+            stored = module._ledger_result(
+                event.result, module._result_schema_string_limits(execution)
+            )
+            event = dataclasses.replace(event, result=stored)
+        events.append(event)
+
+    return append
+
+
 @pytest.fixture()
 def event_store_module(monkeypatch: pytest.MonkeyPatch):
     netbox = types.ModuleType("netbox")
@@ -889,7 +911,7 @@ def event_store_module(monkeypatch: pytest.MonkeyPatch):
     module = importlib.import_module("netbox_rpc.event_store")
     events: list = []
     monkeypatch.setattr(
-        module, "_append_and_project", lambda execution, event: events.append(event)
+        module, "_append_and_project", _stored_result_appender(module, events)
     )
     yield module, events
 
