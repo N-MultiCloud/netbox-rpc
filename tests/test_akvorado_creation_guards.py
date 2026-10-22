@@ -243,6 +243,8 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.code_gate_unavailable_reason = lambda procedure_name: None
     event_store = types.ModuleType("netbox_rpc.event_store")
     event_store.mark_execution_failed = lambda *args, **kwargs: None
+    # Identity ledger form for this pure test; the redacted ledger form is covered by the NetBox-backed tests.
+    event_store.ledger_normalized_params = lambda normalized_params: dict(normalized_params or {})
 
     for name, module in {
         "netbox": netbox,

@@ -1147,6 +1147,55 @@ def _json_safe_sequence(
     return output
 
 
+class _MatchedText(str):
+    """A snapshot text whose complete value the shared secret pattern matches.
+
+    The value is still the bounded text, so the raw snapshot serializes exactly as
+    before. The persisted copy replaces it with the redaction placeholder.
+    """
+
+
+def _matches_secret_pattern(text: str) -> bool:
+    from ..event_store import contains_secret_text
+
+    return contains_secret_text(text)
+
+
+_TARGET_SNAPSHOT_KEY_SALT = "netbox_rpc.target_object.key.v1"
+
+
+def _free_text_policy_key(key: str) -> str:
+    """Return the persisted name of a snapshot key.
+
+    A key that the shared secret pattern matches is replaced by a keyed digest of
+    its complete text, so the stored copy holds no secret-bearing name. The
+    placeholder does not match the pattern, so redaction keeps it unchanged.
+    """
+    if not _matches_secret_pattern(key):
+        return key
+    from django.utils.crypto import salted_hmac
+
+    digest = salted_hmac(_TARGET_SNAPSHOT_KEY_SALT, key, algorithm="sha256")
+    return f"[REDACTED-FIELD:{digest.hexdigest()[:32]}]"
+
+
+def _free_text_policy_copy(value: Any) -> Any:
+    """Return the persisted form of a raw snapshot.
+
+    Matched text becomes the placeholder, and a matched key becomes a keyed name.
+    """
+    if isinstance(value, _MatchedText):
+        return _FREE_TEXT_REDACTED
+    if isinstance(value, dict):
+        return {
+            _free_text_policy_key(key): _free_text_policy_copy(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_free_text_policy_copy(item) for item in value]
+    return value
+
+
 def _json_safe_value(
     value: Any,
     depth: int = 0,
@@ -1172,6 +1221,10 @@ def _json_safe_value(
     safe = _json_safe_scalar(value)
     if not active_budget.spend(nodes=1, bytes_=_json_length(safe)):
         return _TARGET_SNAPSHOT_MISSING
+    # The complete text is checked only for a node the budget keeps, so a
+    # rejected node costs no pattern scan.
+    if isinstance(value, str) and isinstance(safe, str) and _matches_secret_pattern(value):
+        return _MatchedText(safe)
     return safe
 
 
@@ -1303,6 +1356,7 @@ def _bounded_persisted_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 _TARGET_SNAPSHOT_RAW_DIGEST_SALT = "netbox_rpc.target_object.raw.v1"
+_FREE_TEXT_REDACTED = "[REDACTED]"
 
 
 def _keyed_target_snapshot_digest(snapshot: dict[str, Any]) -> str:
@@ -1328,12 +1382,10 @@ def _apply_target_object_context(
 ) -> None:
     if not _has_jinja_command(execution.procedure):
         return
-    snapshot = _build_target_object_snapshot(
-        getattr(execution, "assigned_object", None)
-    )
+    snapshot = _build_target_object_snapshot(getattr(execution, "assigned_object", None))
     if not snapshot:
         return
-    persisted_snapshot = _bounded_persisted_snapshot(snapshot)
+    persisted_snapshot = _bounded_persisted_snapshot(_free_text_policy_copy(snapshot))
     normalized["_target_object"] = persisted_snapshot
     fingerprint = normalized.get("command_fingerprint")
     if isinstance(fingerprint, dict):

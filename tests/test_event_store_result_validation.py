@@ -2009,3 +2009,28 @@ def test_policy_flag_variants_never_persist_opaque_text(event_store_module, payl
     event_store, _events = event_store_module
 
     assert "opaque-secret-text" not in repr(event_store.redact_event_data(payload))
+
+
+def test_redaction_of_a_bounded_list_is_a_fixed_point(event_store_module) -> None:
+    event_store, _ = event_store_module
+
+    once = event_store.redact_event_value(list(range(80)))
+
+    assert len(once) == 51
+    assert once[-1] == {"_truncated": True, "remaining": 30}
+    assert event_store.redact_event_value(once) == once
+
+
+def test_redaction_of_a_bounded_mapping_does_not_depend_on_key_order(event_store_module) -> None:
+    event_store, _ = event_store_module
+    oversized = {
+        f"key_{index:03d}": index
+        for index in range(event_store.MAX_EVENT_DICT_ITEMS + 25)
+    }
+
+    once = event_store.redact_event_value(oversized)
+    reordered = dict(reversed(list(once.items())))
+
+    assert once["_truncated"] is True
+    assert len(once) == event_store.MAX_EVENT_DICT_ITEMS + 1
+    assert event_store.redact_event_value(reordered) == once

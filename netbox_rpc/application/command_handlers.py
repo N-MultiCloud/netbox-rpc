@@ -881,13 +881,55 @@ def _hash_approval_value(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_APPROVAL_DISPLAY_SALT = "netbox_rpc.approval_target_display.v1"
+
+
+def _approval_target_display(display: str) -> str:
+    """Return the display label as the approval hash binds it.
+
+    A label that the shared secret pattern matches is bound through a keyed digest
+    of its complete text. The hash therefore still changes when the label changes,
+    and the approval row never holds an unkeyed hash of secret-bearing text. Other
+    labels are bound as they are.
+    """
+    from django.utils.crypto import salted_hmac
+
+    from ..event_store import contains_secret_text
+
+    if not contains_secret_text(display):
+        return display
+    digest = salted_hmac(_APPROVAL_DISPLAY_SALT, display, algorithm="sha256")
+    return f"keyed-display:{digest.hexdigest()}"
+
+
+def _ledger_command_source(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Return the normalized parameters that the command hash and dispatch lease use.
+
+    The execution projection holds this form, and lease verification recomputes
+    from the projection. The command hash and the lease claims must therefore use
+    the same form, or a redaction-changed fingerprint produces a lease that cannot
+    verify.
+    """
+    from ..event_store import ledger_normalized_params
+
+    return ledger_normalized_params(normalized)
+
+
 def _approval_protected_payload(
     execution: object,
     normalized: dict[str, Any],
     *,
     backend_target: object | None = None,
 ) -> dict[str, object]:
-    """Build an immutable, non-secret protected approval decision surface."""
+    """Build an immutable, non-secret protected approval decision surface.
+
+    The normalized parameters are taken in their ledger form. The lease-time
+    check rebuilds this payload from the execution projection, which holds the
+    same form, so the hash is the same at request time and at lease time.
+    """
+    from ..event_store import ledger_normalized_params
+
+    normalized = ledger_normalized_params(normalized)
     procedure = execution.procedure
     contract = _protected_contract(procedure.name)
     fingerprint = normalized.get("command_fingerprint")
@@ -895,7 +937,7 @@ def _approval_protected_payload(
         "target_type_id": execution.assigned_object_type_id,
         "target_id": execution.assigned_object_id,
         "target_model_label": execution.target_model_label,
-        "target_display": execution.target_display,
+        "target_display": _approval_target_display(execution.target_display),
     }
     return {
         "procedure_id": procedure.pk,
@@ -2091,7 +2133,7 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
                 use_cache=False,
             )
         _reference_execution_guard(execution, "dispatch", target)
-        normalized = normalize_execution_params(execution)
+        normalized = _ledger_command_source(normalize_execution_params(execution))
         _reference_execution_guard(
             execution, "approval", normalized, backend_target=target
         )
@@ -2210,6 +2252,9 @@ def _current_stream_version(execution: object) -> int:
 def _credential_policy_reference(normalized: dict, execution: object) -> str:
     """A bounded, non-secret reference describing the credential policy in force
     (a DeviceCredential PK reference or the procedure effect) — never a secret."""
+    from ..event_store import ledger_normalized_params
+
+    normalized = ledger_normalized_params(normalized or {})
     authority_policy = (normalized or {}).get("credential_policy_ref")
     if getattr(execution, "credential_references", None):
         from ..credential_contract import canonical_hash

@@ -228,7 +228,7 @@ command the normalizer serializes a bounded, redacted, JSON-safe snapshot of the
 target into `normalized_params["_target_object"]` (the `{{ target.* }}` context)
 and adds `command_fingerprint["target_object_sha256"]` (the digest of that persisted,
 redacted copy) and `command_fingerprint["target_object_raw_hmac_sha256"]` (a keyed HMAC-SHA256 of the raw
-snapshot, keyed from SECRET_KEY; rotating SECRET_KEY invalidates pending approvals). The snapshot is bounded by a node budget and a serialized-byte budget, and a
+snapshot, keyed from SECRET_KEY; rotating SECRET_KEY invalidates pending approvals). A text value that the shared secret pattern matches is persisted as `[REDACTED]` as a whole, checked on the complete value before the length limit; the raw digest is computed without that rule, so it still depends on the raw text. The snapshot is bounded by a node budget and a serialized-byte budget, and a
 truncated snapshot records a top-level `_truncated` entry. This is gated on the
 presence of a jinja command, so **legacy/literal procedures keep a byte-for-byte
 identical normalized payload**. **Security boundary for the executor:** the
@@ -305,8 +305,15 @@ mutation is forbidden because it can bypass family-specific persistence guards.
 - Secret-content patterns applied to persisted text redact a secret-like assignment anywhere
   in the text, including quoted values through their closing quote, and a complete PEM block
   through its END line (an unclosed block runs to the end of the text). An exact
-  `nms-secret:<uuid>` pointer is a reference, not secret material, and is persisted. Every
-  alternative is linear in the input length; keep it that way when editing the pattern.
+  `nms-secret:<uuid>` pointer is a reference, not secret material, and is persisted. A YAML
+  block scalar body is redacted through its last indented line under CR LF, bare CR, and LF
+  line breaks, including a header inside a list item; valid YAML key forms outside that grammar
+  (quoted keys with spaces, explicit keys, anchors and tags before the indicator, a byte-order
+  mark) still leave the body in clear text and are tracked as a follow-up. Every alternative is
+  linear in the input length; keep it that way when editing the pattern.
+- The approval row stores the ledger form of the normalized parameters (the redaction and the
+  bounds the ledger applies), and the approval hash covers that form. The request-time hash, the
+  lease-time check, and the projection therefore compare the same value.
 - Every present backend `result` must validate against the procedure's
   `result_schema`, including false outer envelopes. A truthy response may append
   `ExecutionSucceeded` only after validation; a false response remains failed

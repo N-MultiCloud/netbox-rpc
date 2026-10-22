@@ -663,3 +663,98 @@ def test_event_redaction_visits_at_most_one_entry_past_each_limit(
     assert unordered.visited <= event_store.MAX_EVENT_LIST_ITEMS + 1
     assert kept[-1] == {"_truncated": True, "remaining": 10_000 - 50}
     assert len(kept) == event_store.MAX_EVENT_LIST_ITEMS + 1
+
+
+# ── free-text policy in the persisted copy (issue 402) ────────────────
+
+
+def test_free_text_policy_replaces_a_matching_text_value_in_the_persisted_copy(norm) -> None:
+    obj = _Target(pk=3, name="edge-3", comments="rotate with password=fake-free-text-value")
+
+    raw = norm._build_target_object_snapshot(obj)
+    persisted = norm._bounded_persisted_snapshot(norm._free_text_policy_copy(raw))
+
+    assert raw["comments"] == "rotate with password=fake-free-text-value"
+    assert persisted["comments"] == "[REDACTED]"
+    assert "fake-free-text-value" not in json.dumps(persisted)
+
+
+def test_free_text_policy_checks_the_complete_text_before_the_length_limit(norm) -> None:
+    text = "routine maintenance note " * 60 + "password=fake-late-secret"
+    obj = _Target(pk=4, name="edge-4", comments=text)
+
+    raw = norm._build_target_object_snapshot(obj)
+    persisted = norm._bounded_persisted_snapshot(norm._free_text_policy_copy(raw))
+
+    assert len(text) > 1024
+    assert "fake-late-secret" not in json.dumps(raw)
+    assert persisted["comments"] == "[REDACTED]"
+
+
+def test_free_text_policy_keeps_text_without_a_secret_pattern(norm) -> None:
+    obj = _Target(pk=5, name="edge-5", comments="rack B, row 3")
+
+    persisted = norm._bounded_persisted_snapshot(
+        norm._free_text_policy_copy(norm._build_target_object_snapshot(obj))
+    )
+
+    assert persisted["comments"] == "rack B, row 3"
+
+
+def test_free_text_policy_keeps_an_exact_reference_value(norm) -> None:
+    reference = "nms-secret:123e4567-e89b-42d3-a456-426614174000"
+    obj = _Target(pk=6, name="edge-6", comments=reference)
+
+    persisted = norm._bounded_persisted_snapshot(
+        norm._free_text_policy_copy(norm._build_target_object_snapshot(obj))
+    )
+
+    assert persisted["comments"] == reference
+
+
+def test_raw_digest_depends_on_free_text_secret_bytes_while_the_persisted_copy_does_not(
+    norm,
+) -> None:
+    first = _Target(pk=8, name="edge-8", comments="password=fake-free-text-a")
+    second = _Target(pk=8, name="edge-8", comments="password=fake-free-text-b")
+    raw_first = norm._build_target_object_snapshot(first)
+    raw_second = norm._build_target_object_snapshot(second)
+
+    assert norm._keyed_target_snapshot_digest(raw_first) != norm._keyed_target_snapshot_digest(
+        raw_second
+    )
+    assert norm._bounded_persisted_snapshot(
+        norm._free_text_policy_copy(raw_first)
+    ) == norm._bounded_persisted_snapshot(norm._free_text_policy_copy(raw_second))
+
+
+def test_persisted_fields_are_a_subset_of_the_raw_fields_under_budget_pressure(norm) -> None:
+    fields = {
+        f"note_{index:02d}": f"password=fake-budget-{index:02d} " + "x" * 1000
+        for index in range(80)
+    }
+    obj = _Target(pk=9, name="edge-9", **fields)
+
+    raw = norm._build_target_object_snapshot(obj)
+    persisted = norm._bounded_persisted_snapshot(norm._free_text_policy_copy(raw))
+
+    assert raw.get("_truncated") is True
+    assert set(persisted) - {"_truncated"} <= set(raw) - {"_truncated"}
+    assert "fake-budget-" not in json.dumps(persisted)
+
+
+def test_free_text_policy_replaces_a_secret_bearing_key_in_the_persisted_copy(norm) -> None:
+    obj = _Target(
+        pk=10,
+        name="edge-10",
+        custom_field_data={"settings": {"password=fake-secret-in-key": "routine value"}},
+    )
+
+    raw = norm._build_target_object_snapshot(obj)
+    persisted = norm._bounded_persisted_snapshot(norm._free_text_policy_copy(raw))
+
+    assert "fake-secret-in-key" in json.dumps(raw)
+    assert "fake-secret-in-key" not in json.dumps(persisted)
+    settings = persisted["custom_fields"]["settings"]
+    assert all(name.startswith("[REDACTED-FIELD:") for name in settings)
+    assert list(settings.values()) == ["routine value"]

@@ -182,6 +182,15 @@ def _is_vaulted_secret_reference(value: object) -> bool:
     return isinstance(value, str) and bool(NMS_SECRET_REFERENCE_RE.fullmatch(value))
 
 
+def contains_secret_text(text: str) -> bool:
+    """True when the shared pattern would change ``text``.
+
+    An exact nms-secret reference is a reference, not secret content, so it is
+    reported as clean. The check runs on the complete text the caller holds.
+    """
+    return _redact_secret_text(text) != text
+
+
 def _redact_event_text(
     value: object,
     string_limits: dict[StringLimitPath, int] | None,
@@ -201,13 +210,21 @@ def _redact_event_mapping(
     path: StringLimitPath,
     depth: int,
 ) -> dict[str, object]:
-    # Visit at most one entry past the limit, so an oversized mapping costs
-    # bounded work. The kept entries are the first ones in insertion order.
-    window = list(islice(value.items(), MAX_EVENT_DICT_ITEMS + 1))
+    # A mapping that the ledger already bounded holds the data limit of entries
+    # and the marker, in any key order: the database may return its keys in a
+    # different order. Its data entries are kept and the marker is kept, so
+    # redacting a stored mapping returns the same form.
+    if len(value) == MAX_EVENT_DICT_ITEMS + 1 and value.get("_truncated") is True:
+        entries = [pair for pair in value.items() if pair[0] != "_truncated"]
+        truncated = True
+    else:
+        # Visit at most one entry past the limit, so an oversized mapping costs
+        # bounded work. The kept entries are the first ones in insertion order.
+        window = list(islice(value.items(), MAX_EVENT_DICT_ITEMS + 1))
+        entries = window[:MAX_EVENT_DICT_ITEMS]
+        truncated = len(window) > MAX_EVENT_DICT_ITEMS
     redacted: dict[str, object] = {}
-    for key, item in sorted(
-        window[:MAX_EVENT_DICT_ITEMS], key=lambda pair: str(pair[0])
-    ):
+    for key, item in sorted(entries, key=lambda pair: str(pair[0])):
         key_text = str(key)
         redacted[key_text] = redact_event_value(
             item,
@@ -216,9 +233,19 @@ def _redact_event_mapping(
             path=(*path, key_text),
             depth=depth + 1,
         )
-    if len(window) > MAX_EVENT_DICT_ITEMS:
+    if truncated:
         redacted["_truncated"] = True
     return redacted
+
+
+def _is_truncation_marker(item: object) -> bool:
+    """True for the marker that a bounded list ends with: ``_truncated`` and an integer ``remaining``."""
+    return (
+        isinstance(item, Mapping)
+        and set(item) == {"_truncated", "remaining"}
+        and item["_truncated"] is True
+        and type(item["remaining"]) is int
+    )
 
 
 def _redact_event_sequence(
@@ -232,9 +259,25 @@ def _redact_event_sequence(
     # Visit at most one entry past the limit. Unordered containers sort only
     # the visited window, so the kept subset is deterministic for sets of up to
     # the limit and bounded work for larger sets.
-    window = list(islice(value, MAX_EVENT_LIST_ITEMS + 1))
-    if isinstance(value, (set, frozenset)):
-        window.sort(key=repr)
+    marker: object = None
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == MAX_EVENT_LIST_ITEMS + 1
+        and _is_truncation_marker(value[-1])
+    ):
+        # A list that the ledger already bounded keeps its marker, so redacting
+        # the stored form again returns the same form.
+        window = list(value[:-1])
+        marker = dict(value[-1])
+    else:
+        window = list(islice(value, MAX_EVENT_LIST_ITEMS + 1))
+        if isinstance(value, (set, frozenset)):
+            window.sort(key=repr)
+        if len(value) > MAX_EVENT_LIST_ITEMS:
+            marker = {
+                "_truncated": True,
+                "remaining": len(value) - MAX_EVENT_LIST_ITEMS,
+            }
     items = [
         redact_event_value(
             item,
@@ -245,10 +288,8 @@ def _redact_event_sequence(
         )
         for item in window[:MAX_EVENT_LIST_ITEMS]
     ]
-    if len(value) > MAX_EVENT_LIST_ITEMS:
-        items.append(
-            {"_truncated": True, "remaining": len(value) - MAX_EVENT_LIST_ITEMS}
-        )
+    if marker is not None:
+        items.append(marker)
     return items
 
 
@@ -367,6 +408,27 @@ def append_execution_event(
     )
 
 
+def _normalized_params_string_limits() -> dict[StringLimitPath, int]:
+    return {
+        ("normalized_params", field_name): _LARGE_NORMALIZED_CONTENT_LIMIT
+        for field_name in _LARGE_NORMALIZED_CONTENT_FIELDS
+    }
+
+
+def ledger_normalized_params(normalized_params: dict[str, Any]) -> dict[str, Any]:
+    """Return normalized parameters in the form the ledger stores and projects.
+
+    The ledger redacts and bounds the ParametersNormalized event before it
+    projects the parameters onto the execution. The approval hash is computed
+    over this same form, so the request-time hash and the lease-time check agree.
+    """
+    redacted = redact_event_data(
+        {"normalized_params": dict(normalized_params or {})},
+        string_limits=_normalized_params_string_limits(),
+    )
+    return dict(redacted.get("normalized_params") or {})
+
+
 def _append_and_project(
     execution: RPCExecution,
     event: domain_events.DomainEvent,
@@ -381,10 +443,7 @@ def _append_and_project(
             for path, limit in _result_schema_string_limits(execution).items()
         }
     elif isinstance(event, domain_events.ParametersNormalized):
-        string_limits = {
-            ("normalized_params", field_name): _LARGE_NORMALIZED_CONTENT_LIMIT
-            for field_name in _LARGE_NORMALIZED_CONTENT_FIELDS
-        }
+        string_limits = _normalized_params_string_limits()
     record = append_execution_event(
         execution,
         event.level,
