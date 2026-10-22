@@ -417,7 +417,9 @@ LONG_TAIL_TEXT = (
 class LongTailRedactionTests(TestCase):
     """The length bound applies between redaction passes, on every persistence path."""
 
-    EXPECTED = "[REDACTED][REDACTED]"
+    # The header match covers the whole assignment run after "=", so one marker covers it;
+    # the block body must still not survive (checked below).
+    EXPECTED = "[REDACTED]"
 
     def _assert_stored(self, value):
         self.assertEqual(value, self.EXPECTED)

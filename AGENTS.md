@@ -322,10 +322,18 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   through its END line (an unclosed block runs to the end of the text). An exact
   `nms-secret:<uuid>` pointer is a reference, not secret material, and is persisted. A YAML
   block scalar body is redacted through its last indented line under CR LF, bare CR, and LF
-  line breaks, including a header inside a list item; valid YAML key forms outside that grammar
-  (quoted keys with spaces, explicit keys, anchors and tags before the indicator, a byte-order
-  mark) still leave the body in clear text and are tracked as a follow-up. Every alternative is
-  linear in the input length; keep it that way when editing the pattern.
+  line breaks, including a header inside a list item. The header pattern
+  `_YAML_BLOCK_SCALAR_HEADER_RE` covers these key forms on one header line: a plain key
+  (a number sign inside a name is part of the key; a comment needs blank space before it), a
+  double- or single-quoted key with spaces, colons, or escapes, an explicit `? key` line with
+  or without a trailing comment, anchor and tag properties before the indicator, and a run of
+  byte-order marks at a line start. `_redact_secret_spans` redacts the union of its matches and
+  those of `_SECRET_CONTENT_RE`, so no span the base pattern redacts can become clear. Layouts
+  not listed here, such as a colon inside a plain key, a property or key split across lines,
+  or a comment line between an explicit key and its value, still leave the body in clear text.
+  They are tracked as a follow-up. Every alternative is linear in the input length. The header
+  pattern uses possessive quantifiers for its prefixes (indentation, list markers, byte-order
+  marks, and the optional explicit-key marker); keep both properties when editing it.
 - The approval row stores the ledger form of the normalized parameters (the redaction and the
   bounds the ledger applies), and the approval hash covers that form. The request-time hash, the
   lease-time check, and the projection therefore compare the same value.

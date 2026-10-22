@@ -114,7 +114,7 @@ StringLimitPath = tuple[str, ...]
 # runs to the end of its line. An exact nms-secret pointer is exempted at the value
 # level (see _redact_secret_text), never inside the pattern.
 _SECRET_KEY_FRAGMENT = (
-    r"(?:token|password|passphrase|secret|authorization|api[-_]?key|"
+    r"(?:token|password|passphrase|secret|authorization|api[-_#]?key|"
     r"access[-_]?key|private[-_]?key|credential)"
 )
 _SECRET_KEY_RUN = r"[A-Za-z0-9_.-]*+"
@@ -140,6 +140,57 @@ _SECRET_CONTENT_RE = re.compile(
     r"|(?i:(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]*+://[^\s/:@]+:[^\s/@]+@)"
 )
 
+# YAML block scalar headers that _SECRET_CONTENT_RE does not cover: a quoted key with spaces
+# or escapes, an explicit "? key" line whose ": |" indicator follows on the next line, a key
+# after a byte-order mark, and anchor or tag properties before the indicator. The body rules
+# are those of the base pattern. Keys are read up to their colon, and every quantifier is
+# possessive or bounded by the line, so the match stays linear in the input length.
+_YAML_BLOCK_SCALAR_HEADER_RE = re.compile(
+    r"(?<![^\r\n])\ufeff*+(?P<yaml_indent>[ \t]*+)(?:-[ \t]++)*+(?:\?[ \t]++)?+"
+    r"(?=[^\r\n]*?(?i:" + _SECRET_KEY_FRAGMENT + r")|[\"'][^\r\n]*?\\)"
+    r"(?:\"(?:\\[^\r\n]|[^\"\\\r\n])*+\"|'(?:''|[^'\r\n])*+'|(?:[^\r\n:#]|(?<![ \t])#)*+)"
+    r"(?:[ \t]*+#[^\r\n]*+)?"
+    r"\s*:(?:[ \t]+[&!][^ \t\r\n]*)*+\s*[|>]"
+    r"(?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#[^\r\n]*)?(?=\r|\n|\Z)"
+    r"(?:(?:\r\n|\r(?!\n)|\n)(?:(?P=yaml_indent)[ \t][^\r\n]*|[ \t]*(?=\r|\n|\Z)))*"
+)
+
+
+def _secret_spans(text: str) -> list[tuple[int, int]]:
+    """Return the sorted, non-overlapping spans to redact in text.
+
+    The union of the base pattern's matches and the YAML header matches is taken. A header
+    match that overlaps a base match is merged with it, so every span the base pattern
+    redacts is still redacted, whatever the header match covers. Spans that do not overlap
+    anything are left exactly as the base pattern found them.
+    """
+    spans = [match.span() for match in _SECRET_CONTENT_RE.finditer(text)]
+    extra = [match.span() for match in _YAML_BLOCK_SCALAR_HEADER_RE.finditer(text)]
+    if not extra:
+        return spans
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans + extra):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _redact_secret_spans(text: str) -> str:
+    """Replace each secret span of text with the redaction marker."""
+    pieces: list[str] = []
+    last = 0
+    for start, end in _secret_spans(text):
+        pieces.append(text[last:start])
+        # A header match consumes the byte-order marks at its line start; keep them.
+        span = text[start:end]
+        pieces.append(span[: len(span) - len(span.lstrip("\ufeff"))])
+        pieces.append("[REDACTED]")
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces)
+
 
 # One substitution can expose a new assignment: a PEM block replaced by its marker
 # can leave a secret assignment that the same pass did not match. Persisted text is
@@ -162,7 +213,7 @@ def _redact_bounded(text: str, bound: Callable[[str], str]) -> str:
         return text
     current = text
     for _ in range(_SECRET_TEXT_PASSES):
-        bounded = bound(_SECRET_CONTENT_RE.sub("[REDACTED]", current))
+        bounded = bound(_redact_secret_spans(current))
         if bounded == current:
             return current
         current = bounded

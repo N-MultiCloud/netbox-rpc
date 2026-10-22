@@ -150,12 +150,145 @@ def test_redaction_is_idempotent_for_each_form(event_store) -> None:
         "password:\n" + "  x\n" * 250_000,
         "authorization:" * 71_428,
         "token" * 200_000,
+        # Header forms of the YAML block scalar pattern (issue 415), and long prefixes
+        # before a key: each must stay linear, not retry the prefix at every length.
+        '"' + "a" * 1_000_000,
+        '"' + " " * 1_000_000 + "x",
+        "password" + " " * 1_000_000 + "x",
+        "- " * 500_000 + "x",
+        "- " * 500_000 + "password",
+        " " * 1_000_000 + "password",
+        "\t" * 1_000_000 + "token",
+        "\ufeff" + " " * 1_000_000 + "password",
+        "password: &" + "a " * 500_000,
+        "password: " + "&a " * 300_000,
+        "'" + "''" * 500_000 + "x",
+        "\ufeff" * 1_000_000,
+        "\ufeffa:" * 500_000,
+        "? password #" + " " * 1_000_000 + "\n: x",
+        "a\ufeffa:" * 500_000,
+        "- " * 500_000 + "password: |\n",
+        "? password" + " " * 1_000_000 + "\n: |\n" + "  x\n" * 100_000,
+        '"pass\\"' * 200_000 + ": |",
     ],
 )
 def test_adversarial_megabyte_inputs_run_in_linear_time(event_store, text) -> None:
     started = time.perf_counter()
-    _redact(event_store, text)
+    event_store._redact_secret_text(text)
     # The measured worst case on a development host is well under one second. The bound
     # is generous so that a slow runner does not fail the suite; a quadratic pattern
     # takes minutes on these inputs.
     assert time.perf_counter() - started < 10.0
+
+
+# Issue 415: a YAML block scalar body is redacted through its last indented line for every
+# valid key form. Each input is a fixed literal; the body line is SECRET-BODY. The new
+# forms go through _redact_secret_text, which exists on the base and on this change.
+_BLOCK_BODY = "  SECRET-BODY\nafter: public\n"
+_BLOCK_REDACTED = "[REDACTED]\nafter: public\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('"my password": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("'my password': |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('- "my password": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("? password\n: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("password: &value |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("password: !!str |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("\ufeffpassword: |\n" + _BLOCK_BODY, "\ufeff" + _BLOCK_REDACTED),
+        ("\ufeff\ufeffpassword: |\n" + _BLOCK_BODY, "\ufeff\ufeff" + _BLOCK_REDACTED),
+        ("a\ufeff\ufeffpassword: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('"pass\\"word": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('"pass\\u0077ord": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('"my password: label": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("? password # comment\n: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("? \"my password: label\"\n: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("? \"\\u0070assword\"\n: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('? "my password: label" # comment\n: |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('? "\\u0070assword: label" # comment\n: |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("my_password#x: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("api#key: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("password=label: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ("? password=label # comment\n: |\n" + _BLOCK_BODY, _BLOCK_REDACTED),
+        ('"My Password": |\n' + _BLOCK_BODY, _BLOCK_REDACTED),
+    ],
+    ids=[
+        "double-quoted-key-with-space",
+        "single-quoted-key-with-space",
+        "quoted-key-in-list-item",
+        "explicit-mapping-key",
+        "anchor-before-indicator",
+        "tag-before-indicator",
+        "byte-order-mark-before-key",
+        "byte-order-mark-run-before-key",
+        "byte-order-marks-inside-key",
+        "quoted-key-with-escaped-quote",
+        "quoted-key-with-escaped-letter",
+        "quoted-key-with-colon",
+        "explicit-key-with-comment",
+        "explicit-quoted-key-with-colon",
+        "explicit-quoted-key-with-unicode-escape",
+        "explicit-quoted-key-with-colon-and-comment",
+        "explicit-quoted-key-with-escape-and-comment",
+        "plain-key-with-hash-in-name",
+        "plain-key-with-hash-in-name-second",
+        "plain-key-with-equals-sign",
+        "explicit-plain-key-with-equals-and-comment",
+        "quoted-key-with-capital-letters",
+    ],
+)
+def test_block_scalar_body_is_redacted_for_each_yaml_key_form(
+    event_store, text, expected
+) -> None:
+    redacted = event_store._redact_secret_text(text)
+    assert "SECRET-BODY" not in redacted
+    assert redacted == expected
+    assert event_store._bounded_event_message(text) == expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        '"my password": |',
+        "? password\n: |",
+        "password: &value |",
+        "\ufeffpassword: |",
+        '? "my password: label"\n: |',
+        '? "\\u0070assword"\n: |',
+        '? "my password: label" # comment\n: |',
+    ],
+)
+@pytest.mark.parametrize("line_break", ["\r\n", "\r", "\n"])
+def test_block_scalar_key_forms_redact_under_every_line_break(
+    event_store, header, line_break
+) -> None:
+    text = header.replace("\n", line_break) + line_break + "  SECRET-BODY" + line_break
+    text += "after: public" + line_break
+    redacted = event_store.redact_event_data({"note": text})["note"]
+    assert "SECRET-BODY" not in redacted
+    assert redacted.endswith("after: public" + line_break)
+    assert "after: public" in event_store._bounded_event_message(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "description: |\n  ok\nafter: public\n",
+        '"my notes": |\n  ok\nafter: public\n',
+        "? name\n: |\n  ok\nafter: public\n",
+        "\ufeffname: |\n  ok\nafter: public\n",
+    ],
+)
+def test_block_scalar_with_a_non_secret_key_is_unchanged(event_store, text) -> None:
+    assert event_store._redact_secret_text(text) == text
+
+
+def test_block_scalar_redaction_survives_a_one_megabyte_body(event_store) -> None:
+    body = "  " + "x" * 1_000_000 + "\n"
+    for header in ('"my password": |\n', "? password\n: |\n", "password: &a !!str |\n"):
+        started = time.perf_counter()
+        redacted = event_store._redact_secret_text(header + body + "after: public\n")
+        assert time.perf_counter() - started < 10.0
+        assert redacted == _BLOCK_REDACTED

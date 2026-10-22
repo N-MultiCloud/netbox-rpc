@@ -2084,5 +2084,7 @@ def test_secret_body_beyond_the_bound_is_not_pulled_inside_it(event_store_module
 
     redacted = event_store.redact_event_data({"note": tail})
 
-    assert redacted == {"note": "[REDACTED][REDACTED]"}
+    # A plain key may contain "=", so the header match covers the whole run from the
+    # assignment to the block body. One marker covers it; the body must not survive.
+    assert redacted == {"note": "[REDACTED]"}
     assert "fake-tail-secret" not in repr(redacted)
