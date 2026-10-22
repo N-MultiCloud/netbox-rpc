@@ -20,7 +20,7 @@ import yaml
 from .. import gitea_docker_runner_contract, gitea_org_docker_runner_recovery_contract
 from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_protected_publication_pair_contract
-from .. import samba_ad_dc_contract
+from .. import samba_ad_dc_contract, iam_ui_contract
 from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
@@ -7083,12 +7083,69 @@ def _normalize_netbox_production_rq_worker_execution(
     return normalized
 
 
+
+def _normalize_iam_ui_execution(execution: RPCExecution, target: str) -> dict[str, Any]:
+    """Bind parameter-free IAM control to the fixed production device."""
+    obj = getattr(execution, "assigned_object", None)
+    if (
+        execution.target_model_label != iam_ui_contract.TARGET_MODEL
+        or getattr(execution, "assigned_object_id", None)
+        != iam_ui_contract.TARGET_OBJECT_ID
+        or obj is None
+        or getattr(obj, "pk", None) != iam_ui_contract.TARGET_OBJECT_ID
+        or getattr(obj, "name", None) != iam_ui_contract.TARGET_NAME
+        or target != iam_ui_contract.TARGET_NAME
+    ):
+        raise RPCExecutionError(
+            "IAM UI control requires device nmc-prod-207 (id 44).",
+            code="RPC_TARGET_INVALID",
+        )
+    params = execution.params
+    if params is None:
+        params = {}
+    if not isinstance(params, dict) or set(params) - {"_timeout_seconds_snapshot"}:
+        raise RPCExecutionError(
+            "IAM UI control accepts only an empty object.", code="RPC_PARAM_INVALID"
+        )
+    name = execution.procedure.name
+    target_object = {
+        "content_type": iam_ui_contract.TARGET_MODEL,
+        "object_id": iam_ui_contract.TARGET_OBJECT_ID,
+    }
+    normalized = {
+        "target": target,
+        "target_object": target_object,
+        "command_fingerprint": {
+            "handler_id": execution.procedure.handler_id,
+            "procedure": name,
+            "target_object": target_object,
+            "argv_sha256": iam_ui_contract.canonical_sha256(
+                [
+                    "sudo",
+                    "-n",
+                    iam_ui_contract.HELPER,
+                    name.removeprefix(iam_ui_contract.PREFIX),
+                ]
+            ),
+        },
+    }
+    try:
+        jsonschema.validate(normalized, iam_ui_contract.NORMALIZED_PARAMS_SCHEMAS[name])
+    except (KeyError, jsonschema.ValidationError) as exc:
+        raise RPCExecutionError(
+            "IAM UI normalized contract is invalid.",
+            code="RPC_NORMALIZED_CONTRACT_INVALID",
+        ) from exc
+    return normalized
+
+
 # Table-driven normalizer registry consulted once at the top of
 # ``_dispatch_normalize_execution_params``. Register a new procedure name
 # here (pointing at a shared or dedicated normalizer, both accepting
 # ``(execution, target)``) instead of adding another branch to that
 # function's already very large ``if``/``elif`` chain.
 _TABLE_NORMALIZERS: dict[str, Callable[[RPCExecution, str], dict[str, Any]]] = {
+    **{name: _normalize_iam_ui_execution for name in iam_ui_contract.HANDLER_IDS},
     NETBOX_OPENBAO_IMPORT_DRY_RUN: _normalize_openbao_import_execution,
     NETBOX_OPENBAO_IMPORT_APPLY: _normalize_openbao_import_execution,
     NMULTICLOUD_DEPLOY_RELEASE_MARKER_CHECK: _normalize_release_marker_execution,

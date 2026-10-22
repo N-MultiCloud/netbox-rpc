@@ -217,7 +217,13 @@ def derive_command_contract_hash(procedure: Any) -> str:
         )
         from .constants import NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
 
-        if handler_id in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES:
+        from . import iam_ui_contract
+
+        if handler_id in iam_ui_contract.HANDLER_IDS:
+            payload["semantic_contract"] = iam_ui_contract.semantic_capability_extension(
+                procedure
+            )
+        elif handler_id in NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES:
             payload["semantic_contract"] = netbox_rq_semantic_extension(procedure)
         elif handler_id in SAMBA_AD_DC_HANDLER_IDS:
             payload["semantic_contract"] = samba_semantic_extension(procedure)

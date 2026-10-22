@@ -1932,3 +1932,7 @@ ordinary CI's preprovisioned, offline toolchain boundary.
 Do not test this plugin against a real Linux host, Linux container/VM over SSH,
 or a real Huawei OLT unless a separate explicit live-device test plan is
 approved.
+
+### Dedicated IAM UI control
+
+The catalog includes fixed, parameter-free IAM UI procedures for device 44. All writes require approval, pinned AsyncSSH, and current strict target-owned credentials. The full transport, capability, migration, and uncertain-outcome contract is in [docs/iam-ui-control.md](docs/iam-ui-control.md).

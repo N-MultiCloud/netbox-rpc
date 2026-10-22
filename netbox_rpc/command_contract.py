@@ -501,3 +501,12 @@ def token_is_safe(token: str) -> bool:
     """Return True when a literal argv token uses the conservative charset."""
 
     return bool(SAFE_TOKEN_RE.fullmatch(token))
+
+
+# Fixed IAM control includes closed response validation and indeterminate outcomes.
+EXEMPT_HANDLER_RATIONALE.update({
+    "service.keycloak.iam_ui." + mode: (
+        "Invokes only the fixed IAM control mode and validates its closed readiness response."
+    )
+    for mode in ("inspect", "configure", "certificate", "activate")
+})

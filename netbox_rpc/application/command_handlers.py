@@ -18,6 +18,7 @@ from .. import (
     gitea_docker_runner_contract,
     gitea_org_docker_runner_recovery_contract,
     netbox_rq_worker_contract,
+    iam_ui_contract,
     openbao_import_contract,
     proxbox_api_release_images_contract,
     proxmox_oci_pull_contract,
@@ -245,6 +246,7 @@ _PROTECTED_REJECTION_REASON = {
 }
 
 _PROTECTED_CONTRACTS = {
+    **{name: iam_ui_contract for name in iam_ui_contract.WRITE_HANDLER_IDS},
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN: staging_contract,
     NETBOX_STAGING_DEPLOY_DNS_PAIR: dns_staging_contract,
     GITEA_PRODUCTION_UPGRADE_1_27_1: gitea_contract,
