@@ -6,9 +6,10 @@ import hashlib
 import json
 import posixpath
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
+from itertools import islice
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -972,9 +973,15 @@ def _apply_driver_pipeline_overrides(
 # gated on the procedure actually having a Jinja command, so every legacy /
 # literal procedure keeps a byte-for-byte identical normalized payload.
 
-_TARGET_SNAPSHOT_MAX_FIELDS = 100
+_TARGET_SNAPSHOT_MAX_NODES = 1000
+_TARGET_SNAPSHOT_MAX_BYTES = 65536
+_TARGET_SNAPSHOT_MAX_KEYS = 95
+_TARGET_SNAPSHOT_MAX_ITEMS = 50
 _TARGET_SNAPSHOT_MAX_VALUE_LEN = 1024
 _TARGET_SNAPSHOT_MAX_DEPTH = 4
+_TARGET_SNAPSHOT_MARKER = "_truncated"
+_TARGET_SNAPSHOT_MARKER_BYTES = len(',"_truncated":true')
+_TARGET_SNAPSHOT_MISSING = object()
 # Field/custom-field names whose values must never be serialized into the
 # snapshot. Biased toward over-redaction (omitting a field is safe; leaking a
 # secret is not).
@@ -1018,34 +1025,159 @@ def _json_safe_scalar(value: Any) -> Any:
     return safe
 
 
-def _json_safe_value(value: Any, depth: int = 0) -> Any:
+class _TargetSnapshotBudget:
+    """Track cumulative nodes and serialized bytes for one target snapshot."""
+
+    def __init__(self) -> None:
+        self.nodes = 0
+        self.bytes = 0
+        self.truncated = False
+
+    def checkpoint(self) -> tuple[int, int]:
+        return self.nodes, self.bytes
+
+    def restore(self, checkpoint: tuple[int, int]) -> None:
+        self.nodes, self.bytes = checkpoint
+
+    def spend(self, *, nodes: int = 0, bytes_: int = 0) -> bool:
+        nodes_limit = _TARGET_SNAPSHOT_MAX_NODES - 1
+        bytes_limit = _TARGET_SNAPSHOT_MAX_BYTES - _TARGET_SNAPSHOT_MARKER_BYTES
+        if self.nodes + nodes > nodes_limit or self.bytes + bytes_ > bytes_limit:
+            self.truncated = True
+            return False
+        self.nodes += nodes
+        self.bytes += bytes_
+        return True
+
+    def add_marker(self, snapshot: dict[str, Any]) -> None:
+        snapshot[_TARGET_SNAPSHOT_MARKER] = True
+        self.nodes += 1
+        self.bytes += _TARGET_SNAPSHOT_MARKER_BYTES
+
+
+def _json_length(value: Any) -> int:
+    return len(json.dumps(value).encode())
+
+
+def _canonical_mapping_items(
+    value: Mapping[object, Any], budget: _TargetSnapshotBudget
+) -> list[tuple[str, Any]]:
+    limited = list(islice(value.items(), _TARGET_SNAPSHOT_MAX_KEYS))
+    if len(value) > len(limited):
+        budget.truncated = True
+    ordered = sorted(
+        (
+            (
+                str(key)[:_TARGET_SNAPSHOT_MAX_VALUE_LEN],
+                type(key).__name__,
+                repr(key),
+                item,
+            )
+            for key, item in limited
+        ),
+        key=lambda entry: entry[:3],
+    )
+    canonical: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for key_text, _type_name, _key_repr, item in ordered:
+        if key_text in seen:
+            budget.truncated = True
+            continue
+        seen.add(key_text)
+        canonical.append((key_text, item))
+    return canonical
+
+
+def _mapping_entry_bytes(key: str, *, has_entries: bool) -> int:
+    return _json_length(key) + 1 + int(has_entries)
+
+
+def _append_snapshot_value(
+    output: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    depth: int,
+    budget: _TargetSnapshotBudget,
+) -> bool:
+    checkpoint = budget.checkpoint()
+    if not budget.spend(bytes_=_mapping_entry_bytes(key, has_entries=bool(output))):
+        return False
+    safe_value = _json_safe_value(value, depth, budget=budget)
+    if safe_value is _TARGET_SNAPSHOT_MISSING:
+        budget.restore(checkpoint)
+        budget.truncated = True
+        return False
+    output[key] = safe_value
+    return True
+
+
+def _json_safe_mapping(
+    value: Mapping[object, Any], depth: int, budget: _TargetSnapshotBudget
+) -> Any:
+    if not budget.spend(nodes=1, bytes_=2):
+        return _TARGET_SNAPSHOT_MISSING
+    output: dict[str, Any] = {}
+    for key, item in _canonical_mapping_items(value, budget):
+        _append_snapshot_value(
+            output, key, item, depth=depth + 1, budget=budget
+        )
+    return output
+
+
+def _json_safe_sequence(
+    value: list[Any] | tuple[Any, ...], depth: int, budget: _TargetSnapshotBudget
+) -> Any:
+    if not budget.spend(nodes=1, bytes_=2):
+        return _TARGET_SNAPSHOT_MISSING
+    limited = islice(value, _TARGET_SNAPSHOT_MAX_ITEMS)
+    output: list[Any] = []
+    for item in limited:
+        checkpoint = budget.checkpoint()
+        if not budget.spend(bytes_=int(bool(output))):
+            break
+        safe_item = _json_safe_value(item, depth + 1, budget=budget)
+        if safe_item is _TARGET_SNAPSHOT_MISSING:
+            budget.restore(checkpoint)
+            budget.truncated = True
+            continue
+        output.append(safe_item)
+    if len(value) > len(output):
+        budget.truncated = True
+    return output
+
+
+def _json_safe_value(
+    value: Any,
+    depth: int = 0,
+    *,
+    budget: _TargetSnapshotBudget | None = None,
+) -> Any:
     """Return a bounded, JSON-safe copy of a target field value.
 
-    Dictionaries and lists keep their structure, so the key-based redaction that
-    runs on the persisted ledger applies at every depth. A text copy would hide
-    those keys from that redaction.
+    Mappings and sequences keep their structure, so key-based redaction applies
+    at every depth. A text copy would hide those keys from that redaction.
     """
 
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return value[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]
-    if depth >= _TARGET_SNAPSHOT_MAX_DEPTH:
-        return "[truncated]"
-    if isinstance(value, dict):
-        return {
-            str(key)[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]: _json_safe_value(item, depth + 1)
-            for key, item in list(value.items())[:_TARGET_SNAPSHOT_MAX_FIELDS]
-        }
+    active_budget = budget or _TargetSnapshotBudget()
+    if (
+        isinstance(value, (Mapping, list, tuple))
+        and depth >= _TARGET_SNAPSHOT_MAX_DEPTH
+    ):
+        value = "[truncated]"
+    if isinstance(value, Mapping):
+        return _json_safe_mapping(value, depth, active_budget)
     if isinstance(value, (list, tuple)):
-        return [
-            _json_safe_value(item, depth + 1)
-            for item in list(value)[:_TARGET_SNAPSHOT_MAX_FIELDS]
-        ]
-    return _json_safe_scalar(value)
+        return _json_safe_sequence(value, depth, active_budget)
+    safe = _json_safe_scalar(value)
+    if not active_budget.spend(nodes=1, bytes_=_json_length(safe)):
+        return _TARGET_SNAPSHOT_MISSING
+    return safe
 
 
-def _target_field_items(obj: Any):
+def _target_field_items(
+    obj: Any, budget: _TargetSnapshotBudget | None = None
+):
     """Yield ``(name, value)`` for the object's concrete fields.
 
     Prefers a Django model's concrete local fields (``_meta.fields``); falls
@@ -1055,14 +1187,18 @@ def _target_field_items(obj: Any):
     meta = getattr(obj, "_meta", None)
     fields = getattr(meta, "fields", None) if meta is not None else None
     if fields:
-        for field in fields:
+        if budget is not None and len(fields) > _TARGET_SNAPSHOT_MAX_KEYS:
+            budget.truncated = True
+        for field in islice(fields, _TARGET_SNAPSHOT_MAX_KEYS):
             attname = getattr(field, "attname", None) or getattr(field, "name", None)
             if attname:
                 yield attname, getattr(obj, attname, None)
         return
     data = getattr(obj, "__dict__", None)
     if isinstance(data, dict):
-        for key, value in data.items():
+        if budget is not None and len(data) > _TARGET_SNAPSHOT_MAX_KEYS:
+            budget.truncated = True
+        for key, value in islice(data.items(), _TARGET_SNAPSHOT_MAX_KEYS):
             if not key.startswith("_"):
                 yield key, value
 
@@ -1077,36 +1213,114 @@ def _build_target_object_snapshot(obj: Any) -> dict[str, Any] | None:
 
     if obj is None:
         return None
+    budget = _TargetSnapshotBudget()
+    budget.spend(nodes=1, bytes_=2)
     snapshot: dict[str, Any] = {}
-    for name, value in _target_field_items(obj):
+    pk = getattr(obj, "pk", None)
+    _append_snapshot_value(
+        snapshot,
+        "id",
+        pk if pk is not None else getattr(obj, "id", None),
+        depth=0,
+        budget=budget,
+    )
+    _append_snapshot_value(snapshot, "display", str(obj), depth=0, budget=budget)
+    name_value = getattr(obj, "name", None)
+    if name_value is not None:
+        _append_snapshot_value(
+            snapshot, "name", name_value, depth=0, budget=budget
+        )
+
+    custom_fields = getattr(obj, "custom_field_data", None)
+    if isinstance(custom_fields, Mapping) and custom_fields:
+        _append_custom_fields(snapshot, custom_fields, budget)
+
+    for name, value in _target_field_items(obj, budget):
+        name = str(name)[:_TARGET_SNAPSHOT_MAX_VALUE_LEN]
         if (
             name.startswith("_")
             or name in _STRUCTURED_SNAPSHOT_FIELDS
             or _SENSITIVE_FIELD_RE.search(name)
+            or name in snapshot
         ):
             continue
-        if len(snapshot) >= _TARGET_SNAPSHOT_MAX_FIELDS:
+        if len(snapshot) >= _TARGET_SNAPSHOT_MAX_KEYS - 1:
+            budget.truncated = True
             break
-        snapshot[name] = _json_safe_value(value)
-
-    pk = getattr(obj, "pk", None)
-    snapshot.setdefault("id", pk if pk is not None else getattr(obj, "id", None))
-    snapshot["display"] = _json_safe_scalar(str(obj))
-    if "name" not in snapshot:
-        name_value = getattr(obj, "name", None)
-        if name_value is not None:
-            snapshot["name"] = _json_safe_scalar(name_value)
-
-    custom_fields = getattr(obj, "custom_field_data", None)
-    if isinstance(custom_fields, dict) and custom_fields:
-        redacted_cf = {
-            key: _json_safe_value(value)
-            for key, value in list(custom_fields.items())[:_TARGET_SNAPSHOT_MAX_FIELDS]
-            if not _SENSITIVE_FIELD_RE.search(str(key))
-        }
-        if redacted_cf:
-            snapshot["custom_fields"] = redacted_cf
+        _append_snapshot_value(snapshot, name, value, depth=0, budget=budget)
+    if budget.truncated:
+        budget.add_marker(snapshot)
     return snapshot
+
+
+def _append_custom_fields(
+    snapshot: dict[str, Any],
+    custom_fields: Mapping[object, Any],
+    budget: _TargetSnapshotBudget,
+) -> None:
+    checkpoint = budget.checkpoint()
+    key = "custom_fields"
+    if not budget.spend(bytes_=_mapping_entry_bytes(key, has_entries=bool(snapshot))):
+        return
+    if not budget.spend(nodes=1, bytes_=2):
+        budget.restore(checkpoint)
+        return
+    output: dict[str, Any] = {}
+    for custom_key, value in _canonical_mapping_items(custom_fields, budget):
+        if _SENSITIVE_FIELD_RE.search(custom_key):
+            continue
+        _append_snapshot_value(
+            output, custom_key, value, depth=0, budget=budget
+        )
+    if output:
+        snapshot[key] = output
+    else:
+        budget.restore(checkpoint)
+
+
+def _bounded_persisted_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return the redacted copy that the ledger stores, within the same budget.
+
+    Redaction can grow a value. A short secret becomes "[REDACTED]", which is
+    longer than the value it replaces. The redacted copy is therefore bounded
+    again with the same budget, and the same truncation marker rules apply.
+    """
+    from ..event_store import redact_event_value
+
+    redacted = redact_event_value(snapshot)
+    if not isinstance(redacted, dict):
+        return {}
+    budget = _TargetSnapshotBudget()
+    budget.spend(nodes=1, bytes_=2)
+    output: dict[str, Any] = {}
+    for key in sorted(redacted):
+        if key == _TARGET_SNAPSHOT_MARKER:
+            continue
+        _append_snapshot_value(output, key, redacted[key], depth=0, budget=budget)
+    if budget.truncated or redacted.get(_TARGET_SNAPSHOT_MARKER) is True:
+        budget.add_marker(output)
+    return output
+
+
+_TARGET_SNAPSHOT_RAW_DIGEST_SALT = "netbox_rpc.target_object.raw.v1"
+
+
+def _keyed_target_snapshot_digest(snapshot: dict[str, Any]) -> str:
+    """Return a keyed digest of the raw (unredacted) target snapshot.
+
+    The digest is HMAC-SHA256 with a key derived from Django's SECRET_KEY, through
+    ``salted_hmac``. An unkeyed hash of secret-bearing text could be guessed
+    offline by anyone who can read the stored fingerprint. Only a process that
+    holds SECRET_KEY can compute the digest. The NetBox backend hashes the
+    fingerprint it receives but never recomputes this value. Rotating SECRET_KEY
+    changes the digest, so pending approvals fail closed.
+    """
+    from django.utils.crypto import salted_hmac
+
+    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return salted_hmac(
+        _TARGET_SNAPSHOT_RAW_DIGEST_SALT, encoded, algorithm="sha256"
+    ).hexdigest()
 
 
 def _apply_target_object_context(
@@ -1119,10 +1333,14 @@ def _apply_target_object_context(
     )
     if not snapshot:
         return
-    normalized["_target_object"] = snapshot
+    persisted_snapshot = _bounded_persisted_snapshot(snapshot)
+    normalized["_target_object"] = persisted_snapshot
     fingerprint = normalized.get("command_fingerprint")
     if isinstance(fingerprint, dict):
-        fingerprint["target_object_sha256"] = _hash_json(snapshot)
+        fingerprint["target_object_sha256"] = _hash_json(persisted_snapshot)
+        fingerprint["target_object_raw_hmac_sha256"] = _keyed_target_snapshot_digest(
+            snapshot
+        )
 
 
 def _dispatch_normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:

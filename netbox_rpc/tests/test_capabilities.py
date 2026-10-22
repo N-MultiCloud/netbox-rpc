@@ -63,9 +63,8 @@ class ContractHashTests(TestCase):
         # Five digests equal the digests that the paired backend records. The install
         # digest is the netbox-rpc contract that the pure-domain tier also pins, since
         # the OpenBao SSH approval snapshot variant was added on 2026-09-23. The paired
-        # backend still records the earlier install digest, b9ec74..., and that backend
-        # update is tracked separately. Until it lands, this assertion pins the current
-        # netbox-rpc contract, so any further drift still fails.
+        # backend records the same install digest, b7a42b3e..., so both repositories agree
+        # on this contract. Any further drift in either repository still fails this check.
         expected = {
             "os.linux.debian.13.preflight_akvorado": (
                 "50ab427bb1f4fee18a76fbe00f19a65b9cbb03d3c1951d9f500b0da6938ece03"

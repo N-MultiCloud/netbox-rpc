@@ -85,12 +85,17 @@ netbox-rpc owns the NetBox object; the executor only sees the serialized
 execution payload. So when a procedure has **any** jinja command, the normalizer
 serializes a bounded, redacted, JSON-safe snapshot of the target object into
 `normalized_params["_target_object"]` (the `{{ target.* }}` context) and records
-`command_fingerprint["target_object_sha256"]`. The snapshot:
+`command_fingerprint["target_object_sha256"]` (the digest of the persisted, redacted
+copy) and `command_fingerprint["target_object_raw_hmac_sha256"]` (a keyed HMAC-SHA256 of the raw
+snapshot, keyed from SECRET_KEY, which the approval drift check uses). The snapshot:
 
 - includes the object's concrete public fields plus `id`, `display`, `name`, and
   `custom_fields`;
 - redacts any field whose name matches `pass|secret|token|private_key|api_key|credential`;
-- caps field count and value length.
+- caps field count and value length;
+- bounds the whole snapshot by one node budget (1000 nodes) and one serialized-byte
+  budget (65536 bytes). A truncated snapshot records a top-level `_truncated: true`
+  entry.
 
 Because this is gated on the presence of a jinja command, **legacy / literal
 procedures keep a byte-for-byte identical normalized payload** and the cross-repo

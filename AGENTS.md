@@ -226,7 +226,10 @@ lives in `netbox_rpc.command_templating` and is enforced in
 netbox-rpc owns the NetBox target object, so when a procedure has any jinja
 command the normalizer serializes a bounded, redacted, JSON-safe snapshot of the
 target into `normalized_params["_target_object"]` (the `{{ target.* }}` context)
-and adds `command_fingerprint["target_object_sha256"]`. This is gated on the
+and adds `command_fingerprint["target_object_sha256"]` (the digest of that persisted,
+redacted copy) and `command_fingerprint["target_object_raw_hmac_sha256"]` (a keyed HMAC-SHA256 of the raw
+snapshot, keyed from SECRET_KEY; rotating SECRET_KEY invalidates pending approvals). The snapshot is bounded by a node budget and a serialized-byte budget, and a
+truncated snapshot records a top-level `_truncated` entry. This is gated on the
 presence of a jinja command, so **legacy/literal procedures keep a byte-for-byte
 identical normalized payload**. **Security boundary for the executor:** the
 render context values are still substituted into a shell string over SSH, so the
@@ -298,6 +301,7 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   the name is listed in `SAFE_REFERENCE_KEYS`. Target snapshots carry custom fields only as the structured
   `custom_fields` mapping, and nested JSON keeps its structure, so the key-based redaction applies at
   every depth. A dictionary or list is never copied as text, because a text copy would bypass that redaction.
+  Event redaction traverses every mapping, list, tuple, set, and frozenset, and never stringifies a container.
 - Every present backend `result` must validate against the procedure's
   `result_schema`, including false outer envelopes. A truthy response may append
   `ExecutionSucceeded` only after validation; a false response remains failed

@@ -4,7 +4,9 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from contextlib import nullcontext
+from itertools import islice
 from typing import Any
 
 import jsonschema
@@ -93,6 +95,7 @@ MAX_SCHEMA_MISMATCH_MESSAGE_LENGTH = 512
 # persisted truncated value (content + marker) never exceeds its own schema
 # bound.
 _TRUNCATION_MARKER = "...[truncated]"
+_MAX_REDACTION_DEPTH = 32
 StringLimitPath = tuple[str, ...]
 _SECRET_CONTENT_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -149,71 +152,121 @@ def _is_vaulted_secret_reference(value: object) -> bool:
     return isinstance(value, str) and bool(NMS_SECRET_REFERENCE_RE.fullmatch(value))
 
 
+def _redact_event_text(
+    value: object,
+    string_limits: dict[StringLimitPath, int] | None,
+    path: StringLimitPath,
+) -> str:
+    text = _SECRET_CONTENT_RE.sub("[REDACTED]", str(value))
+    max_length = (string_limits or {}).get(path, MAX_EVENT_STRING_LENGTH)
+    if len(text) > max_length:
+        return f"{text[:max_length]}{_TRUNCATION_MARKER}"
+    return text
+
+
+def _redact_event_mapping(
+    value: Mapping[object, object],
+    *,
+    string_limits: dict[StringLimitPath, int] | None,
+    path: StringLimitPath,
+    depth: int,
+) -> dict[str, object]:
+    # Visit at most one entry past the limit, so an oversized mapping costs
+    # bounded work. The kept entries are the first ones in insertion order.
+    window = list(islice(value.items(), MAX_EVENT_DICT_ITEMS + 1))
+    redacted: dict[str, object] = {}
+    for key, item in sorted(
+        window[:MAX_EVENT_DICT_ITEMS], key=lambda pair: str(pair[0])
+    ):
+        key_text = str(key)
+        redacted[key_text] = redact_event_value(
+            item,
+            parent_key=key_text,
+            string_limits=string_limits,
+            path=(*path, key_text),
+            depth=depth + 1,
+        )
+    if len(window) > MAX_EVENT_DICT_ITEMS:
+        redacted["_truncated"] = True
+    return redacted
+
+
+def _redact_event_sequence(
+    value: list[object] | tuple[object, ...] | set[object] | frozenset[object],
+    *,
+    parent_key: str,
+    string_limits: dict[StringLimitPath, int] | None,
+    path: StringLimitPath,
+    depth: int,
+) -> list[object]:
+    # Visit at most one entry past the limit. Unordered containers sort only
+    # the visited window, so the kept subset is deterministic for sets of up to
+    # the limit and bounded work for larger sets.
+    window = list(islice(value, MAX_EVENT_LIST_ITEMS + 1))
+    if isinstance(value, (set, frozenset)):
+        window.sort(key=repr)
+    items = [
+        redact_event_value(
+            item,
+            parent_key=parent_key,
+            string_limits=string_limits,
+            path=(*path, "*"),
+            depth=depth + 1,
+        )
+        for item in window[:MAX_EVENT_LIST_ITEMS]
+    ]
+    if len(value) > MAX_EVENT_LIST_ITEMS:
+        items.append(
+            {"_truncated": True, "remaining": len(value) - MAX_EVENT_LIST_ITEMS}
+        )
+    return items
+
+
+def _redact_sensitive_value(value: object, parent_key: str) -> object:
+    if isinstance(value, bool):
+        # A boolean cannot carry secret material. Replacing it with a string
+        # would break the typed field that consumes it.
+        return value
+    from .credential_contract import public_credential_metadata
+
+    public_metadata = public_credential_metadata(value, parent_key)
+    if public_metadata is not None:
+        return public_metadata
+    if _is_vaulted_secret_reference(value):
+        return value
+    return "[REDACTED]"
+
+
 def redact_event_value(
     value: object,
     *,
     parent_key: str = "",
     string_limits: dict[StringLimitPath, int] | None = None,
     path: StringLimitPath = (),
+    depth: int = 0,
 ) -> object:
     if parent_key and parent_key.lower() in _BOOLEAN_POLICY_KEYS:
-        # Checked before the safe-key exemption, so the boolean boundary holds
-        # at every depth, including nested target data such as custom fields.
+        # This check precedes safe-key and container handling at every depth.
         return value if isinstance(value, bool) else "[REDACTED]"
     if parent_key and _is_sensitive_key(parent_key):
-        if isinstance(value, bool):
-            # A boolean cannot carry secret material. Replacing it with a string
-            # would break the typed field that consumes it, for example a
-            # StrictBool host-key policy, so the boolean is kept as it is.
-            return value
-        from .credential_contract import public_credential_metadata
-
-        public_metadata = public_credential_metadata(value, parent_key)
-        if public_metadata is not None:
-            return public_metadata
-        if _is_vaulted_secret_reference(value):
-            return value
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        redacted: dict[str, object] = {}
-        items = sorted(value.items(), key=lambda pair: str(pair[0]))
-        for index, (key, item) in enumerate(items):
-            if index >= MAX_EVENT_DICT_ITEMS:
-                redacted["_truncated"] = True
-                break
-            key_text = str(key)
-            redacted[key_text] = redact_event_value(
-                item,
-                parent_key=key_text,
-                string_limits=string_limits,
-                path=(*path, key_text),
+        return _redact_sensitive_value(value, parent_key)
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        if depth > _MAX_REDACTION_DEPTH:
+            return "[truncated]"
+        if isinstance(value, Mapping):
+            return _redact_event_mapping(
+                value, string_limits=string_limits, path=path, depth=depth
             )
-        return redacted
-    if isinstance(value, list):
-        items = [
-            redact_event_value(
-                item,
-                parent_key=parent_key,
-                string_limits=string_limits,
-                path=(*path, "*"),
-            )
-            for item in value[:MAX_EVENT_LIST_ITEMS]
-        ]
-        if len(value) > MAX_EVENT_LIST_ITEMS:
-            items.append(
-                {"_truncated": True, "remaining": len(value) - MAX_EVENT_LIST_ITEMS}
-            )
-        return items
-    if isinstance(value, str):
-        limits = string_limits or {}
-        max_length = limits.get(path, MAX_EVENT_STRING_LENGTH)
-        value = _SECRET_CONTENT_RE.sub("[REDACTED]", value)
-        if len(value) > max_length:
-            return f"{value[:max_length]}{_TRUNCATION_MARKER}"
-        return value
+        return _redact_event_sequence(
+            value,
+            parent_key=parent_key,
+            string_limits=string_limits,
+            path=path,
+            depth=depth,
+        )
     if isinstance(value, (bool, int, float)) or value is None:
         return value
-    return str(value)
+    return _redact_event_text(value, string_limits, path)
 
 
 def redact_event_data(

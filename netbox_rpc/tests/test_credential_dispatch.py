@@ -328,7 +328,7 @@ class CredentialApprovalScopeTests(CredentialAuthorityFixture, TestCase):
         assert event_store.redact_event_value(value)["_truncated"] is True
         value = [0] * (event_store.MAX_EVENT_LIST_ITEMS + 1)
         assert event_store.redact_event_value(value)[-1] == {"_truncated": True, "remaining": 1}
-        assert event_store.redact_event_value(("bounded",)) == "('bounded',)"
+        assert event_store.redact_event_value(("bounded",)) == ["bounded"]
 
 
 def update_command_with_short_lock_timeout(command_id):
