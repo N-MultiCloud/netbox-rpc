@@ -20,6 +20,22 @@ PINNED_HANDLER_IDS = (
 
 CURRENT_PINNED_PROCEDURES = (
     (
+        "service.keycloak.iam_ui.activate",
+        "service.keycloak.iam_ui.activate",
+    ),
+    (
+        "service.keycloak.iam_ui.certificate",
+        "service.keycloak.iam_ui.certificate",
+    ),
+    (
+        "service.keycloak.iam_ui.configure",
+        "service.keycloak.iam_ui.configure",
+    ),
+    (
+        "service.keycloak.iam_ui.inspect",
+        "service.keycloak.iam_ui.inspect",
+    ),
+    (
         "os.linux.debian.13.install_akvorado",
         "os.linux_debian_13.install_akvorado",
     ),

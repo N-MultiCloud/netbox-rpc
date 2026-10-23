@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+from django.db import migrations, transaction
+
 PREFIX = "service.keycloak.iam_ui."
 MODES = ("inspect", "configure", "certificate", "activate")
 HANDLER_IDS = frozenset(PREFIX + mode for mode in MODES)
@@ -173,7 +175,6 @@ PROCEDURE_POLICIES = {
     for mode in MODES
 }
 
-from django.db import migrations, transaction
 
 
 def _seed_one(Procedure, Command, name, policy):
