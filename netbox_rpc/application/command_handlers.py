@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -2040,6 +2041,163 @@ def _requires_signed_dispatch(execution: object) -> bool:
     )
 
 
+_GITEA_RUNNER_SCOPE_PROCEDURE_NAMES = frozenset(
+    {GITEA_RUNNER_REGISTER, GITEA_ORG_CI_RUNNER_PROVISION}
+)
+
+
+@dataclasses.dataclass
+class _DispatchState:
+    """Mutable facts a dispatch stage records for the shared failure handler."""
+
+    normalized: dict[str, Any] = dataclasses.field(default_factory=dict)
+    runner_scope_reserved: bool = False
+
+
+def _select_backend(
+    execution: object,
+    aggregate: RPCExecutionAggregate,
+    backend_pk: object | None,
+) -> tuple[object, int | None]:
+    """Return the backend selector and, for a protected procedure, the bound backend id.
+
+    A protected binding failure is terminal before any backend access, so it is
+    recorded and raised here rather than inside the dispatch failure handler.
+    """
+    if execution.procedure.name not in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+        selector = backend_pk if backend_pk is not None else execution.backend_id
+        return selector, None
+    try:
+        bound_backend_id = _require_concrete_protected_backend_id(
+            execution.backend_id,
+            execution.procedure.name,
+        )
+        if backend_pk is not None and int(backend_pk) != bound_backend_id:
+            raise ValueError("worker backend does not match approval binding")
+    except (TypeError, ValueError, drf_serializers.ValidationError) as exc:
+        aggregate.fail(
+            f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
+            "RPC_BACKEND_BINDING_INVALID",
+        )
+        raise RPCExecutionError(
+            f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
+            code="RPC_BACKEND_BINDING_INVALID",
+        ) from exc
+    return bound_backend_id, bound_backend_id
+
+
+def _resolve_dispatch_target(
+    execution: object,
+    backend_selector: object,
+    bound_backend_id: int | None,
+) -> object:
+    """Resolve and validate the backend target before any backend I/O."""
+    try:
+        target = resolve_backend(backend_selector)
+    except Exception as exc:
+        # Resolver implementations may import deployment-owned code or
+        # consult mutable configuration. Once the queued execution has
+        # been claimed, every such failure must append a bounded terminal
+        # event rather than leaking exception text or stranding ``running``.
+        raise RPCExecutionError(
+            "RPC backend resolution failed; execution not dispatched.",
+            code="RPC_BACKEND_RESOLUTION_FAILED",
+        ) from exc
+    if target is None:
+        raise RPCExecutionError(
+            "No NMSBackend configured for RPC execution.",
+            code="RPC_BACKEND_NOT_CONFIGURED",
+        )
+    if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+        try:
+            target = _resolve_validated_protected_backend_target(
+                bound_backend_id,
+                execution.procedure.name,
+                backend_target=target,
+            )
+        except drf_serializers.ValidationError as exc:
+            raise RPCExecutionError(
+                f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
+                code="RPC_BACKEND_BINDING_INVALID",
+            ) from exc
+        _require_approved_backend_target_before_io(
+            execution,
+            backend_target=target,
+        )
+    if execution.procedure.name in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES:
+        _verify_backend_capability(
+            execution.procedure,
+            backend_target=target,
+            use_cache=False,
+        )
+    return target
+
+
+def _prepare_dispatch(
+    execution: object,
+    aggregate: RPCExecutionAggregate,
+    target: object,
+    state: _DispatchState,
+) -> object:
+    """Normalize and approve the execution, then return its dispatch lease or None."""
+    _reference_execution_guard(execution, "dispatch", target)
+    state.normalized = _ledger_command_source(normalize_execution_params(execution))
+    normalized = state.normalized
+    _reference_execution_guard(execution, "approval", normalized, backend_target=target)
+    if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
+        _require_current_protected_approval(
+            execution,
+            normalized,
+            backend_target=target,
+        )
+    from .. import jobs
+
+    aggregate.normalize(
+        normalized,
+        jobs._hash_json(normalized.get("command_fingerprint")),
+    )
+    # #168: mint a one-time signed dispatch lease bound to this just-claimed
+    # execution + current stream version. Graceful: ``None`` when no signing
+    # key is configured, so dispatch stays ID-only (byte-for-byte as before).
+    lease = _issue_dispatch_lease(execution, aggregate, normalized)
+    if _requires_signed_dispatch(execution) and lease is None:
+        raise RPCExecutionError(
+            f"{_protected_label(execution.procedure.name)} requires a signed one-time dispatch lease.",
+            code="RPC_DISPATCH_LEASE_REQUIRED",
+        )
+    return lease
+
+
+def _dispatch_to_backend(
+    execution: object,
+    aggregate: RPCExecutionAggregate,
+    target: object,
+    lease: object,
+    state: _DispatchState,
+) -> None:
+    """Call the backend and record its response. Gitea runner procedures use the scope fence."""
+    from .. import jobs
+
+    if execution.procedure.name not in _GITEA_RUNNER_SCOPE_PROCEDURE_NAMES:
+        response = jobs._call_backend(target, execution, lease=lease)
+        aggregate.record_backend_response(response)
+        return
+    _reserve_gitea_runner_scope(execution, state.normalized)
+    state.runner_scope_reserved = True
+    response = jobs._call_backend(target, execution, lease=lease)
+    _record_gitea_runner_response(execution, state.normalized, response)
+
+
+def _block_runner_scope_after_failure(execution: object, normalized: dict[str, Any]) -> None:
+    try:
+        _block_gitea_runner_scope(execution, normalized)
+    except RPCExecutionError:
+        # A reconciliation takeover owns the fence now. The late
+        # original path must fail its execution without rewriting that
+        # newer ownership or clearing the canonical scope.
+        pass
+
+
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
     # #166: the opt-in is authoritative at the worker claim too — a claim on a
     # disabled integration must fail closed rather than dispatch.
@@ -2063,127 +2221,17 @@ def run_execution(execution: object, *, backend_pk: object | None = None) -> Non
         except RPCExecutionAggregateError:
             pass
         return
-    runner_scope_reserved = False
-    normalized: dict[str, Any] = {}
-
-    if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-        try:
-            bound_backend_id = _require_concrete_protected_backend_id(
-                execution.backend_id,
-                execution.procedure.name,
-            )
-            if backend_pk is not None and int(backend_pk) != bound_backend_id:
-                raise ValueError("worker backend does not match approval binding")
-        except (TypeError, ValueError, drf_serializers.ValidationError) as exc:
-            aggregate.fail(
-                f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
-                "RPC_BACKEND_BINDING_INVALID",
-            )
-            raise RPCExecutionError(
-                f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
-                code="RPC_BACKEND_BINDING_INVALID",
-            ) from exc
-        backend_selector: object = bound_backend_id
-    else:
-        backend_selector = (
-            backend_pk if backend_pk is not None else execution.backend_id
-        )
-
+    backend_selector, bound_backend_id = _select_backend(execution, aggregate, backend_pk)
+    state = _DispatchState()
     try:
-        from .. import jobs
-
         _reference_execution_guard(execution, "backend", backend_selector)
-
-        try:
-            target = resolve_backend(backend_selector)
-        except Exception as exc:
-            # Resolver implementations may import deployment-owned code or
-            # consult mutable configuration. Once the queued execution has
-            # been claimed, every such failure must append a bounded terminal
-            # event rather than leaking exception text or stranding ``running``.
-            raise RPCExecutionError(
-                "RPC backend resolution failed; execution not dispatched.",
-                code="RPC_BACKEND_RESOLUTION_FAILED",
-            ) from exc
-        if target is None:
-            raise RPCExecutionError(
-                "No NMSBackend configured for RPC execution.",
-                code="RPC_BACKEND_NOT_CONFIGURED",
-            )
-
-        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-            try:
-                target = _resolve_validated_protected_backend_target(
-                    bound_backend_id,
-                    execution.procedure.name,
-                    backend_target=target,
-                )
-            except drf_serializers.ValidationError as exc:
-                raise RPCExecutionError(
-                    f"{_protected_label(execution.procedure.name)} backend binding is invalid.",
-                    code="RPC_BACKEND_BINDING_INVALID",
-                ) from exc
-        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-            _require_approved_backend_target_before_io(
-                execution,
-                backend_target=target,
-            )
-        if execution.procedure.name in EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES:
-            _verify_backend_capability(
-                execution.procedure,
-                backend_target=target,
-                use_cache=False,
-            )
-        _reference_execution_guard(execution, "dispatch", target)
-        normalized = _ledger_command_source(normalize_execution_params(execution))
-        _reference_execution_guard(
-            execution, "approval", normalized, backend_target=target
-        )
-        if execution.procedure.name in PROTECTED_APPROVAL_PROCEDURE_NAMES:
-            _require_current_protected_approval(
-                execution,
-                normalized,
-                backend_target=target,
-            )
-        aggregate.normalize(
-            normalized,
-            jobs._hash_json(normalized.get("command_fingerprint")),
-        )
-
-        # #168: mint a one-time signed dispatch lease bound to this just-claimed
-        # execution + current stream version. Graceful: ``None`` when no signing
-        # key is configured, so dispatch stays ID-only (byte-for-byte as before).
-        lease = _issue_dispatch_lease(execution, aggregate, normalized)
-        if _requires_signed_dispatch(execution) and lease is None:
-            raise RPCExecutionError(
-                f"{_protected_label(execution.procedure.name)} requires a signed one-time dispatch lease.",
-                code="RPC_DISPATCH_LEASE_REQUIRED",
-            )
-
-        if execution.procedure.name in {
-            GITEA_RUNNER_REGISTER,
-            GITEA_ORG_CI_RUNNER_PROVISION,
-        }:
-            _reserve_gitea_runner_scope(execution, normalized)
-            runner_scope_reserved = True
-        response = jobs._call_backend(target, execution, lease=lease)
-        if execution.procedure.name in {
-            GITEA_RUNNER_REGISTER,
-            GITEA_ORG_CI_RUNNER_PROVISION,
-        }:
-            _record_gitea_runner_response(execution, normalized, response)
-        else:
-            aggregate.record_backend_response(response)
+        target = _resolve_dispatch_target(execution, backend_selector, bound_backend_id)
+        lease = _prepare_dispatch(execution, aggregate, target, state)
+        _dispatch_to_backend(execution, aggregate, target, lease, state)
     except Exception as exc:
         code = getattr(exc, "code", "RPC_EXECUTION_FAILED")
-        if runner_scope_reserved:
-            try:
-                _block_gitea_runner_scope(execution, normalized)
-            except RPCExecutionError:
-                # A reconciliation takeover owns the fence now. The late
-                # original path must fail its execution without rewriting that
-                # newer ownership or clearing the canonical scope.
-                pass
+        if state.runner_scope_reserved:
+            _block_runner_scope_after_failure(execution, state.normalized)
         try:
             aggregate.fail(str(exc), code)
         except RPCExecutionAggregateError:
