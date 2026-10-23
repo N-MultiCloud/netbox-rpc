@@ -881,11 +881,13 @@ def _skips_result_validation(
     The response must be a failure: ``ok`` is exactly ``False``. Its ``result``
     must be absent or exactly ``{}``. Its ``error_code`` must be catalog-shaped.
     Such a failure has no result to validate, and a schema mismatch would hide
-    the backend code behind RPC_RESULT_SCHEMA_MISMATCH. Every other shape keeps
-    the existing validation rules, including successes; a missing, null, or non-boolean ``ok``; an explicit
-    ``null`` result; any other result value, including ``[]``, ``""``, ``0``
-    and ``False``; a missing or non-catalog code; and protected or special
-    procedures with a dedicated closed result contract.
+    the backend code behind RPC_RESULT_SCHEMA_MISMATCH. The envelope-state rule
+    for protected and installer procedures accepts such a failure too, because
+    it has no nested object to compare. Every other shape keeps the existing
+    validation rules, including successes; a missing, null, or non-boolean
+    ``ok``; an explicit ``null`` result; any other result value, including
+    ``[]``, ``""``, ``0`` and ``False``; a missing or non-catalog code; and
+    procedures with a dedicated closed result contract (Gitea, staging and DNS).
     """
     if has_dedicated_validation or ok is not False:
         return False
@@ -906,12 +908,9 @@ class _ResponseContract:
 
     @property
     def has_dedicated_validation(self) -> bool:
-        return (
-            self.is_gitea_upgrade
-            or self.is_staging_rotation
-            or self.is_dns_staging_deploy
-            or self.requires_envelope_state_match
-        )
+        # The envelope-state rule is generic and does not own a result contract,
+        # so it is deliberately absent here. See _skips_result_validation.
+        return self.is_gitea_upgrade or self.is_staging_rotation or self.is_dns_staging_deploy
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1141,15 +1140,20 @@ def record_backend_response(execution: RPCExecution, response: dict[str, Any]) -
     should_validate = not skip_result_validation and (
         ok or result_is_present or contract.requires_envelope_state_match
     )
-    schema_mismatch = _response_schema_mismatch(
-        execution,
-        contract,
-        response,
-        raw_result,
-        ledger_result,
-        string_limits,
-        should_validate,
-    )
+    if skip_result_validation:
+        # A catalog-coded failure with no result content has nothing to validate.
+        # The envelope-state rule would otherwise mask its code (#420).
+        schema_mismatch = ""
+    else:
+        schema_mismatch = _response_schema_mismatch(
+            execution,
+            contract,
+            response,
+            raw_result,
+            ledger_result,
+            string_limits,
+            should_validate,
+        )
     finished_at = timezone.now()
     outcome = _BackendOutcome(
         ok=ok,
