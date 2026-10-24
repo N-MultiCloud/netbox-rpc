@@ -118,5 +118,6 @@ class SecretContentLedgerTests(TestCase):
             {"detail": text},
         )
 
-        assert event.message == "[REDACTED]\r\nafter: public\r\n"
-        assert event.data == {"detail": "[REDACTED]\r\nafter: public\r\n"}
+        # A block scalar under a sensitive key is redacted to the end of the text (issue 428).
+        assert event.message == "[REDACTED]"
+        assert event.data == {"detail": "[REDACTED]"}

@@ -156,20 +156,158 @@ _YAML_BLOCK_SCALAR_HEADER_RE = re.compile(
 )
 
 
-def _secret_spans(text: str) -> list[tuple[int, int]]:
-    """Return the sorted, non-overlapping spans to redact in text.
+# Structural, fail-closed rule for the value of a sensitive YAML key (issue 428). It does not
+# parse YAML, and it has no exclusions: every boundary heuristic tried before it had a bypass.
+#
+# A key line names a secret before its first mapping colon (a colon followed by blank space or
+# a line break), inside a leading quoted key, or starts with a double-quoted key that holds an
+# escape (an escape can spell any word), and has a mapping colon. An explicit key line ("?"
+# with or without a key after it) counts unless it is plainly resolved and not sensitive: one
+# closed single-line key with no secret word, escape, or property, directly followed by its
+# ":" line at the same indentation. Anchors and tags before a key are skipped.
+#
+# * Single-line scalar: when the mapping colon is followed by a plain scalar (one that does not
+#   start with an indicator, a quote, a property, an alias, or a flow opener), or by a quoted
+#   scalar that closes on the key line with only a comment after it, the value can continue
+#   only on lines indented more than the key line. The following lines that are blank,
+#   comments, or indented more than the key line are redacted (group "region").
+# * Everything else is redacted from the end of the key line to the end of the text (groups
+#   "tail" and "explicit_tail"): an empty value, properties, a block indicator, a flow
+#   collection, a quote left open, any explicit key that counts, and any key line the
+#   single-line form does not match.
+#
+# Only the lines after the key line are redacted; the key line keeps the redaction of the
+# patterns above, which are matched independently. Linearity: the candidate checks read only
+# the key line (and, for a folded explicit key, the start of the next line), each alternative is
+# bounded by the line, and once a candidate is chosen, the lines after it are consumed
+# possessively with nothing after them that can fail. finditer then resumes after them, so no
+# text is scanned twice.
+_YAML_REGION_BREAK = r"(?:\r\n|\r(?!\n)|\n)"
+_YAML_REGION_BODY = r"(?P=yaml_indent)[ \t][^\r\n]*+|[ \t]*+(?:#[^\r\n]*+)?(?=\r|\n|\Z)"
+_YAML_DOUBLE_QUOTED_LINE = r"\"(?:\\[^\r\n]|[^\"\\\r\n])*+\""
+_YAML_SINGLE_QUOTED_LINE = r"'(?:''|[^'\r\n])*+'"
+_YAML_PLAIN_KEY_RUN = r"(?:[^\r\n:]|:(?![ \t\r\n]|\Z))*+"
+# A scalar that ends on the key line: a quoted scalar that closes there, or a plain scalar.
+_YAML_SINGLE_LINE_SCALAR = (
+    r"[ \t]++(?:(?:" + _YAML_DOUBLE_QUOTED_LINE + r"|" + _YAML_SINGLE_QUOTED_LINE + r")"
+    r"[ \t]*+(?:#[^\r\n]*+)?(?=\r|\n|\Z)"
+    r"|[^ \t\r\n|>\[{\"'&!*%@`#][^\r\n]*+)"
+)
+# A closed single-line explicit key with no escape or property, then its ":" line.
+_YAML_RESOLVED_EXPLICIT_KEY = (
+    r"(?:(?:\"[^\"\\\r\n]*+\"|'(?:''|[^'\r\n])*+')[ \t]*+"
+    r"|[^ \t\r\n&!*|>\[{\"'#%@`?:-][^\r\n#]*+)"
+    r"(?:#[^\r\n]*+)?(?:\r\n|\r(?!\n)|\n)(?P=yaml_indent):"
+)
+_YAML_SENSITIVE_VALUE_RE = re.compile(
+    # Node properties (anchors and tags) may come before a key.
+    r"(?<![^\r\n])\ufeff*+(?P<yaml_indent>[ \t]*+)(?:-[ \t]++)*+(?:[&!][^ \t\r\n]*+[ \t]++)*+"
+    r"(?:"
+    # Explicit key line, with or without a key after the "?". Every explicit key is redacted to
+    # the end of the text unless it is plainly resolved and not sensitive: one closed
+    # single-line key with no secret word, escape, or property, directly followed by its ":"
+    # line at the same indentation.
+    r"\?(?:[ \t]++|(?=\r|\n|\Z))"
+    r"(?:(?=[^\r\n]*?(?i:" + _SECRET_KEY_FRAGMENT + r"))|(?!" + _YAML_RESOLVED_EXPLICIT_KEY + r"))"
+    r"[^\r\n]*+(?P<explicit_tail>[\s\S]*+)"
+    # Implicit key line.
+    r"|(?=(?:[^\r\n:]|:(?![ \t\r\n]|\Z))*?(?i:" + _SECRET_KEY_FRAGMENT + r")"
+    r"|\"(?:\\[^\r\n]|[^\"\\\r\n])*?(?i:" + _SECRET_KEY_FRAGMENT + r")"
+    r"|'(?:''|[^'\r\n])*?(?i:" + _SECRET_KEY_FRAGMENT + r")"
+    r"|\"[^\"\\\r\n]*+\\)"
+    r"(?=[^\r\n]*?:(?:[ \t\r\n]|\Z))"
+    r"(?:"
+    # A key that starts with a quote is read only as a quoted key, never as a plain run.
+    r"(?:" + _YAML_DOUBLE_QUOTED_LINE + r"|" + _YAML_SINGLE_QUOTED_LINE + r"|(?![\"'])"
+    + _YAML_PLAIN_KEY_RUN + r")[ \t]*+:" + _YAML_SINGLE_LINE_SCALAR
+    + r"(?P<region>(?:" + _YAML_REGION_BREAK + r"(?:" + _YAML_REGION_BODY + r"))*+)"
+    r"|[^\r\n]*+(?P<tail>[\s\S]*+)"
+    r")"
+    r")"
+)
 
-    The union of the base pattern's matches and the YAML header matches is taken. A header
-    match that overlaps a base match is merged with it, so every span the base pattern
-    redacts is still redacted, whatever the header match covers. Spans that do not overlap
-    anything are left exactly as the base pattern found them.
+
+# Flow context: inside "[...]" or "{...}" a value is bounded neither by lines nor by
+# indentation, and a key need not be followed by blank space, so the rules above cannot bound
+# it. Any "{" or "[" starts it, except the exact "[REDACTED]" marker.
+_FLOW_OPENER_RE = re.compile(r"\{|\[(?!REDACTED\])")
+# In flow context, the first secret word, backslash (an escape can spell any word), or
+# explicit-key marker at a line start starts the redaction.
+_FLOW_SENSITIVE_TOKEN_RE = re.compile(
+    r"(?i:" + _SECRET_KEY_FRAGMENT + r")|\\|(?<![^\r\n])[ \t]*+\?(?=[ \t\r\n]|\Z)"
+)
+# A quote, optional blank space, and a colon: the end of a quoted mapping key.
+_QUOTED_KEY_END_RE = re.compile(r"\"[ \t]*+:")
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _escaped_key_line_start(text: str) -> int | None:
+    """Return the start of the first line where an escape comes before a quoted key end.
+
+    A double-quoted mapping key that holds an escape can spell a secret word that no pattern
+    can see, so the text is redacted from that line to the end. Each line is searched a fixed
+    number of times, so the cost is linear.
     """
-    spans = [match.span() for match in _SECRET_CONTENT_RE.finditer(text)]
-    extra = [match.span() for match in _YAML_BLOCK_SCALAR_HEADER_RE.finditer(text)]
-    if not extra:
-        return spans
+    position = 0
+    length = len(text)
+    while True:
+        backslash = text.find("\\", position)
+        if backslash < 0:
+            return None
+        line_break = _LINE_BREAK_RE.search(text, backslash)
+        line_end = line_break.start() if line_break else length
+        if _QUOTED_KEY_END_RE.search(text, backslash, line_end):
+            return max(text.rfind("\n", 0, backslash), text.rfind("\r", 0, backslash)) + 1
+        if line_break is None:
+            return None
+        position = line_break.end()
+
+
+def _fail_closed_tails(text: str) -> list[tuple[int, int]]:
+    """Return the spans that run to the end of the text for flow context and escaped keys.
+
+    Flow context: from the first sensitive token at or after the line of the first flow
+    opener. Escaped key: from the start of the first line where an escape comes before the
+    end of a quoted mapping key. Both are forward scans, so the cost is linear.
+    """
+    spans: list[tuple[int, int]] = []
+    length = len(text)
+    opener = _FLOW_OPENER_RE.search(text)
+    if opener is not None:
+        line_start = max(
+            text.rfind("\n", 0, opener.start()), text.rfind("\r", 0, opener.start())
+        ) + 1
+        token = _FLOW_SENSITIVE_TOKEN_RE.search(text, line_start)
+        if token is not None:
+            spans.append((token.start(), length))
+    escaped = _escaped_key_line_start(text)
+    if escaped is not None:
+        spans.append((escaped, length))
+    return spans
+
+
+def _sensitive_value_spans(text: str) -> list[tuple[int, int]]:
+    """Return the value lines that the structural rules redact, without the key lines."""
+    spans: list[tuple[int, int]] = []
+    for match in _YAML_SENSITIVE_VALUE_RE.finditer(text):
+        group = next(
+            name
+            for name in ("explicit_tail", "tail", "region")
+            if match.group(name) is not None
+        )
+        start, end = match.span(group)
+        # The value lines start with the line break after the key line; keep that break.
+        start += 2 if text.startswith("\r\n", start) else 1
+        if end > start:
+            spans.append((start, end))
+    spans.extend(span for span in _fail_closed_tails(text) if span[1] > span[0])
+    return spans
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the sorted spans with overlapping ones merged; touching spans stay apart."""
     merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans + extra):
+    for start, end in sorted(spans):
         if merged and start < merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
@@ -177,19 +315,174 @@ def _secret_spans(text: str) -> list[tuple[int, int]]:
     return merged
 
 
-def _redact_secret_spans(text: str) -> str:
-    """Replace each secret span of text with the redaction marker."""
-    pieces: list[str] = []
+def _secret_spans(text: str) -> list[tuple[int, int]]:
+    """Return the sorted, non-overlapping spans that the base patterns redact in text.
+
+    The union of the base pattern's matches and the YAML header matches is taken. A header
+    match that overlaps a base match is merged with it, so every span the base pattern
+    redacts is still redacted, whatever the header match covers. Spans that do not overlap
+    anything are left exactly as the base pattern found them. The structural rules are not
+    part of these spans; _redact_bounded applies them after the base fixed point.
+    """
+    spans = [match.span() for match in _SECRET_CONTENT_RE.finditer(text)]
+    extra = [match.span() for match in _YAML_BLOCK_SCALAR_HEADER_RE.finditer(text)]
+    if not extra:
+        return spans
+    return _merge_spans(spans + extra)
+
+
+_REDACTION_MARKER = "[REDACTED]"
+# A piece of a redacted text: (length, original start). The original start is the index in
+# the original text of the piece's first character, or -1 for inserted characters (a marker
+# or a truncation marker). The pieces of a text are in order, and their original starts
+# increase, because redaction and bounding only remove or replace characters.
+Piece = tuple[int, int]
+
+
+class _PieceCursor:
+    """Read consecutive ranges of a text through its pieces, moving only forward."""
+
+    def __init__(self, pieces: list[Piece]) -> None:
+        self._pieces = pieces
+        self._index = 0
+        self._offset = 0
+
+    def take(self, start: int, end: int) -> list[Piece]:
+        """Return the pieces that cover ``text[start:end]``; ranges must not go backwards."""
+        result: list[Piece] = []
+        while self._index < len(self._pieces):
+            length, source = self._pieces[self._index]
+            piece_end = self._offset + length
+            low, high = max(start, self._offset), min(end, piece_end)
+            if low < high:
+                result.append((high - low, source if source < 0 else source + low - self._offset))
+            if piece_end > end:
+                break
+            self._index += 1
+            self._offset = piece_end
+        return result
+
+
+def _redact_spans_tracked(
+    text: str, pieces: list[Piece], spans: list[tuple[int, int]]
+) -> tuple[str, list[Piece]]:
+    """Replace each span with the marker and carry the original position of each piece."""
+    parts: list[str] = []
+    result: list[Piece] = []
+    cursor = _PieceCursor(pieces)
     last = 0
-    for start, end in _secret_spans(text):
-        pieces.append(text[last:start])
+    for start, end in spans:
+        parts.append(text[last:start])
         # A header match consumes the byte-order marks at its line start; keep them.
         span = text[start:end]
-        pieces.append(span[: len(span) - len(span.lstrip("\ufeff"))])
-        pieces.append("[REDACTED]")
+        kept = len(span) - len(span.lstrip("\ufeff"))
+        parts.append(span[:kept])
+        result.extend(cursor.take(last, start + kept))
+        cursor.take(start + kept, end)
+        parts.append(_REDACTION_MARKER)
+        result.append((len(_REDACTION_MARKER), -1))
         last = end
-    pieces.append(text[last:])
-    return "".join(pieces)
+    parts.append(text[last:])
+    result.extend(cursor.take(last, len(text)))
+    return "".join(parts), result
+
+
+def _bound_tracked(text: str, pieces: list[Piece], bounded: str) -> list[Piece]:
+    """Return the pieces of a bounded text: a kept prefix of text, then inserted characters."""
+    if bounded == text:
+        return pieces
+    low, high = 0, min(len(text), len(bounded))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if text[:middle] == bounded[:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    result = _PieceCursor(pieces).take(0, low)
+    if len(bounded) > low:
+        result.append((len(bounded) - low, -1))
+    return result
+
+
+def _masked_ranges(pieces: list[Piece], structural: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return the ranges of the current text whose original characters a structural span covers.
+
+    One forward walk over the pieces and the sorted, merged structural spans, because the
+    original starts of the pieces increase. An inserted piece (a marker) that touches a
+    masked range joins it, so the range and that marker become one marker.
+    """
+    ranges: list[tuple[int, int]] = []
+    span_index = 0
+    offset = 0
+    for length, source in pieces:
+        if source >= 0:
+            while span_index < len(structural) and structural[span_index][1] <= source:
+                span_index += 1
+            index = span_index
+            while index < len(structural) and structural[index][0] < source + length:
+                low = max(structural[index][0], source) - source
+                high = min(structural[index][1], source + length) - source
+                ranges.append((offset + low, offset + high))
+                index += 1
+        offset += length
+    return _absorb_inserted(pieces, _merge_touching(ranges))
+
+
+def _merge_touching(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _inserted_ranges(pieces: list[Piece]) -> list[tuple[int, int]]:
+    """Return the ranges of the current text that a redaction or a bound inserted."""
+    ranges: list[tuple[int, int]] = []
+    offset = 0
+    for length, source in pieces:
+        if source < 0:
+            ranges.append((offset, offset + length))
+        offset += length
+    return ranges
+
+
+def _absorb_inserted(
+    pieces: list[Piece], ranges: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Join each masked range with the inserted ranges that touch it, directly or in a chain."""
+    if not ranges:
+        return ranges
+    tagged = [(start, end, True) for start, end in ranges]
+    tagged += [(start, end, False) for start, end in _inserted_ranges(pieces)]
+    groups: list[tuple[int, int, bool]] = []
+    for start, end, masked in sorted(tagged):
+        if groups and start <= groups[-1][1]:
+            group_start, group_end, group_masked = groups[-1]
+            groups[-1] = (group_start, max(group_end, end), group_masked or masked)
+        else:
+            groups.append((start, end, masked))
+    return [(start, end) for start, end, masked in groups if masked]
+
+
+def _mask_structural(text: str, pieces: list[Piece], structural: list[tuple[int, int]]) -> str:
+    """Replace each masked range of the current text with one redaction marker."""
+    parts: list[str] = []
+    last = 0
+    for start, end in _masked_ranges(pieces, structural):
+        parts.append(text[last:start])
+        parts.append(_REDACTION_MARKER)
+        last = end
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _redact_secret_spans(text: str) -> str:
+    """Replace each span that the base patterns redact with the redaction marker."""
+    redacted, _pieces = _redact_spans_tracked(text, [(len(text), 0)], _secret_spans(text))
+    return redacted
 
 
 # One substitution can expose a new assignment: a PEM block replaced by its marker
@@ -197,6 +490,25 @@ def _redact_secret_spans(text: str) -> str:
 # therefore redacted to a fixed point. The passes are bounded, so the cost stays
 # linear, and text that still changes after them is replaced whole.
 _SECRET_TEXT_PASSES = 4
+
+
+def _base_fixed_point(
+    text: str, bound: Callable[[str], str]
+) -> tuple[str, list[Piece]] | None:
+    """Run the base redaction and the bound to a fixed point, carrying original positions.
+
+    Returns None when the text still changes after the bounded passes.
+    """
+    current = text
+    pieces: list[Piece] = [(len(text), 0)] if text else []
+    for _ in range(_SECRET_TEXT_PASSES):
+        redacted, redacted_pieces = _redact_spans_tracked(current, pieces, _secret_spans(current))
+        bounded = bound(redacted)
+        bounded_pieces = _bound_tracked(redacted, redacted_pieces, bounded)
+        if bounded == current:
+            return current, pieces
+        current, pieces = bounded, bounded_pieces
+    return None
 
 
 def _redact_bounded(text: str, bound: Callable[[str], str]) -> str:
@@ -208,16 +520,25 @@ def _redact_bounded(text: str, bound: Callable[[str], str]) -> str:
     the bound. An nms-secret pointer that is the entire text is a reference, not secret
     material, so it is returned unchanged. Text still changing after the bounded
     passes is replaced whole.
+
+    The structural YAML rules (issue 428) are computed once on the original text and
+    applied after the base fixed point, to the characters of the original text that
+    the base pipeline kept. A structural span therefore never removes the start of a
+    construct that a later base pass would have redacted, so everything the base
+    pipeline redacts stays redacted. The result is then run to a fixed point again.
     """
     if NMS_SECRET_REFERENCE_RE.fullmatch(text):
         return text
-    current = text
-    for _ in range(_SECRET_TEXT_PASSES):
-        bounded = bound(_redact_secret_spans(current))
-        if bounded == current:
-            return current
-        current = bounded
-    return "[REDACTED]"
+    base = _base_fixed_point(text, bound)
+    if base is None:
+        return _REDACTION_MARKER
+    current, pieces = base
+    structural = _merge_spans(_sensitive_value_spans(text))
+    if not structural:
+        return current
+    masked = bound(_mask_structural(current, pieces, structural))
+    again = _base_fixed_point(masked, bound)
+    return _REDACTION_MARKER if again is None else again[0]
 
 
 def _redact_secret_text(text: str) -> str:

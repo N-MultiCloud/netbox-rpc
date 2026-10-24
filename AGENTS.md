@@ -327,13 +327,55 @@ mutation is forbidden because it can bypass family-specific persistence guards.
   (a number sign inside a name is part of the key; a comment needs blank space before it), a
   double- or single-quoted key with spaces, colons, or escapes, an explicit `? key` line with
   or without a trailing comment, anchor and tag properties before the indicator, and a run of
-  byte-order marks at a line start. `_redact_secret_spans` redacts the union of its matches and
-  those of `_SECRET_CONTENT_RE`, so no span the base pattern redacts can become clear. Layouts
-  not listed here, such as a colon inside a plain key, a property or key split across lines,
-  or a comment line between an explicit key and its value, still leave the body in clear text.
-  They are tracked as a follow-up. Every alternative is linear in the input length. The header
+  byte-order marks at a line start. Every alternative is linear in the input length. The header
   pattern uses possessive quantifiers for its prefixes (indentation, list markers, byte-order
   marks, and the optional explicit-key marker); keep both properties when editing it.
+- The lines after a sensitive YAML key line are redacted by a structural, fail-closed rule,
+  `_YAML_SENSITIVE_VALUE_RE`, that does not parse YAML and has no exclusions; it does not by
+  itself redact the key line. A key line names a secret before its first mapping colon (a colon
+  followed by blank space or a line break), inside a leading quoted key, or starts with a
+  double-quoted key that holds an escape (an escape can spell any word). Anchors and tags before
+  a key are skipped. An explicit key line (`?` with or without a key after it) counts unless it
+  is plainly resolved and not sensitive: one closed single-line key with no secret word, escape,
+  or property, directly followed by its `:` line at the same indentation. The final rule:
+  everything after such a key line is redacted to the end of the text, unless the mapping colon
+  is followed by a single-line scalar, that is a plain scalar (one that does not start with an
+  indicator, a quote, a property, an alias, or a flow opener) or a quoted scalar that closes on
+  the key line with only a comment after it. For a single-line scalar, only the following lines
+  that are blank, comments, or indented more than the key line are redacted, because a plain
+  scalar can continue only on deeper lines. So an empty value, properties, block indicators,
+  block sequences, flow collections, quotes left open, and every counted explicit key are
+  redacted to the end of the text. A key that starts with a quote is read only as a quoted key.
+  Two fail-closed tails are added independently (`_fail_closed_tails`, forward scans with linear
+  cost). Flow context: inside `[...]` or `{...}` a value is bounded neither by lines nor by
+  indentation, and a key need not be followed by blank space, so when the text holds a flow
+  opener (any `{` or `[` except the exact `[REDACTED]` marker), everything from the first secret
+  word, backslash, or explicit-key marker at or after the line of that opener is redacted to the
+  end of the text. Escaped keys: an escape in a double-quoted key can spell a secret word that
+  no pattern can see, so from the start of the first line where a backslash comes before the end
+  of a quoted mapping key (`"` then optional blank space and `:`), everything is redacted to the
+  end of the text. Composition: the structural rules are computed once on the original text and
+  applied after the base pipeline (`_SECRET_CONTENT_RE` and `_YAML_BLOCK_SCALAR_HEADER_RE`,
+  redacted to a fixed point) has finished, only to the characters of the original text that the
+  base pipeline kept, and the result is run to a fixed point again (`_redact_bounded`, with
+  `_base_fixed_point` tracking the original position of each kept piece). A structural rule can
+  therefore only remove more: it never removes the start of a construct that a later base pass
+  would have redacted, such as a `token="` prefix that a PEM redaction exposes. A structural
+  span that touches a base marker joins it. Over-redaction is by design: text after a sensitive
+  key whose value is not a single-line scalar is lost, including the text after a block scalar
+  body. Layouts that still leave a value in clear text (tracked in netbox-rpc issue 437): an
+  inline value on the key line when the base patterns cannot read the key, for example
+  `"password label": "value"`, and a value under an alias used as a mapping key (`*a : |` after
+  `name: &a password`), in block and flow context. A generated-layout test parses random
+  documents with PyYAML (block scalars, block sequences, nested mappings, flow collections,
+  multi-line quoted values and keys, properties, comment and blank lines, LF, CR LF, and bare
+  CR) and asserts that the value under the sensitive key never survives the persistence helpers.
+  The rule is linear: the candidate checks read only the key line (and the start of the next
+  line), each alternative is bounded by the line, the lines after the key are consumed
+  possessively with no later condition that can fail, and `finditer` resumes after them, so no
+  text is scanned twice. Keep these properties when editing it; do not add exclusions or
+  boundary heuristics, and do not add an alternative that can fail after a scan across lines,
+  because that makes the scan quadratic (for example 100,000 lines of `&password:`).
 - The approval row stores the ledger form of the normalized parameters (the redaction and the
   bounds the ledger applies), and the approval hash covers that form. The request-time hash, the
   lease-time check, and the projection therefore compare the same value.
