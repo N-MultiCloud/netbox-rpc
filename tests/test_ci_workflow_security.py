@@ -19,7 +19,6 @@ from yaml.tokens import (
     TagToken,
 )
 
-
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "ci.yml"
 INTEGRATION_WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "integration.yml"
@@ -81,18 +80,18 @@ EXPECTED_SOURCE_BUILD_LOCK = (
     "    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3\n"
 )
 EXPECTED_GITHUB_INSTALL_COMMANDS = (
-    "python -m pip install \\\n"
+    ("python -m pip install \\\n"
     "  --require-hashes \\\n"
     "  --only-binary=:all: \\\n"
     "  --no-cache-dir \\\n"
     "  --disable-pip-version-check \\\n"
-    "  -r plugin/.gitea/deploy/netbox-source-build.lock",
-    "python -m pip install \\\n"
+    "  -r plugin/.gitea/deploy/netbox-source-build.lock"),
+    ("python -m pip install \\\n"
     "  --require-hashes \\\n"
     "  --no-build-isolation \\\n"
     "  --no-cache-dir \\\n"
     "  --disable-pip-version-check \\\n"
-    '  -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"',
+    '  -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"'),
     "python -m pip install --no-deps --no-build-isolation -e ./plugin",
 )
 STEP_RUN_SHA256 = {
@@ -1723,14 +1722,14 @@ def test_exact_toolchain_accepts_and_prints_exact_identities(tmp_path: Path) -> 
     (
         (
             "jobs:\n  test:",
-            "jobs:\n"
+            ("jobs:\n"
             "  bypass:\n"
             "    name: Bypass\n"
             "    runs-on: ci-untrusted-python312\n"
             "    steps:\n"
             "      - name: Bypass\n"
             "        run: 'true'\n"
-            "  test:",
+            "  test:"),
         ),
         (
             "runs-on: ci-untrusted-python312",

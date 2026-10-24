@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 from .events import (
     ApprovalRequested,
@@ -177,6 +178,6 @@ def _coerce_datetime(value: Any) -> Any:
     if not isinstance(value, str) or not value:
         return value
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return value

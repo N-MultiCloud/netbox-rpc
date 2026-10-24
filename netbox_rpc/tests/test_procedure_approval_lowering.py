@@ -279,7 +279,7 @@ class ApprovalLoweringGuardTests(TestCase):
 
     def test_form_lock_path_refuses_a_stale_lowering_without_approve(self):
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"approval_required": False}
         with self.assertRaises(AbortRequest):
@@ -288,7 +288,7 @@ class ApprovalLoweringGuardTests(TestCase):
 
     def test_form_lock_path_allows_lowering_with_approve(self):
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.approver))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.approver)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"approval_required": False}
         # The approver may lower the flag, so the locked check raises nothing.

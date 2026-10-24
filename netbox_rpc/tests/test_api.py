@@ -9,8 +9,8 @@ from django.urls import reverse
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 
-from netbox_rpc.application import command_handlers
 from netbox_rpc.api.serializers import RPCExecutionSerializer
+from netbox_rpc.application import command_handlers
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 from netbox_rpc.models import RPCExecution, RPCProcedure
 

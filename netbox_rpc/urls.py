@@ -1,7 +1,7 @@
 from django.urls import include, path
 from utilities.urls import get_model_urls
 
-from . import views  # noqa: F401 — imports @register_model_view decorators
+from . import views
 
 _MODEL_ROUTES = (
     ("rpcbackend", "backends"),

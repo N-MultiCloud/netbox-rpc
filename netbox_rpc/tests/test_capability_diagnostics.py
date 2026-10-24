@@ -8,8 +8,8 @@ from rest_framework.test import APIClient
 
 from netbox_rpc.models import RPCBackend
 
-from .test_api import _grant
 from ._common import make_procedure
+from .test_api import _grant
 
 
 class BackendCapabilityDiagnosticsTests(TestCase):

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ def _plugin_setting(key: str, default: object | None = None) -> object | None:
 
     try:
         plugin_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable settings fall back to the default
         return default
     return (plugin_config.get("netbox_rpc") or {}).get(key, default)
 
@@ -80,9 +81,9 @@ def _resolve_local_backend(pk: object) -> BackendTarget | None:
 
 def _adapt_backend(backend: object) -> BackendTarget:
     return BackendTarget(
-        url=str(getattr(backend, "backend_url")),
+        url=str(backend.backend_url),
         headers=dict(backend.get_auth_headers()),
-        verify_ssl=bool(getattr(backend, "verify_ssl")),
+        verify_ssl=bool(backend.verify_ssl),
     )
 
 

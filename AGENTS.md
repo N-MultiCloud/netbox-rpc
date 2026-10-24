@@ -2305,6 +2305,14 @@ pending approval or distinct-actor check.
 
 ## CI / Testing
 
+- **Lint gate.** The GitHub unit job runs `ruff check --config ruff.toml netbox_rpc tests`
+  with ruff pinned to 0.16.2. The rule set is ruff's default set for that release plus
+  the whole classic gate and pylint error checks (`E4`, `E7`, `E9`, `F`, `PLE`), minus the
+  rules that `ruff.toml` excludes, each with its reason (`RUF012`, `SIM102`, `SIM117`,
+  `TRY004`). Applied migrations waive only `I001` and `RUF100`, so their text stays
+  stable. A deliberate broad `except Exception` carries `# noqa: BLE001` with its reason.
+  A ruff upgrade is a reviewed change, because the default set changes between releases.
+
 > **The pure-domain tier is blind to every database constraint.** Seed-migration tests
 > here drive fake managers (plain dicts), so they enforce no column width, no NOT NULL,
 > no uniqueness, and no FK integrity. A seeded value that violates one passes locally

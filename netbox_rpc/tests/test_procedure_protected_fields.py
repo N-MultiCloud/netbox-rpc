@@ -262,7 +262,7 @@ class ProtectedProcedureFieldTests(TestCase):
 
     def _bound_form(self, user, data):
         instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=user))
+        instance._netbox_rpc_request = SimpleNamespace(user=user)
         return RPCProcedureForm(data=data, instance=instance)
 
     def test_form_refuses_each_change_without_approve(self):
@@ -320,7 +320,7 @@ class ProtectedProcedureFieldTests(TestCase):
         ):
             with self.subTest(field):
                 stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-                setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+                stale._netbox_rpc_request = SimpleNamespace(user=self.editor)
                 form = RPCProcedureForm(instance=stale)
                 form.cleaned_data = {field: value}
                 with self.assertRaises(AbortRequest):
@@ -329,7 +329,7 @@ class ProtectedProcedureFieldTests(TestCase):
 
     def test_form_lock_path_allows_a_change_with_approve(self):
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.approver))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.approver)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"effect": "read", "enabled": True, "transport_driver": "ansible"}
         form._refuse_unpin_under_lock()
@@ -395,7 +395,7 @@ class TypeExactChangeTests(TestCase):
                 self._set_schema(stored)
                 for user, refused in ((self.editor, True), (self.approver, False)):
                     instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-                    setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=user))
+                    instance._netbox_rpc_request = SimpleNamespace(user=user)
                     form = RPCProcedureForm(instance=instance)
                     form.cleaned_data = {"params_schema": requested}
                     if refused:
@@ -410,7 +410,7 @@ class TypeExactChangeTests(TestCase):
             transport_driver_chain=["ansible", "asyncssh"]
         )
         instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        instance._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=instance)
         form.cleaned_data = {"transport_driver_chain": ("ansible", "asyncssh")}
         form._refuse_unpin_under_lock()
@@ -509,14 +509,14 @@ class ApprovalScopeAttributeTests(TestCase):
         from extras.models import Tag
 
         instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        instance._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=instance)
         form.cleaned_data = {"tags": Tag.objects.filter(pk=self.tag.pk)}
         with self.assertRaises(AbortRequest):
             form._refuse_unpin_under_lock()
         assert self._tag_slugs() == []
         approver_instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(approver_instance, "_netbox_rpc_request", SimpleNamespace(user=self.approver))
+        approver_instance._netbox_rpc_request = SimpleNamespace(user=self.approver)
         form = RPCProcedureForm(instance=approver_instance)
         form.cleaned_data = {"tags": Tag.objects.filter(pk=self.tag.pk)}
         form._refuse_unpin_under_lock()
@@ -537,7 +537,7 @@ class ApprovalScopeAttributeTests(TestCase):
             "",
         )
         instance = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        instance._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=instance)
         form.cleaned_data = {}
         instance.custom_field_data = {**instance.custom_field_data, "rpc_scope": "approvers"}
@@ -560,7 +560,7 @@ class FormOmittedFieldTests(TestCase):
         editor = make_user("omitted-editor", superuser=False)
         _grant(editor, ["view", "change"])
         stale = RPCProcedure.objects.get(pk=procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=editor))
+        stale._netbox_rpc_request = SimpleNamespace(user=editor)
         # An approver tightens the schema after this form read the row.
         tightened = {"type": "object", "additionalProperties": False}
         RPCProcedure.objects.filter(pk=procedure.pk).update(params_schema=tightened)
@@ -635,7 +635,7 @@ class ApprovalScopeGainTests(TestCase):
     def test_form_save_that_gains_approve_scope_is_refused_and_rolled_back(self):
         editor = self._editor("scopegain-form", {"description": "approval-scope"})
         instance = self._row()
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=editor))
+        instance._netbox_rpc_request = SimpleNamespace(user=editor)
         form = RPCProcedureForm(instance=instance)
         form.cleaned_data = {"description": "approval-scope"}
         instance.description = "approval-scope"
@@ -691,7 +691,7 @@ class CrossProcedureScopeGainTests(TestCase):
 
     def test_form_save_that_gains_scope_on_another_procedure_is_refused(self):
         instance = RPCProcedure.objects.get(pk=self.first.pk)
-        setattr(instance, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        instance._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=instance)
         form.cleaned_data = {"description": "approval-scope"}
         instance.description = "approval-scope"

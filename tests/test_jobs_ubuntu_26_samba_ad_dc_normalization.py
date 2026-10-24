@@ -21,7 +21,7 @@ import importlib
 import json
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -102,7 +102,7 @@ def jobs_module(monkeypatch: pytest.MonkeyPatch):
 
 
 SSH_IDENTITY_ID = 900
-REVISION = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+REVISION = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
 
 def _fake_ssh(
@@ -499,9 +499,8 @@ def test_admin_credential_revision_drift_changes_the_payload(
     jobs_module, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
-    global REVISION
     monkeypatch.setattr(
-        sys.modules[__name__], "REVISION", datetime(2026, 9, 2, tzinfo=timezone.utc)
+        sys.modules[__name__], "REVISION", datetime(2026, 9, 2, tzinfo=UTC)
     )
     after = _normalize(jobs_module, PROVISION, dict(LIVE_PARAMS))
     assert after["admin_credential_snapshot"] != before["admin_credential_snapshot"]

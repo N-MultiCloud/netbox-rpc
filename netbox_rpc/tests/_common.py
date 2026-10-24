@@ -91,14 +91,14 @@ def make_intent(
 def make_backend(
     name: str = "rpc-test-backend",
     base_url: str = "http://rpc-backend.test:16005",
-) -> "models.RPCBackend":
+) -> models.RPCBackend:
     backend, _ = models.RPCBackend.objects.get_or_create(
         name=name, defaults={"base_url": base_url}
     )
     return backend
 
 
-def enable_rpc_integration(*, backend=None) -> "models.RpcPluginSettings":
+def enable_rpc_integration(*, backend=None) -> models.RpcPluginSettings:
     """Opt the netbox-rpc integration in for tests that exercise create/run.
 
     #166 makes ``RpcPluginSettings.enabled`` + the selected backend

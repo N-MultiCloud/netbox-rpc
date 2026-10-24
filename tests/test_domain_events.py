@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def _install_netbox_stub() -> None:
@@ -37,8 +37,7 @@ from netbox_rpc.domain.events import (  # noqa: E402
     from_record,
 )
 
-
-NOW = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+NOW = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
 
 
 def test_event_registry_contains_every_transition_type() -> None:

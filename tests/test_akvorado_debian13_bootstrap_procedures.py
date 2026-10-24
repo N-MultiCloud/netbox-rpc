@@ -66,7 +66,7 @@ def test_install_contract_accepts_openbao_ssh_snapshot() -> None:
 
 
 class _ProcedureQuery:
-    def __init__(self, manager: "_ProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _ProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 
@@ -97,7 +97,7 @@ class _ProcedureManager:
 
 
 class _CommandQuery:
-    def __init__(self, manager: "_CommandManager", procedure_name: str) -> None:
+    def __init__(self, manager: _CommandManager, procedure_name: str) -> None:
         self.manager = manager
         self.procedure_name = procedure_name
 

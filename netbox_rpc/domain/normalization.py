@@ -7,7 +7,7 @@ import json
 import posixpath
 import re
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address, ip_network
 from itertools import islice
 from pathlib import PurePosixPath
@@ -17,10 +17,14 @@ from urllib.parse import urlparse
 import jsonschema
 import yaml
 
-from .. import gitea_docker_runner_contract, gitea_org_docker_runner_recovery_contract
-from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
-from .. import gitea_protected_publication_pair_contract
-from .. import samba_ad_dc_contract, iam_ui_contract
+from .. import (
+    gitea_docker_runner_contract,
+    gitea_org_ci_runner_contract,
+    gitea_org_docker_runner_recovery_contract,
+    gitea_protected_publication_pair_contract,
+    iam_ui_contract,
+    samba_ad_dc_contract,
+)
 from ..command_templating import RENDER_JINJA
 from ..constants import (
     AKVORADO_1_CONFIG_DEPLOY,
@@ -47,8 +51,8 @@ from ..constants import (
     GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_ORG_CI_RUNNER_PROVISION,
     GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
-    GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
     GITEA_PRODUCTION_UPGRADE_1_27_1,
+    GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
     GITEA_RUNNER_REGISTER,
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
     HUAWEI_MA5800_R024_START_ONT,
@@ -83,12 +87,10 @@ from ..constants import (
     MINECRAFT_VIAVERSION_INSTALL,
     NETBOX_OPENBAO_IMPORT_APPLY,
     NETBOX_OPENBAO_IMPORT_DRY_RUN,
-    NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES,
     NETBOX_PLUGIN_INSTALL,
+    NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES,
     NETBOX_STAGING_DEPLOY_DNS_PAIR,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
-    PBS_1_DATASTORE_FROM_DISK,
-    PBS_1_PROCEDURE_NAMES,
     NGINX_1_CONFIG_DEPLOY,
     NGINX_1_CONFIG_TEST,
     NGINX_1_RELOAD,
@@ -104,6 +106,10 @@ from ..constants import (
     PASSBOLT_IMPORT_SECRETS,
     PASSBOLT_PROCEDURE_NAMES,
     PASSBOLT_TRANSFER_SECRETS,
+    PBS_1_DATASTORE_FROM_DISK,
+    PBS_1_PROCEDURE_NAMES,
+    PROXBOX_API_RELEASE_IMAGES_INSPECT,
+    PROXBOX_API_RELEASE_IMAGES_RECOVER,
     PTERODACTYL_ARTISAN,
     PTERODACTYL_BOOTSTRAP_API_KEY,
     PTERODACTYL_CONTAINER_LOGS,
@@ -113,8 +119,6 @@ from ..constants import (
     RPC_TARGET_BINDING_SLUG_NMULTICLOUD_DEPLOY_HOST,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_PRODUCTION,
     RPC_TARGET_BINDING_SLUG_OPENBAO_IMPORT_STAGING,
-    PROXBOX_API_RELEASE_IMAGES_INSPECT,
-    PROXBOX_API_RELEASE_IMAGES_RECOVER,
     SAMBA_1_CONFIG_DEPLOY,
     SAMBA_1_CONFIG_ROLLBACK,
     SAMBA_1_GROUP_ADD_MEMBERS,
@@ -718,7 +722,7 @@ def _netbox_rpc_plugin_setting(key: str, default: str) -> str:
         return default
     try:
         plugin_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable settings fall back to the default
         return default
     value = (plugin_config.get("netbox_rpc") or {}).get(key, default)
     return str(value or default)
@@ -3805,8 +3809,7 @@ def _iter_samba_config_assignments(content: str):
         stripped = raw_line.strip()
         if (
             not stripped
-            or stripped.startswith(("#", ";"))
-            or stripped.startswith("[")
+            or stripped.startswith(("#", ";", "["))
             or "=" not in raw_line
         ):
             continue
@@ -6672,7 +6675,7 @@ def _rpc_target_binding_revision(binding: object, slug: str) -> str:
     try:
         if revision.tzinfo is None or revision.utcoffset() is None:
             raise ValueError("naive revision")
-        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace(
+        rendered = str(revision.astimezone(UTC).isoformat()).replace(
             "+00:00", "Z"
         )
     except (AttributeError, ValueError, OverflowError) as exc:
@@ -7408,12 +7411,12 @@ def validate_gitea_runner_target(
     return {
         "target": contract.RUNNER_TARGET_NAME,
         "target_object": dict(contract.RUNNER_TARGET_OBJECT),
-        "runner_cluster_id": getattr(relation_values["cluster"], "pk"),
-        "runner_node_id": getattr(relation_values["device"], "pk"),
-        "runner_node": getattr(relation_values["device"], "name"),
+        "runner_cluster_id": getattr(relation_values["cluster"], "pk"),  # noqa: B009 - function kept AST-identical (complexity 27)
+        "runner_node_id": getattr(relation_values["device"], "pk"),  # noqa: B009 - function kept AST-identical (complexity 27)
+        "runner_node": getattr(relation_values["device"], "name"),  # noqa: B009 - function kept AST-identical (complexity 27)
         "runner_proxmox_vmid": proxmox_vmid,
-        "runner_tenant_id": getattr(relation_values["tenant"], "pk"),
-        "runner_role_id": getattr(relation_values["role"], "pk"),
+        "runner_tenant_id": getattr(relation_values["tenant"], "pk"),  # noqa: B009 - function kept AST-identical (complexity 27)
+        "runner_role_id": getattr(relation_values["role"], "pk"),  # noqa: B009 - function kept AST-identical (complexity 27)
         "runner_vcpus": vcpus,
         "runner_memory_mib": memory,
         "runner_disk_mib": disk,
@@ -7791,7 +7794,7 @@ def _gitea_runner_fence_is_quiescent(
         and isinstance(last_updated, datetime)
         and last_updated.tzinfo is not None
         and last_updated
-        <= datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
+        <= datetime.now(UTC) - timedelta(seconds=delay_seconds)
     )
 
 
@@ -8110,8 +8113,8 @@ def validate_gitea_upgrade_target(
         "target": contract.TARGET_NAME,
         "target_object": dict(contract.TARGET_OBJECT),
         "vmid": vmid,
-        "cluster_id": getattr(cluster, "pk"),
-        "node": getattr(node, "name"),
+        "cluster_id": cluster.pk,
+        "node": node.name,
         "ipv4": str(ipv4),
     }
 
@@ -8409,7 +8412,7 @@ def _model_revision(value: object, label: str) -> str:
     try:
         if revision.tzinfo is None or revision.utcoffset() is None:
             raise ValueError("naive revision")
-        rendered = str(revision.astimezone(timezone.utc).isoformat()).replace(
+        rendered = str(revision.astimezone(UTC).isoformat()).replace(
             "+00:00", "Z"
         )
     except (AttributeError, ValueError, OverflowError) as exc:

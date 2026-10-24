@@ -15,7 +15,6 @@ from unittest.mock import MagicMock
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError, validate
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0087_extend_gitea_org_ci_runner_contract"
 PROCEDURE_ID = "service.gitea.actions_runner.provision_org_ci_runner"
@@ -731,7 +730,7 @@ def _apps(procedures, commands):
 
 
 class _ProcedureQuery:
-    def __init__(self, manager: "_FakeProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _FakeProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 

@@ -1,0 +1,43 @@
+# Lint configuration for the CI lint gate (the GitHub unit job runs `ruff check`
+# with this file and ruff pinned to 0.16.2).
+#
+# The rule set is ruff's default set for the pinned release. A ruff upgrade is a
+# reviewed change: the default set changes between releases, so an upgrade must
+# re-triage the new findings here.
+
+# Matches requires-python in pyproject.toml, so the result does not depend on whether
+# ruff reads pyproject.toml (it does not when the CI job passes --config).
+target-version = "py312"
+
+[lint]
+# The previous explicit CI selection enforced the whole classic gate (E4, E7, E9, F)
+# and every pylint error check (PLE). The default set leaves some of them out (most of
+# E4 and E7, the F403/F405/F406/F722 star-import and annotation checks, and a few
+# PLE checks), so they are selected again here and the gate never narrows.
+extend-select = ["E4", "E7", "E9", "F", "PLE"]
+
+# Each excluded rule, with the reason. Every other default rule is enforced.
+ignore = [
+    # RUF012 (mutable class default): almost every finding is a Django or NetBox
+    # declarative class attribute (Meta.fields, PluginConfig settings, serializer
+    # and form options, filterset declarations, test fixtures) that a metaclass or
+    # the framework reads and never mutates per instance. Annotating each one with
+    # ClassVar adds noise without catching a defect.
+    "RUF012",
+    # SIM102 (collapsible if) and SIM117 (nested with): style only. The nested
+    # form often mirrors a separate setup scope, such as one patch per context,
+    # and merging it does not change behaviour.
+    "SIM102",
+    "SIM117",
+    # TRY004 (raise TypeError for a type check): the two findings raise RuntimeError
+    # on purpose: an applied migration refuses an unexpected catalog shape, and a
+    # test injects a failure into the event append. Changing the exception type
+    # would change an applied migration and what the test simulates.
+    "TRY004",
+]
+
+[lint.per-file-ignores]
+# Applied migrations are kept byte-stable, so only rules that change neither their
+# behaviour nor their text are waived there: import order (I001) and noqa comments
+# for rules the default set does not select (RUF100). Every other rule applies.
+"netbox_rpc/migrations/*.py" = ["I001", "RUF100"]

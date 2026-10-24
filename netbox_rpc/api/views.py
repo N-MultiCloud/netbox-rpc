@@ -14,7 +14,6 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import filtersets, models
-from ..current_access import lock_procedure_scope
 from ..application.command_handlers import (
     approve_execution,
     cancel_execution,
@@ -27,19 +26,20 @@ from ..constants import (
     EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES,
     NETBOX_STAGING_ROTATE_BACKEND_TOKEN,
 )
+from ..current_access import lock_procedure_scope
 from ..domain.normalization import code_gate_unavailable_reason
 from .serializers import (
     RPCBackendSerializer,
+    RPCExecutionEventSerializer,
+    RPCExecutionSerializer,
     RPCIntentRunSerializer,
     RPCIntentSerializer,
     RPCLinuxServiceAllowlistSerializer,
     RPCNetBoxPluginAllowlistSerializer,
-    RPCExecutionEventSerializer,
-    RPCExecutionSerializer,
+    RpcPluginSettingsSerializer,
     RPCProcedureCommandSerializer,
     RPCProcedureSerializer,
     RPCTargetBindingSerializer,
-    RpcPluginSettingsSerializer,
 )
 
 
@@ -83,7 +83,10 @@ class RPCBackendViewSet(NetBoxModelViewSet):
 
         from ..backends import _adapt_backend
         from ..capabilities import fetch_backend_capabilities
-        from ..capability_diagnostics import MAX_CATALOG_PROCEDURES, project_capabilities
+        from ..capability_diagnostics import (
+            MAX_CATALOG_PROCEDURES,
+            project_capabilities,
+        )
 
         procedures = list(
             models.RPCProcedure.objects.restrict(user, "view")
@@ -92,7 +95,7 @@ class RPCBackendViewSet(NetBoxModelViewSet):
         try:
             manifest = fetch_backend_capabilities(_adapt_backend(backend), use_cache=False)
             projection = project_capabilities(int(backend.pk), procedures, manifest)
-        except Exception:
+        except Exception:  # noqa: BLE001 - diagnostics fail closed with a fixed message
             return Response(
                 {"detail": "Capability diagnostics are unavailable."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,

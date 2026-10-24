@@ -11,12 +11,19 @@ from unittest import mock
 
 from django.test import TestCase
 
-from netbox_rpc import event_store
+from netbox_rpc import event_store, jobs
 from netbox_rpc import staging_rotation_contract as contract
-from netbox_rpc import jobs
 from netbox_rpc.application import command_handlers
-from netbox_rpc.domain.normalization import RPCExecutionError, _apply_target_object_context
-from netbox_rpc.models import RPCBackend, RPCExecution, RPCProcedure, RPCProcedureCommand
+from netbox_rpc.domain.normalization import (
+    RPCExecutionError,
+    _apply_target_object_context,
+)
+from netbox_rpc.models import (
+    RPCBackend,
+    RPCExecution,
+    RPCProcedure,
+    RPCProcedureCommand,
+)
 
 from ._common import make_device, make_execution, make_user
 from .test_credential_protected_dispatch import ProtectedCredentialDispatchFixture

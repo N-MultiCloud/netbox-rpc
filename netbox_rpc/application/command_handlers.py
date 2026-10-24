@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jsonschema
@@ -17,17 +17,17 @@ from .. import akvorado_bootstrap_contract as akvorado_contract
 from .. import dns_staging_deploy_contract as dns_staging_contract
 from .. import (
     gitea_docker_runner_contract,
+    gitea_org_ci_runner_contract,
     gitea_org_docker_runner_recovery_contract,
-    netbox_rq_worker_contract,
+    gitea_runner_contract,
     iam_ui_contract,
+    netbox_rq_worker_contract,
     openbao_import_contract,
     proxbox_api_release_images_contract,
     proxmox_oci_pull_contract,
     release_marker_contract,
 )
-from .. import gitea_org_ci_runner_contract as gitea_org_ci_runner_contract
 from .. import gitea_protected_publication_pair_contract as publication_pair_contract
-from .. import gitea_runner_contract as gitea_runner_contract
 from .. import gitea_upgrade_contract as gitea_contract
 from .. import staging_rotation_contract as staging_contract
 from ..backends import resolve_backend
@@ -1713,7 +1713,7 @@ def _gitea_runner_fence_is_quiescent(
         and isinstance(last_updated, datetime)
         and last_updated.tzinfo is not None
         and last_updated
-        <= datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
+        <= datetime.now(UTC) - timedelta(seconds=delay_seconds)
     )
 
 

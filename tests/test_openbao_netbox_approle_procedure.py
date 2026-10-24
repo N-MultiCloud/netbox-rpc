@@ -317,7 +317,7 @@ def _model_lookup(app_label: str, model_name: str):
 
 
 class _FakeQuerySet:
-    def __init__(self, manager: "_FakeProcedureManager", name: str) -> None:
+    def __init__(self, manager: _FakeProcedureManager, name: str) -> None:
         self.manager = manager
         self.name = name
 

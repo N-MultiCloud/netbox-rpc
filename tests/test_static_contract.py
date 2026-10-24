@@ -1118,8 +1118,8 @@ def test_plugin_and_migrations_support_netbox_4_5_8_through_4_7() -> None:
             "Provision a UTF8 compatibility database",
             "NETBOX_REDIS_DB_TASKS",
             *STABLE_NETBOX_TOKENS,
-            "if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
-            "github.ref == 'refs/heads/main' }}",
+            ("if: ${{ github.repository == 'N-MultiCloud/netbox-rpc' && "
+            "github.ref == 'refs/heads/main' }}"),
         ),
     )
     assert_excludes(compatibility_job, (HELD_NETBOX_DESIGNATION, "soft-skip"))

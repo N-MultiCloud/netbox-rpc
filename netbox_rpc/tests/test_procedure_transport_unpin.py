@@ -6,11 +6,10 @@ from types import SimpleNamespace
 
 from django.test import TestCase
 from django.urls import reverse
+from extras.models import Tag
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
 from utilities.exceptions import AbortRequest
-
-from extras.models import Tag
 
 from netbox_rpc.api.serializers import RPCProcedureSerializer
 from netbox_rpc.forms import RPCProcedureForm
@@ -197,7 +196,7 @@ class TransportUnpinGuardTests(TestCase):
         assert created.transport_pinned is False
 
     def _bound_form(self, user, data):
-        setattr(self.procedure, "_netbox_rpc_request", SimpleNamespace(user=user))
+        self.procedure._netbox_rpc_request = SimpleNamespace(user=user)
         return RPCProcedureForm(data=data, instance=self.procedure)
 
     def _minimal_data(self):
@@ -267,7 +266,7 @@ class TransportUnpinGuardTests(TestCase):
         RPCProcedure.objects.filter(pk=self.procedure.pk).update(transport_pinned=False)
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
         RPCProcedure.objects.filter(pk=self.procedure.pk).update(transport_pinned=True)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.editor))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.editor)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"transport_pinned": False}
         with self.assertRaises(AbortRequest):
@@ -279,7 +278,7 @@ class TransportUnpinGuardTests(TestCase):
         RPCProcedure.objects.filter(pk=self.procedure.pk).update(transport_pinned=False)
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
         RPCProcedure.objects.filter(pk=self.procedure.pk).update(transport_pinned=True)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.approver))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.approver)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"transport_pinned": False}
         # The approver may un-pin, so the locked check raises nothing.
@@ -317,7 +316,7 @@ class TransportUnpinGuardTests(TestCase):
             constraints={"tags__slug": "pin-approvers"},
         )
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=self.tagged))
+        stale._netbox_rpc_request = SimpleNamespace(user=self.tagged)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"transport_pinned": False}
         # While the tag qualifies the user, the un-pin is allowed.
@@ -368,7 +367,7 @@ class TransportUnpinGuardTests(TestCase):
         revocable = make_user("unpin-revoked-form", superuser=False)
         grant = _grant(revocable, ["view", "change", "approve"])
         stale = RPCProcedure.objects.get(pk=self.procedure.pk)
-        setattr(stale, "_netbox_rpc_request", SimpleNamespace(user=revocable))
+        stale._netbox_rpc_request = SimpleNamespace(user=revocable)
         form = RPCProcedureForm(instance=stale)
         form.cleaned_data = {"transport_pinned": False}
         # While the grant is in force, the un-pin is allowed.

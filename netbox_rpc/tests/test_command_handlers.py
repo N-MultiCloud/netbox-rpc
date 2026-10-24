@@ -6,7 +6,7 @@ from __future__ import annotations
 from unittest import mock
 
 from django.test import TestCase
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from netbox_rpc.application import command_handlers
 from netbox_rpc.backends import BackendTarget
@@ -64,7 +64,7 @@ class RunExecutionTests(TestCase):
     @mock.patch.object(command_handlers, "resolve_backend", return_value=None)
     def test_run_no_backend_fails(self, _resolve):
         ex = _queued()
-        with self.assertRaises(Exception):
+        with self.assertRaises(RPCExecutionError):
             command_handlers.run_execution(ex)
         ex.refresh_from_db()
         assert ex.status == RPCExecution.STATUS_FAILED
@@ -284,5 +284,5 @@ class CancelAndRaceTests(TestCase):
     def test_cancel_requires_permission(self):
         ex = _queued()
         user = make_user("nopriv", superuser=False)
-        with self.assertRaises(Exception):
+        with self.assertRaises(PermissionDenied):
             command_handlers.cancel_execution(ex, user)

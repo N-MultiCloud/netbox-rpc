@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 PROCEDURE_NAME = "network.device.huawei.router.ne8000.f1a.show_bgp_peer"
 HANDLER_ID = "network.huawei_ne8000_f1a.show_bgp_peer"
 

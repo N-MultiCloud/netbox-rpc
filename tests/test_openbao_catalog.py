@@ -468,7 +468,7 @@ def test_provision_approle_normalizer_refuses_values_that_reach_a_command(
         {"restart_netbox": "yes"},
         {"mount": "netbox\nid"},
     ):
-        with pytest.raises(Exception):
+        with pytest.raises(jobs_module.RPCExecutionError):
             jobs_module.normalize_execution_params(execution(**override))
 
 
@@ -542,7 +542,7 @@ def test_openbao_normalizer_rejects_virtual_machine_target(jobs_module) -> None:
 
 
 class _FakeProcedure:
-    def __init__(self, manager: "_ProcedureManager", name: str) -> None:
+    def __init__(self, manager: _ProcedureManager, name: str) -> None:
         self.manager = manager
         self.name = name
 
@@ -552,7 +552,7 @@ class _FakeProcedure:
 
 
 class _ProcedureQuery:
-    def __init__(self, manager: "_ProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _ProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 
@@ -605,7 +605,7 @@ class _CommandManager:
 
 
 class _AllowlistQuery:
-    def __init__(self, manager: "_AllowlistManager", slug: str) -> None:
+    def __init__(self, manager: _AllowlistManager, slug: str) -> None:
         self.manager = manager
         self.slug = slug
 

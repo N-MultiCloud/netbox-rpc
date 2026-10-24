@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import Draft202012Validator, ValidationError, validate
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_MODULE = "netbox_rpc.migrations.0073_seed_gitea_production_upgrade_1271"
 PROCEDURE_ID = "service.gitea.production.upgrade_1_27_1"

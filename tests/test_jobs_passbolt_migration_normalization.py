@@ -320,7 +320,7 @@ class _FakeProcedure:
 
 class _ProcedureQuery:
     def __init__(
-        self, manager: "_FakeProcedureManager", *, names=None, handler_ids=None
+        self, manager: _FakeProcedureManager, *, names=None, handler_ids=None
     ) -> None:
         self.manager = manager
         self.names = set(names or [])
@@ -359,7 +359,7 @@ class _FakeProcedureManager:
 
 class _FakeCommandQuery:
     def __init__(
-        self, manager: "_FakeCommandManager", procedures: list[_FakeProcedure]
+        self, manager: _FakeCommandManager, procedures: list[_FakeProcedure]
     ) -> None:
         self.manager = manager
         self.procedures = procedures

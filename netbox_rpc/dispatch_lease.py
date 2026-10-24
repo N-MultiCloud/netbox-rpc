@@ -163,7 +163,7 @@ class LeaseVerification(BaseModel):
 
 
 class _SigningKey:
-    __slots__ = ("key_id", "key_version", "_private_key")
+    __slots__ = ("_private_key", "key_id", "key_version")
 
     def __init__(self, key_id: str, key_version: int, private_key: Any) -> None:
         self.key_id = key_id
@@ -179,15 +179,15 @@ class _SigningKey:
 
 def _load_ed25519_private_key(pem: str) -> Any | None:
     try:
-        from cryptography.hazmat.primitives.serialization import (
-            load_pem_private_key,
-        )
         from cryptography.hazmat.primitives.asymmetric.ed25519 import (
             Ed25519PrivateKey,
         )
+        from cryptography.hazmat.primitives.serialization import (
+            load_pem_private_key,
+        )
 
         key = load_pem_private_key(pem.encode("utf-8"), password=None)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any key-loading error means no signing key
         return None
     return key if isinstance(key, Ed25519PrivateKey) else None
 
@@ -206,7 +206,7 @@ def _load_ed25519_public_key(material: str) -> Any | None:
             return key if isinstance(key, Ed25519PublicKey) else None
         raw = base64.b64decode(text, validate=True)
         return Ed25519PublicKey.from_public_bytes(raw)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any key-decoding error means no verifier key
         return None
 
 
@@ -215,7 +215,7 @@ def _plugin_setting(name: str, default: Any = None) -> Any:
         from django.conf import settings
 
         return settings.PLUGINS_CONFIG.get(_PLUGIN_NAME, {}).get(name, default)
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable settings fall back to the default
         return default
 
 
@@ -635,7 +635,7 @@ def verify_dispatch_lease(
         return _invalid("malformed signature encoding")
     try:
         public_key.verify(signature, claims.canonical_bytes())
-    except Exception:
+    except Exception:  # noqa: BLE001 - any verification error rejects the lease
         return _invalid("signature verification failed")
 
     if claims.audience != audience:
@@ -716,6 +716,6 @@ def _parse_iso(value: str) -> Any | None:
     try:
         from datetime import datetime
 
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None

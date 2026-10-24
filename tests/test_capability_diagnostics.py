@@ -7,7 +7,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from test_capability_route import _load_capabilities
 
 
@@ -28,7 +27,12 @@ def _setup(monkeypatch):
 ])
 def test_comparison_matches_authoritative_verifier(monkeypatch, change, reason):
     capabilities, diagnostics, procedure = _setup(monkeypatch)
-    identity = dict(handler_id=procedure.handler_id, version=1, effect="read", contract_hash="a" * 64)
+    identity = {
+        "handler_id": procedure.handler_id,
+        "version": 1,
+        "effect": "read",
+        "contract_hash": "a" * 64,
+    }
     identity.update(change)
     manifest = capabilities.BackendCapabilityManifest(envelope_version=1, handlers=[identity])
     entry = diagnostics.project_capabilities(1, [procedure], manifest)["procedures"][0]
@@ -55,8 +59,13 @@ def test_unknown_manifest_is_explicit(monkeypatch):
 def test_secrets_and_unknown_handlers_are_never_projected(monkeypatch):
     capabilities, diagnostics, procedure = _setup(monkeypatch)
     manifest = capabilities.BackendCapabilityManifest(envelope_version=1, handlers=[
-        dict(handler_id=procedure.handler_id, version=1, effect="read", contract_hash="Bearer private-secret"),
-        dict(handler_id="private-secret", version=1, effect="read", contract_hash="a" * 64),
+        {
+            "handler_id": procedure.handler_id,
+            "version": 1,
+            "effect": "read",
+            "contract_hash": "Bearer private-secret",
+        },
+        {"handler_id": "private-secret", "version": 1, "effect": "read", "contract_hash": "a" * 64},
     ], authorization="private-secret", build_version="private-secret")
     result = diagnostics.project_capabilities(1, [procedure], manifest)
     assert "private-secret" not in json.dumps(result)

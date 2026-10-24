@@ -1,10 +1,10 @@
 from typing import Protocol, cast
 
+from dcim.models import Device
 from django import forms
 from django.db import transaction
-from dcim.models import Device
 from ipam.models import IPAddress
-from netbox.forms import NetBoxModelForm, NetBoxModelFilterSetForm
+from netbox.forms import NetBoxModelFilterSetForm, NetBoxModelForm
 from utilities.exceptions import AbortRequest
 from utilities.forms.fields import (
     CommentField,
@@ -19,13 +19,6 @@ from .current_access import (
     refuse_approval_scope_gain,
     reload_requesting_user,
 )
-from .transport import (
-    PROTECTED_PROCEDURE_FIELDS,
-    RELATION_PROTECTED_FIELDS,
-    may_approve_procedure,
-    protected_field_refusals,
-    protected_field_snapshot,
-)
 from .models import (
     RPCBackend,
     RPCExecution,
@@ -34,10 +27,17 @@ from .models import (
     RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
     RPCNetBoxPluginAllowlist,
+    RpcPluginSettings,
     RPCProcedure,
     RPCProcedureCommand,
     RPCTargetBinding,
-    RpcPluginSettings,
+)
+from .transport import (
+    PROTECTED_PROCEDURE_FIELDS,
+    RELATION_PROTECTED_FIELDS,
+    may_approve_procedure,
+    protected_field_refusals,
+    protected_field_snapshot,
 )
 
 REQUEST_ATTR = "_netbox_rpc_request"

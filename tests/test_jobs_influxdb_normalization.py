@@ -367,7 +367,7 @@ class _FakeProcedure:
 
 
 class _ProcedureQuery:
-    def __init__(self, manager: "_FakeProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _FakeProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 

@@ -42,7 +42,7 @@ _MAX_HANDLERS = 2000
 # Cache the parsed manifest per backend URL for a short TTL to avoid a fetch on
 # every create/claim while still reflecting drift promptly.
 _CACHE_TTL_SECONDS = 30.0
-_MANIFEST_CACHE: dict[str, tuple[float, "BackendCapabilityManifest | None"]] = {}
+_MANIFEST_CACHE: dict[str, tuple[float, BackendCapabilityManifest | None]] = {}
 _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
     {
         "service.gitea.production.upgrade_1_27_1",
@@ -199,25 +199,23 @@ def derive_command_contract_hash(procedure: Any) -> str:
             ),
         }[handler_id]
     else:
+        from . import iam_ui_contract
         from .akvorado_bootstrap_contract import (
             AKVORADO_BOOTSTRAP_HANDLER_IDS,
             AKVORADO_LIFECYCLE_HANDLER_IDS,
             lifecycle_semantic_capability_extension,
             semantic_capability_extension,
         )
-
+        from .constants import NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
+        from .netbox_rq_worker_contract import (
+            semantic_capability_extension as netbox_rq_semantic_extension,
+        )
         from .samba_ad_dc_capability_contract import (
             HANDLER_IDS as SAMBA_AD_DC_HANDLER_IDS,
         )
         from .samba_ad_dc_capability_contract import (
             semantic_capability_extension as samba_semantic_extension,
         )
-        from .netbox_rq_worker_contract import (
-            semantic_capability_extension as netbox_rq_semantic_extension,
-        )
-        from .constants import NETBOX_PRODUCTION_RQ_WORKER_PROCEDURE_NAMES
-
-        from . import iam_ui_contract
 
         if handler_id in iam_ui_contract.HANDLER_IDS:
             payload["semantic_contract"] = iam_ui_contract.semantic_capability_extension(
@@ -238,7 +236,7 @@ def derive_command_contract_hash(procedure: Any) -> str:
 
 def fetch_backend_capabilities(
     target: Any, *, timeout: float = 5.0, use_cache: bool = True
-) -> "BackendCapabilityManifest | None":
+) -> BackendCapabilityManifest | None:
     """Fetch + validate the backend capability manifest, or ``None`` (graceful).
 
     Returns ``None`` — meaning "the backend advertises no capabilities" — for
@@ -266,7 +264,7 @@ def fetch_backend_capabilities(
 
 def _fetch_uncached(
     base: str, target: Any, timeout: float
-) -> "BackendCapabilityManifest | None":
+) -> BackendCapabilityManifest | None:
     headers = dict(getattr(target, "headers", {}) or {})
     verify = bool(getattr(target, "verify_ssl", True))
     try:
@@ -307,7 +305,7 @@ def _fetch_uncached(
 
 
 def verify_procedure_capability(
-    procedure: Any, manifest: "BackendCapabilityManifest | None"
+    procedure: Any, manifest: BackendCapabilityManifest | None
 ) -> CapabilityStatus:
     """Verify a procedure against a manifest.
 

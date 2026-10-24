@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -50,9 +50,8 @@ from netbox_rpc.domain.events import (  # noqa: E402
 from netbox_rpc.domain.projection import ProjectionState, apply, rebuild  # noqa: E402
 from netbox_rpc.domain.value_objects import ExecutionStatus  # noqa: E402
 
-
-DECIDED_AT = datetime(2026, 1, 2, 3, 6, 5, tzinfo=timezone.utc)
-EXPIRES_AT = datetime(2026, 1, 2, 4, 0, 0, tzinfo=timezone.utc)
+DECIDED_AT = datetime(2026, 1, 2, 3, 6, 5, tzinfo=UTC)
+EXPIRES_AT = datetime(2026, 1, 2, 4, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +164,7 @@ class FakeSnapshot:
     payload_hash: str = "snap-hash"
     _matches: bool = True
 
-    def matches_current(self, current) -> bool:  # noqa: ANN001
+    def matches_current(self, current) -> bool:
         return self._matches
 
 

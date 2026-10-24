@@ -9,13 +9,19 @@ from django.test import TestCase
 from rest_framework.exceptions import PermissionDenied
 
 from netbox_rpc import event_store, jobs
-from netbox_rpc.application import command_handlers
 from netbox_rpc.api.serializers import RPCExecutionSerializer
+from netbox_rpc.application import command_handlers
 from netbox_rpc.backends import BackendTarget
 from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 from netbox_rpc.models import RPCExecution, RPCIntent, RPCProcedure
 
-from ._common import device_ct, enable_rpc_integration, make_device, make_execution, make_user
+from ._common import (
+    device_ct,
+    enable_rpc_integration,
+    make_device,
+    make_execution,
+    make_user,
+)
 
 ANALYZE = "os.linux.ubuntu.24.upgrade_26.analyze_preupgrade"
 SAVE = "os.linux.ubuntu.24.upgrade_26.save_preupgrade_state"

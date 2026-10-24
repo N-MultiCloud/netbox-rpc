@@ -71,7 +71,7 @@ class _RemapOutcome:
     ambiguous_credential: list[str] = field(default_factory=list)
     needs_manual_assignment: list[str] = field(default_factory=list)
 
-    def merged(self, other: "_RemapOutcome") -> "_RemapOutcome":
+    def merged(self, other: _RemapOutcome) -> _RemapOutcome:
         return _RemapOutcome(
             updated=self.updated + other.updated,
             already_set=self.already_set + other.already_set,

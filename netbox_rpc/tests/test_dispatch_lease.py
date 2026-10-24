@@ -12,7 +12,7 @@ import base64
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -31,7 +31,7 @@ from netbox_rpc.domain.aggregate import RPCExecutionAggregate
 
 from ._common import enable_rpc_integration, event_names, make_execution, make_procedure
 
-NOW = datetime(2026, 7, 23, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 23, 12, 0, 0, tzinfo=UTC)
 FIXTURE = Path(__file__).parent / "fixtures" / "dispatch_lease" / "contract.json"
 
 

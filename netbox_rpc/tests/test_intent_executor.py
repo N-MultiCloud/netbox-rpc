@@ -128,7 +128,7 @@ class IntentExecutorFanOutTests(TestCase):
 
     def test_no_grouped_procedures_is_rejected(self):
         intent = make_intent("intent.exec.empty")
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             command_handlers.execute_intent(
                 intent,
                 self.user,
@@ -142,7 +142,7 @@ class IntentExecutorFanOutTests(TestCase):
         intent = make_intent("intent.exec.disabled", procedures=[proc])
         intent.enabled = False
         intent.save()
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             command_handlers.execute_intent(
                 intent,
                 self.user,

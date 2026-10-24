@@ -8,6 +8,12 @@ from netbox.api.gfk_fields import GFKSerializerField
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
+from ..current_access import (
+    approvable_procedure_pks,
+    lock_procedure_scope,
+    refuse_approval_scope_gain,
+    reload_requesting_user,
+)
 from ..models import (
     RPCBackend,
     RPCExecution,
@@ -16,16 +22,10 @@ from ..models import (
     RPCIntentProcedure,
     RPCLinuxServiceAllowlist,
     RPCNetBoxPluginAllowlist,
+    RpcPluginSettings,
     RPCProcedure,
     RPCProcedureCommand,
     RPCTargetBinding,
-    RpcPluginSettings,
-)
-from ..current_access import (
-    approvable_procedure_pks,
-    lock_procedure_scope,
-    refuse_approval_scope_gain,
-    reload_requesting_user,
 )
 from ..transport import (
     PROTECTED_PROCEDURE_FIELDS,
@@ -550,7 +550,10 @@ class RPCExecutionSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "procedure", "status")
 
     def validate_credential_references(self, value: object) -> dict:
-        from ..credential_contract import CredentialContractError, validate_named_references
+        from ..credential_contract import (
+            CredentialContractError,
+            validate_named_references,
+        )
 
         try:
             return validate_named_references(value)

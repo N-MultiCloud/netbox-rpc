@@ -11,7 +11,7 @@ from __future__ import annotations
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
-from netbox_rpc.models import RPCProcedure, RpcPluginSettings
+from netbox_rpc.models import RpcPluginSettings, RPCProcedure
 
 PINNED_HANDLER_IDS = (
     "service.netbox.staging.rotate_backend_token",

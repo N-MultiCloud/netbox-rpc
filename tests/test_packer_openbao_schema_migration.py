@@ -75,7 +75,7 @@ class _Apps:
         procedures = self.procedures
 
         class _Model:
-            class objects:  # noqa: N801 - mimic a Django manager
+            class objects:
                 @staticmethod
                 def filter(name__in):
                     return [p for p in procedures if p.name in name__in]

@@ -8,7 +8,7 @@ import json
 import sys
 import types
 from contextlib import nullcontext
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from itertools import product
 from types import SimpleNamespace
 
@@ -749,9 +749,9 @@ def test_gitea_org_root_worker_claim_fails_before_protected_access(
 
     assert failures == [
         (
-            "root-python312 host generation is unavailable until "
+            ("root-python312 host generation is unavailable until "
             "N-MultiCloud/nmulticloud-context#411 publishes a reviewed "
-            "content-addressed provision-and-prove boundary.",
+            "content-addressed provision-and-prove boundary."),
             "RPC_HOST_GENERATION_UNAVAILABLE",
         )
     ]
@@ -2217,7 +2217,7 @@ class _GiteaFence:
         self.takeover_generation = takeover_generation
         self.expected_token_sha256 = expected_token_sha256
         self.last_updated = last_updated or (
-            datetime.now(timezone.utc) - timedelta(seconds=1801)
+            datetime.now(UTC) - timedelta(seconds=1801)
         )
         self.last_reset_state = ""
         self.last_prior_token_id = None
@@ -2421,7 +2421,7 @@ def test_gitea_runner_reconciliation_waits_for_terminal_remote_quiescence(
         blocking_execution_id=2351,
         expected_token_sha256=digest,
         blocking_execution_status=blocking_status,
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        last_updated=datetime.now(UTC) - timedelta(seconds=age_seconds),
     )
     _install_gitea_fence_model(monkeypatch, fence)
 
@@ -2451,7 +2451,7 @@ def test_gitea_runner_reconciliation_atomically_recovers_stale_pending_worker(
         blocking_execution_id=2351,
         expected_token_sha256=digest,
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=1801),
+        last_updated=datetime.now(UTC) - timedelta(seconds=1801),
     )
     _install_gitea_fence_model(monkeypatch, fence)
     failed: list[tuple[object, str, str]] = []
@@ -3098,7 +3098,7 @@ def test_gitea_org_running_owner_is_not_quiescent_before_full_max_budget(
         state="pending",
         blocking_execution_id=2890,
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=1799),
+        last_updated=datetime.now(UTC) - timedelta(seconds=1799),
         takeover_generation=1,
     )
     _install_gitea_fence_model(monkeypatch, fence)
@@ -3155,7 +3155,7 @@ def test_shared_gitea_fence_rejects_both_mixed_direction_takeovers_before_1800(
         state="pending",
         blocking_execution_id=int(normalized["fence_execution_id"]),
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        last_updated=datetime.now(UTC) - timedelta(seconds=age_seconds),
         takeover_generation=1,
     )
     _install_gitea_fence_model(monkeypatch, fence)
@@ -3182,7 +3182,7 @@ def test_gitea_org_takeover_generation_rejects_late_success_after_failed_reconci
         blocking_execution_id=2890,
         expected_token_sha256=digest,
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=1801),
+        last_updated=datetime.now(UTC) - timedelta(seconds=1801),
         takeover_generation=1,
     )
     _install_gitea_fence_model(monkeypatch, fence)
@@ -3260,7 +3260,7 @@ def test_org_takeover_then_failed_reconcile_rejects_late_legacy_success(
         blocking_execution_id=2351,
         expected_token_sha256=digest,
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=1801),
+        last_updated=datetime.now(UTC) - timedelta(seconds=1801),
         takeover_generation=1,
     )
     _install_gitea_fence_model(monkeypatch, fence)
@@ -3338,7 +3338,7 @@ def test_legacy_takeover_then_failed_reconcile_rejects_late_org_success(
         blocking_execution_id=2890,
         expected_token_sha256=digest,
         blocking_execution_status="running",
-        last_updated=datetime.now(timezone.utc) - timedelta(seconds=1801),
+        last_updated=datetime.now(UTC) - timedelta(seconds=1801),
         takeover_generation=1,
     )
     _install_gitea_fence_model(monkeypatch, fence)

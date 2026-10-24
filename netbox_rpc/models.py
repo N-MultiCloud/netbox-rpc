@@ -20,7 +20,6 @@ from .command_contract import (
     token_has_balanced_placeholders,
     token_is_safe,
 )
-from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
 from .command_templating import (
     CAPTURE_KIND_CHOICES,
     RENDER_JINJA,
@@ -32,6 +31,7 @@ from .command_templating import (
     validate_capture,
     validate_jinja_argv,
 )
+from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
 from .domain.value_objects import Effect, ExecutionMode, ExecutionStatus
 
 # Matches a valid systemd service unit name with an optional .service suffix.
@@ -643,7 +643,7 @@ class RPCProcedureCommand(NetBoxModel):
         if errors:
             raise ValidationError(errors)
 
-    def _procedure_or_none(self) -> "RPCProcedure | None":
+    def _procedure_or_none(self) -> RPCProcedure | None:
         """Resolve the FK safely (a dangling ``procedure_id`` is reported as a
         field error by ``clean_fields()``, so validators must not raise here)."""
 
@@ -670,7 +670,7 @@ class RPCProcedureCommand(NetBoxModel):
         properties = schema.get("properties") if isinstance(schema, dict) else {}
         return frozenset(properties) if isinstance(properties, dict) else frozenset()
 
-    def _sibling_commands(self) -> list["RPCProcedureCommand"]:
+    def _sibling_commands(self) -> list[RPCProcedureCommand]:
         """The procedure's other command rows (excluding this one)."""
 
         procedure = self._procedure_or_none()
@@ -682,7 +682,7 @@ class RPCProcedureCommand(NetBoxModel):
         return list(siblings)
 
     def _chain_consistency_errors(
-        self, siblings: list["RPCProcedureCommand"]
+        self, siblings: list[RPCProcedureCommand]
     ) -> list[str]:
         """Whole-procedure check: applying this row's pending values must not
         leave any OTHER command's ``{{ vars.x }}`` reference unresolved.
@@ -1605,7 +1605,7 @@ class RpcPluginSettings(NetBoxModel):
         super().save(*args, **kwargs)
 
     @classmethod
-    def get_solo(cls) -> "RpcPluginSettings":
+    def get_solo(cls) -> RpcPluginSettings:
         obj, _created = cls.objects.get_or_create(singleton_key="default")
         return obj
 

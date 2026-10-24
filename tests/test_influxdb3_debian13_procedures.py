@@ -931,7 +931,7 @@ class _ProtectedError(Exception):
 class _ProcedureQuery:
     """Minimal queryset stand-in that records how the reverse reached the rows."""
 
-    def __init__(self, manager: "_FakeProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _FakeProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 
@@ -962,7 +962,7 @@ class _ProcedureQuery:
 
 
 class _FakeProcedure:
-    def __init__(self, manager: "_FakeProcedureManager", name: str, data: dict) -> None:
+    def __init__(self, manager: _FakeProcedureManager, name: str, data: dict) -> None:
         self._manager = manager
         self.name = name
         self.handler_id = str(data["handler_id"])

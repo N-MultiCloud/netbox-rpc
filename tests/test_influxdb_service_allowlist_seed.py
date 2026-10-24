@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "netbox_rpc/migrations/0053_seed_influxdb_service_allowlist.py"
 

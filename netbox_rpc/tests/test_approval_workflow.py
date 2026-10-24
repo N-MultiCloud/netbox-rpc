@@ -147,7 +147,7 @@ class ApprovalWorkflowTests(TestCase):
         assert ex.status == ExecutionStatus.PENDING_APPROVAL.value
 
     def test_snapshot_matches_current_hash_semantics(self):
-        ex, snap = _open_pending(requester=self.requester)
+        _ex, snap = _open_pending(requester=self.requester)
         assert snap.payload_hash  # stamped on save
         assert snap.matches_current(snap.protected_payload()) is True
         drifted = dict(snap.protected_payload())
@@ -155,7 +155,7 @@ class ApprovalWorkflowTests(TestCase):
         assert snap.matches_current(drifted) is False
 
     def test_snapshot_is_immutable(self):
-        ex, snap = _open_pending(requester=self.requester)
+        _ex, snap = _open_pending(requester=self.requester)
         snap.credential_policy_ref = "cred-policy:tampered"
         with self.assertRaises(ValidationError):
             snap.save()

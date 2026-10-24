@@ -206,9 +206,8 @@ class IntentApiTests(TestCase):
         assert resp.status_code == 400, resp.content
 
     def test_reorder_is_captured_in_object_changelog(self):
-        from django.contrib.contenttypes.models import ContentType
-
         from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
 
         a = make_procedure("os.linux.api.cl.a")
         b = make_procedure("os.linux.api.cl.b")

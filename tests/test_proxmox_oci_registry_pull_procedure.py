@@ -16,7 +16,7 @@ class _MigrationLiteralNames(ast.NodeTransformer):
         "_HANDLER": HANDLER_ID,
     }
 
-    def visit_Name(self, node: ast.Name):  # noqa: N802
+    def visit_Name(self, node: ast.Name):
         if node.id in self.values:
             return ast.copy_location(ast.Constant(self.values[node.id]), node)
         if node.id in {"_PARAMS_SCHEMA", "_RESULT_SCHEMA"}:

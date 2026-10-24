@@ -94,7 +94,7 @@ class RunExecutionRunnerFenceTests(TestCase):
         return execution, self.call, self.order
 
     def test_gitea_runner_reserves_before_the_backend_call_and_records_the_response(self):
-        execution, call, order = self._run(GITEA_RUNNER_REGISTER)
+        execution, _call, order = self._run(GITEA_RUNNER_REGISTER)
 
         command_handlers.run_execution(execution)
 

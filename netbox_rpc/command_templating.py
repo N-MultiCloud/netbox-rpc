@@ -301,21 +301,21 @@ def _validate_ref(
 
     if attr is None:
         return [
-            f"reference a specific key of {root!r} "
-            f"(for example {root}.<name>), not the whole object"
+            (f"reference a specific key of {root!r} "
+            f"(for example {root}.<name>), not the whole object")
         ]
 
     if root == ROOT_PARAMS and attr not in param_names:
         available = ", ".join(sorted(param_names)) or "(none declared)"
         return [
-            f"params.{attr} is not declared in the procedure params schema "
-            f"(available: {available})"
+            (f"params.{attr} is not declared in the procedure params schema "
+            f"(available: {available})")
         ]
     if root == ROOT_VARS and attr not in produced_vars:
         available = ", ".join(sorted(produced_vars)) or "(none produced earlier)"
         return [
-            f"vars.{attr} is not produced by any earlier command "
-            f"(available output variables: {available})"
+            (f"vars.{attr} is not produced by any earlier command "
+            f"(available output variables: {available})")
         ]
     if root == ROOT_RUNTIME and attr not in JINJA_RUNTIME_KEYS:
         available = ", ".join(sorted(JINJA_RUNTIME_KEYS))

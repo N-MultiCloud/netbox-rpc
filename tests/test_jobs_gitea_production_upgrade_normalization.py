@@ -11,8 +11,8 @@ import sys
 import threading
 import time
 import types
-from datetime import datetime, timedelta, timezone
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -1618,9 +1618,9 @@ def test_runner_reconciliation_quiescence_requires_terminal_owner_and_age(
         state="blocked",
         blocking_execution_id=2351,
         blocking_execution=blocking,
-        last_updated=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        last_updated=datetime(2026, 8, 27, tzinfo=UTC),
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     fence.last_updated = now - timedelta(seconds=1801)
 
     assert normalization._gitea_runner_fence_is_quiescent(
@@ -1655,7 +1655,7 @@ class _FakeDeviceServiceManager:
     def __init__(self):
         identity = SimpleNamespace(
             pk=902,
-            last_updated=datetime(2026, 8, 17, 11, tzinfo=timezone.utc),
+            last_updated=datetime(2026, 8, 17, 11, tzinfo=UTC),
             username="gitea-admin",
             auth_method="key",
             storage_backend="local",
@@ -1663,7 +1663,7 @@ class _FakeDeviceServiceManager:
         )
         self.service = SimpleNamespace(
             pk=901,
-            last_updated=datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+            last_updated=datetime(2026, 8, 17, 12, tzinfo=UTC),
             assigned_object_type_id=99,
             assigned_object_id=170,
             service_type="ssh",
@@ -1677,7 +1677,7 @@ class _FakeDeviceServiceManager:
         )
         runner_identity = SimpleNamespace(
             pk=904,
-            last_updated=datetime(2026, 8, 17, 11, tzinfo=timezone.utc),
+            last_updated=datetime(2026, 8, 17, 11, tzinfo=UTC),
             username="runner-admin",
             auth_method="key",
             storage_backend="local",
@@ -1685,7 +1685,7 @@ class _FakeDeviceServiceManager:
         )
         self.runner_service = SimpleNamespace(
             pk=903,
-            last_updated=datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+            last_updated=datetime(2026, 8, 17, 12, tzinfo=UTC),
             assigned_object_type_id=99,
             assigned_object_id=604,
             service_type="ssh",
@@ -1728,7 +1728,7 @@ class _FakeOpenBaoEndpointManager:
 def _openbao_endpoint(**overrides):
     identity = SimpleNamespace(
         pk=1904,
-        last_updated=datetime(2026, 9, 22, 11, tzinfo=timezone.utc),
+        last_updated=datetime(2026, 9, 22, 11, tzinfo=UTC),
         uuid="11111111-1111-4111-8111-111111111111",
         credential_type="ssh-keypair",
         live_kv_version=7,
@@ -1738,7 +1738,7 @@ def _openbao_endpoint(**overrides):
     )
     values = {
         "pk": 1903,
-        "last_updated": datetime(2026, 9, 22, 12, tzinfo=timezone.utc),
+        "last_updated": datetime(2026, 9, 22, 12, tzinfo=UTC),
         "assigned_object_type_id": 99,
         "assigned_object_id": 604,
         "service_type": "ssh",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def _install_netbox_stub() -> None:
@@ -36,9 +36,8 @@ from netbox_rpc.domain.events import (  # noqa: E402
 )
 from netbox_rpc.domain.projection import ProjectionState, apply, rebuild  # noqa: E402
 
-
-STARTED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-FINISHED_AT = datetime(2026, 1, 2, 3, 5, 5, tzinfo=timezone.utc)
+STARTED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+FINISHED_AT = datetime(2026, 1, 2, 3, 5, 5, tzinfo=UTC)
 
 
 def _fold(events):

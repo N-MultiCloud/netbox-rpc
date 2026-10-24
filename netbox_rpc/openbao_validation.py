@@ -8,13 +8,12 @@ params object before ``RPCExecution`` persistence.
 
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Mapping, Sequence
 import json
 import math
 import re
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from typing import Any
-
 
 OPENBAO_PROCEDURE_PREFIX = "service.openbao.1."
 OPENBAO_MAX_STRING_BYTES = 1024 * 1024

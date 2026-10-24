@@ -18,13 +18,13 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.test import APIClient, APIRequestFactory
 
 from netbox_rpc import dispatch_lease as dl
+from netbox_rpc import staging_rotation_contract as staging_contract
 from netbox_rpc.api.serializers import RPCExecutionSerializer
 from netbox_rpc.application import command_handlers
 from netbox_rpc.backends import BackendTarget
 from netbox_rpc.constants import NETBOX_STAGING_ROTATE_BACKEND_TOKEN
 from netbox_rpc.domain.normalization import RPCExecutionError
 from netbox_rpc.models import RPCExecution, RPCProcedure
-from netbox_rpc import staging_rotation_contract as staging_contract
 
 from ._common import (
     enable_rpc_integration,

@@ -112,7 +112,7 @@ EVENT_STRING_DEFAULT_LIMIT = 4096
 
 
 class _ProcedureQuery:
-    def __init__(self, manager: "_ProcedureManager", names: set[str]) -> None:
+    def __init__(self, manager: _ProcedureManager, names: set[str]) -> None:
         self.manager = manager
         self.names = names
 
@@ -143,7 +143,7 @@ class _ProcedureManager:
 
 
 class _CommandQuery:
-    def __init__(self, manager: "_CommandManager", procedure_name: str) -> None:
+    def __init__(self, manager: _CommandManager, procedure_name: str) -> None:
         self.manager = manager
         self.procedure_name = procedure_name
 
@@ -1044,7 +1044,7 @@ def test_provision_has_no_protected_runtime_registration() -> None:
     source = (ROOT / "netbox_rpc/application/command_handlers.py").read_text(
         encoding="utf-8"
     )
-    assert not re.search(r"^    UBUNTU_26_SAMBA_AD_DC_PROVISION:", source, re.M)
+    assert not re.search(r"^    UBUNTU_26_SAMBA_AD_DC_PROVISION:", source, re.MULTILINE)
     assert "samba_ad_dc_protected_contract" not in source
     assert "_require_samba_admin_credential_for_approver" not in source
     assert not (ROOT / "netbox_rpc/samba_ad_dc_protected_contract.py").exists()

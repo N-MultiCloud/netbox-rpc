@@ -4,7 +4,6 @@ from typing import Any
 
 from .value_objects import ExecutionStatus
 
-
 TERMINAL_STATUSES = {
     ExecutionStatus.SUCCEEDED.value,
     ExecutionStatus.FAILED.value,
