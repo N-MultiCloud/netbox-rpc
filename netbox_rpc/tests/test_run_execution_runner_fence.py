@@ -169,3 +169,28 @@ class RunExecutionRunnerFenceTests(TestCase):
         execution.refresh_from_db()
         self.assertEqual(execution.status, RPCExecution.STATUS_FAILED)
         self.assertEqual(execution.error_code, "RPC_BACKEND_UNREACHABLE")
+
+    def test_unexpected_scope_block_error_keeps_the_dispatch_failure(self):
+        # Issue reproducer: the scope block raises an error that is not an
+        # RPCExecutionError. The original dispatch failure must still be
+        # recorded as ExecutionFailed and re-raised.
+        execution, _call, _order = self._run(
+            GITEA_RUNNER_REGISTER,
+            call_side_effect=RPCExecutionError(
+                "Backend unreachable.", code="RPC_BACKEND_UNREACHABLE"
+            ),
+        )
+        self.block.side_effect = RuntimeError("database connection lost")
+
+        with self.assertLogs(command_handlers.logger, level="ERROR") as logs:
+            with self.assertRaises(RPCExecutionError) as raised:
+                command_handlers.run_execution(execution)
+
+        self.assertEqual(raised.exception.code, "RPC_BACKEND_UNREACHABLE")
+        self.block.assert_called_once_with(execution, _NORMALIZED)
+        self.assertIn(f"RPC execution {execution.pk}", logs.output[0])
+        execution.refresh_from_db()
+        self.assertEqual(execution.status, RPCExecution.STATUS_FAILED)
+        self.assertEqual(execution.error_code, "RPC_BACKEND_UNREACHABLE")
+        failed = execution.events.filter(event="ExecutionFailed")
+        self.assertEqual(failed.count(), 1)

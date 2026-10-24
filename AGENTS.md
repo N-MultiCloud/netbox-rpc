@@ -848,6 +848,14 @@ For stale `pending` recovery after that interval, reservation locks
 the fence and original execution together, terminalizes a still-`running` lost
 worker, moves the fence to `blocked`, and records the reconciliation owner in
 the same transaction. Once it owns the fence, late original transitions are rejected.
+When a dispatch fails after the reservation, the worker blocks the scope and then
+records the failure. An unexpected error from that block is logged and does not
+replace the dispatch error: the execution still records `ExecutionFailed` with the
+original code. The failed block rolls back, so the fence keeps its reserved state:
+after a `register` it stays `pending` with the failed execution as owner, which a
+later reconcile accepts; after a `reconcile` it stays `blocked` with that failed
+reconciliation as owner, so a new reconcile is refused until an operator repairs
+the fence. Both states stay fenced; neither clears the scope.
 Activation is forbidden while application repositories can schedule
 `prod-deploy`, `mirror-host`, or equivalent privileged labels. Follow
 [`docs/gitea-runner-registration.md`](docs/gitea-runner-registration.md) for the

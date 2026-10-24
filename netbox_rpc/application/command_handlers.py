@@ -2189,6 +2189,14 @@ def _dispatch_to_backend(
 
 
 def _block_runner_scope_after_failure(execution: object, normalized: dict[str, Any]) -> None:
+    """Block a reserved runner scope after a dispatch failure, without masking that failure.
+
+    The caller records and re-raises the original dispatch error after this
+    returns, so no exception may escape from here. A failed block rolls back
+    its own transaction, so the fence keeps the state its reservation wrote
+    (``pending`` after a start operation, ``blocked`` with this execution as
+    reconciliation owner after a reconcile). The scope stays fenced either way.
+    """
     try:
         _block_gitea_runner_scope(execution, normalized)
     except RPCExecutionError:
@@ -2196,6 +2204,14 @@ def _block_runner_scope_after_failure(execution: object, normalized: dict[str, A
         # original path must fail its execution without rewriting that
         # newer ownership or clearing the canonical scope.
         pass
+    except Exception:
+        # Any other error must not replace the dispatch error or stop the
+        # terminal failure event. Log it for the operator and continue.
+        logger.exception(
+            "Blocking the Gitea runner scope failed after a dispatch failure "
+            "for RPC execution %s; the scope stays fenced.",
+            getattr(execution, "pk", None),
+        )
 
 
 def run_execution(execution: object, *, backend_pk: object | None = None) -> None:
