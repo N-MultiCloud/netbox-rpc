@@ -88,45 +88,47 @@ def test_approval_is_checked_against_the_stored_procedure(
 def test_form_shares_the_unpin_rule() -> None:
     forms = _read("netbox_rpc/forms.py")
 
-    assert (
-        "from .transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, "
-        "unpin_is_refused" in forms
-    )
-    assert "def _refuse_transport_unpin(" in forms
-    assert "self._refuse_transport_unpin(cleaned_data)" in forms
+    assert "from .transport import (" in forms
+    assert "protected_field_refusals," in forms
+    assert "protected_field_snapshot," in forms
     assert "cleaned_data = self.cleaned_data" in forms
-    assert "may_approve = may_approve_procedure(user, self.instance)" in forms
-    assert "if may_approve_procedure(user, self.instance):" in forms
-    assert 'requested_pinned=cleaned_data.get("transport_pinned")' in forms
+    assert "protected_field_snapshot(self.instance)," in forms
+    assert "may_approve_procedure(user, self.instance)," in forms
+    assert "raise forms.ValidationError(refused)" in forms
     assert "def save(self, commit: bool = True):" in forms
     assert "self._refuse_unpin_under_lock()" in forms
-    assert "def _refuse_unpin_under_lock(self) -> None:" in forms
+    assert "def _refuse_unpin_under_lock(self) -> frozenset[object]:" in forms
     assert "select_for_update()" in forms
     assert "may_approve = may_approve_procedure(user, stored)" in forms
     assert "user = reload_requesting_user(_request_user(self.instance))" in forms
-    assert "from .current_access import reload_requesting_user" in forms
+    assert "    reload_requesting_user,\n)" in forms
+
+
+def test_shared_table_applies_the_unpin_rule_and_message() -> None:
+    rule, message = _transport_symbol("PROTECTED_PROCEDURE_FIELD_RULES")["transport_pinned"]
+    assert message == _transport_symbol("UNPIN_DENIED_MESSAGE")
+    assert rule(True, False, False) is True
+    assert rule(True, False, True) is False
 
 
 def test_serializer_shares_the_unpin_rule() -> None:
     serializers = _read("netbox_rpc/api/serializers.py")
 
-    assert (
-        "from ..transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, "
-        "unpin_is_refused" in serializers
-    )
+    assert "from ..transport import (" in serializers
+    assert "protected_field_refusals," in serializers
     block = serializers.split(
         "class RPCProcedureSerializer(NetBoxModelSerializer):", 1
     )[1].split("\nclass ", 1)[0]
     assert "def validate(self, attrs):" in block
     assert "may_approve = may_approve_procedure(" in block
-    assert "if unpin_is_refused(" in block
-    assert 'requested_pinned=attrs.get("transport_pinned")' in block
+    assert "_requested_protected_values(stored_flags, attrs), may_approve" in block
     assert "def update(self, instance, validated_data):" in block
     assert "select_for_update()" in block
-    assert "instance.transport_pinned = stored.transport_pinned" in block
-    assert "may_approve=may_approve_procedure(user, stored)" in block
+    assert "setattr(instance, field, getattr(stored, field))" in block
+    assert "may_approve = may_approve_procedure(user, stored)" in block
     assert "user = reload_requesting_user(request_user)" in block
-    assert "from ..current_access import reload_requesting_user" in serializers
+    assert "    reload_requesting_user,\n)" in serializers
+
 
 def test_update_decides_the_pin_rule_after_taking_the_row_lock() -> None:
     # A decision made before the lock would read the pin the request was prepared
@@ -136,7 +138,7 @@ def test_update_decides_the_pin_rule_after_taking_the_row_lock() -> None:
         "class RPCProcedureSerializer(NetBoxModelSerializer):", 1
     )[1].split("\nclass ", 1)[0]
     update = block.split("    def update(self, instance, validated_data):", 1)[1]
-    assert update.index("select_for_update()") < update.index("if unpin_is_refused(")
+    assert update.index("select_for_update()") < update.index("protected_field_refusals(")
     assert update.index("select_for_update()") < update.index("reload_requesting_user(")
 
 
@@ -164,7 +166,7 @@ def test_serializer_reads_the_stored_state_before_the_parent_validator_runs() ->
         and isinstance(node.func.value, ast.Call)
         and getattr(node.func.value.func, "id", "") == "super"
     )
-    for name in ("previously_pinned", "may_approve"):
+    for name in ("stored_flags", "may_approve"):
         capture = min(
             node.lineno
             for node in ast.walk(validate)

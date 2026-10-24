@@ -21,9 +21,36 @@ from ..models import (
     RPCTargetBinding,
     RpcPluginSettings,
 )
-from ..current_access import reload_requesting_user
-from ..transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
-from ..transport import APPROVAL_DENIED_MESSAGE, lowering_is_refused
+from ..current_access import (
+    approvable_procedure_pks,
+    lock_procedure_scope,
+    refuse_approval_scope_gain,
+    reload_requesting_user,
+)
+from ..transport import (
+    PROTECTED_PROCEDURE_FIELDS,
+    RELATION_PROTECTED_FIELDS,
+    may_approve_procedure,
+    protected_field_refusals,
+    protected_field_snapshot,
+    tag_keys,
+)
+
+
+def _requested_protected_values(stored: dict | None, data: dict) -> dict:
+    """Return the requested values, with ``tags`` resolved from tags or add/remove tags.
+
+    NetBox accepts ``add_tags`` and ``remove_tags`` as well as ``tags``; each of them
+    changes the tag set, so the resulting set is what the rule compares.
+    """
+    requested = dict(data)
+    add_tags, remove_tags = data.get("add_tags"), data.get("remove_tags")
+    if data.get("tags") is None and stored is not None and (add_tags or remove_tags):
+        current = set(stored.get("tags") or ())
+        current |= set(tag_keys(add_tags) or ())
+        current -= set(tag_keys(remove_tags) or ())
+        requested["tags"] = tuple(sorted(current))
+    return requested
 
 
 class RpcPluginSettingsSerializer(NetBoxModelSerializer):
@@ -196,12 +223,10 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "name", "handler_id", "enabled")
 
     def validate(self, attrs):
-        # NetBox's parent validate() writes the submitted values onto
-        # self.instance, so the stored pin, the stored approval requirement, and
-        # the approve decision are taken before it runs. The approve check is
-        # scoped to the stored row.
-        previously_pinned = getattr(self.instance, "transport_pinned", None)
-        previously_required = getattr(self.instance, "approval_required", None)
+        # NetBox's parent validate() writes the submitted values onto self.instance,
+        # so the stored protected fields and the approve decision are taken before it
+        # runs. The approve check is scoped to the stored row.
+        stored_flags = protected_field_snapshot(self.instance)
         request = self.context.get("request")
         may_approve = may_approve_procedure(
             getattr(request, "user", None), self.instance
@@ -209,55 +234,45 @@ class RPCProcedureSerializer(NetBoxModelSerializer):
         attrs = super().validate(attrs)
         # NetBox sets ``self.instance`` for single and bulk updates alike, so
         # this covers every REST write to an existing procedure.
-        refused = {}
-        if unpin_is_refused(
-            previously_pinned=previously_pinned,
-            requested_pinned=attrs.get("transport_pinned"),
-            may_approve=may_approve,
-        ):
-            refused["transport_pinned"] = UNPIN_DENIED_MESSAGE
-        if lowering_is_refused(
-            previously_set=previously_required,
-            requested=attrs.get("approval_required"),
-            may_approve=may_approve,
-        ):
-            refused["approval_required"] = APPROVAL_DENIED_MESSAGE
+        refused = protected_field_refusals(
+            stored_flags, _requested_protected_values(stored_flags, attrs), may_approve
+        )
         if refused:
             raise serializers.ValidationError(refused)
         return attrs
 
     def update(self, instance, validated_data):
-        requested = validated_data.get("transport_pinned")
-        requested_required = validated_data.get("approval_required")
         request_user = getattr(self.context.get("request"), "user", None)
-        # Lock the stored row for the rest of the write. The pin, the approval
-        # requirement, the approve scope, and the grants are all read after the
-        # lock, not from the copies read before this request.
+        # Lock the stored row for the rest of the write. The protected fields, the
+        # approve scope, and the grants are all read after the lock, not from the
+        # copies read before this request.
         with transaction.atomic():
+            lock_procedure_scope()
             stored = type(instance).objects.select_for_update().get(pk=instance.pk)
             user = reload_requesting_user(request_user)
-            refused = {}
-            if unpin_is_refused(
-                previously_pinned=stored.transport_pinned,
-                requested_pinned=requested,
-                may_approve=may_approve_procedure(user, stored),
-            ):
-                refused["transport_pinned"] = UNPIN_DENIED_MESSAGE
-            if lowering_is_refused(
-                previously_set=stored.approval_required,
-                requested=requested_required,
-                may_approve=may_approve_procedure(user, stored),
-            ):
-                refused["approval_required"] = APPROVAL_DENIED_MESSAGE
+            stored_flags = protected_field_snapshot(stored)
+            may_approve = may_approve_procedure(user, stored)
+            approvable_before = approvable_procedure_pks(user)
+            refused = protected_field_refusals(
+                stored_flags,
+                _requested_protected_values(stored_flags, validated_data),
+                may_approve,
+            )
             if refused:
                 raise serializers.ValidationError(refused)
-            if requested is None:
-                # Omitting the pin must not write back a stale copy of it.
-                instance.transport_pinned = stored.transport_pinned
-            if requested_required is None:
-                # The approval requirement follows the same rule as the pin.
-                instance.approval_required = stored.approval_required
-            return super().update(instance, validated_data)
+            for field in PROTECTED_PROCEDURE_FIELDS:
+                if field in RELATION_PROTECTED_FIELDS and field != "custom_field_data":
+                    continue
+                if validated_data.get(field) is None:
+                    # Omitting a protected field must not write back a stale copy of it.
+                    setattr(instance, field, getattr(stored, field))
+            saved = super().update(instance, validated_data)
+            # Raising rolls the write back with the rest of this transaction.
+            refuse_approval_scope_gain(
+                request_user, approvable_before, serializers.ValidationError
+            )
+            return saved
+
 
 class RPCLinuxServiceAllowlistSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(

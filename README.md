@@ -1533,9 +1533,17 @@ same way until the row is re-pinned.
 
 Un-pinning through the admin form or the REST API also requires the
 `netbox_rpc.approve_rpcprocedure` permission on that procedure. The same rule
-applies to lowering `approval_required` from `True` to `False`. The check runs
-again under a row lock at write time, so a concurrent write cannot clear a pin
-or the approval requirement that was set after the request read the procedure.
+applies to lowering `approval_required` from `True` to `False`, to lowering
+`effect` (for example from `destructive` to `write`), to enabling a disabled
+procedure, and to any change of the other execution-relevant fields
+(`transport_driver`, `transport_driver_chain`, `handler_id`, `name`, `version`,
+`target_models`, `params_schema`, `timeout_seconds`, `result_schema`,
+`output_parser`, `output_schema`, tags, and custom fields; tags and custom fields
+can appear in a scoped approve grant). Raising `effect`, disabling a procedure, and
+editing `description` or `comments` stay open to the change permission.
+The check runs again under a row lock at write time, so a concurrent write cannot
+undo a protected value that was set after the request read the procedure. AGENTS.md
+records the reason for each field.
 
 For network procedures the target device's NetBox **Platform** is resolved
 through an operator-editable map (following the official `netbox.netbox`

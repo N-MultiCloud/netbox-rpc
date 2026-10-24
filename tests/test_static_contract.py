@@ -401,11 +401,13 @@ def test_netbox_nms_imports_are_not_module_level_for_standalone_boot() -> None:
 
 def test_approval_required_downgrade_requires_approve_permission() -> None:
     forms = read("netbox_rpc/forms.py")
+    transport = read("netbox_rpc/transport.py")
 
-    assert 'cleaned_data.get("approval_required") is not False' in forms
-    assert "if may_approve_procedure(user, self.instance):" in forms
-    assert "can disable " in forms
-    assert "approval for an existing RPC procedure" in forms
+    assert "protected_field_refusals(" in forms
+    assert "may_approve_procedure(user, self.instance)" in forms
+    assert '"approval_required": (_lowering_rule, APPROVAL_DENIED_MESSAGE)' in transport
+    assert "can disable " in transport
+    assert "approval for an existing RPC procedure" in transport
 
 
 def test_migration_does_not_import_live_constants() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
@@ -13,6 +14,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from .. import filtersets, models
+from ..current_access import lock_procedure_scope
 from ..application.command_handlers import (
     approve_execution,
     cancel_execution,
@@ -119,6 +121,19 @@ class RPCProcedureViewSet(NetBoxModelViewSet):
     queryset = models.RPCProcedure.objects.prefetch_related("commands", "tags")
     serializer_class = RPCProcedureSerializer
     filterset_class = filtersets.RPCProcedureFilterSet
+
+    # NetBox takes a row lock for a conditional (If-Match) update before it calls the
+    # serializer, so the procedure scope lock is taken here first, in an outer
+    # transaction, to keep one lock order (scope lock, then row lock) on every path.
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            lock_procedure_scope()
+            return super().perform_update(serializer)
+
+    def perform_bulk_update(self, objects, update_data, partial):
+        with transaction.atomic():
+            lock_procedure_scope()
+            return super().perform_bulk_update(objects, update_data, partial)
 
     @extend_schema(responses={200: OpenApiTypes.OBJECT})
     @action(detail=False, methods=["get"], url_path="available")

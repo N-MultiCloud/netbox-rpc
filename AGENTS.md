@@ -2951,9 +2951,10 @@ own model data:
   a future procedure with the same requirement opts out by setting the flag.
   The staging contract declares its pin and binds it into its policy hash, so
   that hash changed with the binding. `run_upgrade` has no protected contract
-  and stays row-pinned only. The approve-permission gate for un-pinning in the
-  admin form and the API is tracked separately, and a contract-bound
-  protection for `run_upgrade` is follow-up work.
+  and stays row-pinned only. The approve-permission gate for un-pinning and for
+  changing the driver fields in the admin form and the API is described under
+  **Admin Form Security**, and a contract-bound protection for `run_upgrade` is
+  follow-up work.
 - **`normalized_params["_ansible"]` — NetBox Platform → Ansible connection.**
   The execution backend has no view of what a target *is* (its SSH credential
   carries no platform), so when the resolved chain contains an Ansible driver,
@@ -3039,29 +3040,74 @@ surfaces as a structured, alertable error code instead of an opaque traceback.
 
 RPC object edit views must preserve the `RequestAwareObjectEditView` pattern so
 forms can evaluate the active user without duplicating NetBox's generic edit
-flow. `RPCProcedureForm` must fail closed when an existing procedure is changed
-from `approval_required=True` to `False` unless the user has
-`netbox_rpc.approve_rpcprocedure`. `RPCLinuxServiceAllowlistForm` must scope the
+flow. `RPCProcedureForm` must fail closed when an existing procedure's protected
+fields change as the table below refuses, unless the user has
+`netbox_rpc.approve_rpcprocedure` on that procedure. `RPCLinuxServiceAllowlistForm` must scope the
 `ssh_credential_override` field with `DeviceCredential.objects.restrict(user,
 "view")`; never use an unrestricted `DeviceCredential.objects.all()` queryset.
 
-Lowering a protected safety flag is gated the same way. The protected flags are
-`transport_pinned` and `approval_required`. A change of either from `True` to
-`False` needs `netbox_rpc.approve_rpcprocedure` on that procedure, in the admin
-form and in the REST serializer (`RPCProcedureSerializer.validate` and `update`).
-Both paths call `netbox_rpc.transport.lowering_is_refused`. The pin entry point
-`netbox_rpc.transport.unpin_is_refused` delegates to it. The form's `clean()` keeps
-its inline `approval_required` check, and its locked `save()` path uses the shared
-rule. A request that lowers both flags receives one 400 response that names both.
-The approve check is scoped to the
-stored procedure through `netbox_rpc.transport.may_approve_procedure`. Creating a
-procedure with `False`,
-keeping the pin, and a PATCH that omits the field stay allowed. The pin and the approve
-scope are read again from the locked row when the write happens (REST `update()` and the
-form's `save()`), because the copy read earlier can be stale. The requesting user is reloaded
-after the lock, because NetBox caches object-permission grants on the user instance.
-A PATCH that omits
-the pin keeps the stored value instead of writing back a copy it read earlier.
+Changing a protected procedure field is gated the same way. One table,
+`netbox_rpc.transport.PROTECTED_PROCEDURE_FIELD_RULES`, names each field, its rule,
+and its message, and the admin form (`clean()` and the locked `save()` path) and the
+REST serializer (`RPCProcedureSerializer.validate` and `update`) both apply it
+through `protected_field_refusals()`. A user without
+`netbox_rpc.approve_rpcprocedure` scoped to the stored procedure (checked through
+`may_approve_procedure`) is refused with 400 or a form error, and the row is unchanged:
+
+| Field | Refused change | Allowed without approve | Reason |
+| --- | --- | --- | --- |
+| `transport_pinned` | `True` to `False` | keep, set, create | The pin keeps a driver-dependent handler off the estate-wide chain. |
+| `approval_required` | `True` to `False` | keep, set, create | Removes the approval step. |
+| `effect` | any lowering (`destructive` to `write` or `read`, `write` to `read`); an unknown value counts as lowering | raising, keeping, create | `credential_authority._current_approval` takes the protected approval path for a destructive procedure, and the capability check compares the stored effect only when the backend advertises a manifest. |
+| `enabled` | `False` to `True` (any present value other than `False`) | disabling, keeping, create | Enabling a seeded-disabled procedure is an activation step that operators must approve; the normalizer code gates have not been verified for every procedure. Disabling stays open because disabling the catalog row is the first rollback step. |
+| `transport_driver` | any change | keeping, create | The driver decides credential isolation, fallback, and live output; row edits are not the reviewed way to migrate drivers (migrations and the plugin-wide default chains are). |
+| `transport_driver_chain` | any change, including clearing or reordering | keeping, create | Same reason as the driver. |
+| `handler_id` | any change | keeping, create | Selects the backend handler that runs; a change retargets the procedure. |
+| `name` | any change | keeping, create | Protected contracts, approval routes, and object-permission constraints match the procedure by name. |
+| `version` | any change | keeping, create | Bound into the capability contract hash and the signed dispatch lease. |
+| `target_models` | any change | keeping, create | Decides which objects the procedure may run against. |
+| `params_schema` | any change | keeping, create | Decides which caller parameters reach the backend. |
+| `timeout_seconds` | any change | keeping, create | Sets the backend and worker time budget; protected contracts require an exact value. |
+| `result_schema` | any change | keeping, create | Decides which backend results are validated and stored. |
+| `output_parser`, `output_schema` | any change | keeping, create | Decide how raw output is parsed into the stored result. |
+| `tags` (including REST `add_tags` and `remove_tags`) and custom fields | any change | keeping, create | Object-permission constraints, including a scoped approve grant, can match on them, so a change can confer approval scope. |
+
+Only `description` and `comments` stay open to the change permission, because nothing
+reads them at admission, approval, or dispatch. Object-permission constraints can
+still match any field or relation, so a separate rule covers every edit through the
+serializer's `update` and the form's `save`: the set of procedures the editor may
+approve is read under the row lock before the write and again after it, inside the
+write's transaction, with NetBox's own constraint evaluation
+(`current_access.approvable_procedure_pks` and `refuse_approval_scope_gain`), and the
+write is refused and rolled back if the set grew. Every procedure edit first takes one
+PostgreSQL transaction-level advisory lock (`current_access.lock_procedure_scope`)
+before any row lock, so concurrent edits to related procedures cannot each see no gain
+and together grant one. The REST viewset takes it in `perform_update` and
+`perform_bulk_update`, before NetBox's own row lock for a conditional (If-Match)
+update, so every path uses one lock order: scope lock, then row lock. That covers an
+allowed edit, such as a description, a comment, or disabling the procedure, that
+matches the editor's own approve constraint on this procedure or, through a relation
+such as a shared intent, on another one. Writes outside the procedure row (command
+rows, intent membership, tag objects) can also change what an approve constraint
+matches; they are tracked in netbox-rpc issue 439. Scope approve grants by procedure
+`id` or `name`. Pure tests fail when a field the serializer or the form writes is
+neither in the table nor in that list. In the form's locked save path, a protected
+field that the submission omits is written from the locked row, because Django
+otherwise keeps the instance's possibly stale copy for an omitted field with a
+default.
+
+A request that changes several protected fields receives one 400 response that
+names each of them. The any-change rule compares type-exact canonical forms
+(`_as_comparable`): `True` and `1`, `1` and `1.0`, and `0` and `False` are changes,
+at every depth and in dictionary keys, and only a tuple and a list with the same items
+count as the same value. The `transport_pinned` entry point `unpin_is_refused` delegates
+to `lowering_is_refused`; `effect_lowering_is_refused`, `enabling_is_refused`, and
+`change_is_refused` are the dedicated predicates for the other fields. The stored
+values and the approve scope are read again from the locked row when the write
+happens (REST `update()` and the form's `save()`), because the copy read earlier can
+be stale. The requesting user is reloaded after the lock, because NetBox caches
+object-permission grants on the user instance. A PATCH that omits a protected field
+keeps the stored value instead of writing back a copy it read earlier.
 
 ## Migration Safety
 

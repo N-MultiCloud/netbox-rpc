@@ -13,9 +13,19 @@ from utilities.forms.fields import (
 )
 
 from .constants import RPC_TARGET_BINDING_SLUG_CHOICES
-from .current_access import reload_requesting_user
-from .transport import UNPIN_DENIED_MESSAGE, may_approve_procedure, unpin_is_refused
-from .transport import lowering_is_refused
+from .current_access import (
+    approvable_procedure_pks,
+    lock_procedure_scope,
+    refuse_approval_scope_gain,
+    reload_requesting_user,
+)
+from .transport import (
+    PROTECTED_PROCEDURE_FIELDS,
+    RELATION_PROTECTED_FIELDS,
+    may_approve_procedure,
+    protected_field_refusals,
+    protected_field_snapshot,
+)
 from .models import (
     RPCBackend,
     RPCExecution,
@@ -31,10 +41,6 @@ from .models import (
 )
 
 REQUEST_ATTR = "_netbox_rpc_request"
-APPROVAL_DENIED_MESSAGE = (
-    "Only users with netbox_rpc.approve_rpcprocedure can disable "
-    "approval for an existing RPC procedure."
-)
 
 
 class _PermissionUser(Protocol):
@@ -64,19 +70,17 @@ class RPCProcedureForm(NetBoxModelForm):
         if not self.instance.pk:
             return cleaned_data
 
-        self._refuse_transport_unpin(cleaned_data)
-
-        if self.instance.approval_required is not True:
-            return cleaned_data
-
-        if cleaned_data.get("approval_required") is not False:
-            return cleaned_data
-
+        # Django copies the submitted values onto the instance only after clean(),
+        # so self.instance still holds the stored values here.
         user = _request_user(self.instance)
-        if may_approve_procedure(user, self.instance):
-            return cleaned_data
-
-        raise forms.ValidationError({"approval_required": APPROVAL_DENIED_MESSAGE})
+        refused = protected_field_refusals(
+            protected_field_snapshot(self.instance),
+            cleaned_data,
+            may_approve_procedure(user, self.instance),
+        )
+        if refused:
+            raise forms.ValidationError(refused)
+        return cleaned_data
 
     def save(self, commit: bool = True):
         if not self.instance.pk:
@@ -84,38 +88,42 @@ class RPCProcedureForm(NetBoxModelForm):
         # The edit view calls save() inside its transaction. The gate runs again
         # here under a row lock, because the copy read in clean() can be stale.
         with transaction.atomic():
-            self._refuse_unpin_under_lock()
-            return super().save(commit=commit)
+            lock_procedure_scope()
+            approvable_before = self._refuse_unpin_under_lock()
+            saved = super().save(commit=commit)
+            if commit:
+                # Raising rolls the write back with the rest of this transaction.
+                refuse_approval_scope_gain(
+                    _request_user(self.instance), approvable_before, AbortRequest
+                )
+            return saved
 
-    def _refuse_unpin_under_lock(self) -> None:
-        # The approve scope is read from the locked row as it is now, not from the
-        # copy read in clean(), because the scope can change before the lock is taken.
+    def _refuse_unpin_under_lock(self) -> frozenset[object]:
+        # Applies every protected-field rule, not only the pin. The approve scope is
+        # read from the locked row as it is now, not from the copy read in clean(),
+        # because the scope can change before the lock is taken.
         stored = RPCProcedure.objects.select_for_update().get(pk=self.instance.pk)
         # Reloaded after the lock: NetBox caches grants on the request user.
         user = reload_requesting_user(_request_user(self.instance))
+        # Custom fields reach the instance from their cf_* form fields, so the value
+        # that will be saved is the instance's mapping.
+        requested = dict(self.cleaned_data)
+        requested["custom_field_data"] = getattr(self.instance, "custom_field_data", None)
         may_approve = may_approve_procedure(user, stored)
-        if unpin_is_refused(
-            previously_pinned=stored.transport_pinned,
-            requested_pinned=self.cleaned_data.get("transport_pinned"),
-            may_approve=may_approve,
-        ):
-            raise AbortRequest(UNPIN_DENIED_MESSAGE)
-        if lowering_is_refused(
-            previously_set=stored.approval_required,
-            requested=self.cleaned_data.get("approval_required"),
-            may_approve=may_approve,
-        ):
-            raise AbortRequest(APPROVAL_DENIED_MESSAGE)
-
-    def _refuse_transport_unpin(self, cleaned_data: dict[str, object]) -> None:
-        user = _request_user(self.instance)
-        may_approve = may_approve_procedure(user, self.instance)
-        if unpin_is_refused(
-            previously_pinned=self.instance.transport_pinned,
-            requested_pinned=cleaned_data.get("transport_pinned"),
-            may_approve=may_approve,
-        ):
-            raise forms.ValidationError({"transport_pinned": UNPIN_DENIED_MESSAGE})
+        refused = protected_field_refusals(
+            protected_field_snapshot(stored), requested, may_approve
+        )
+        if refused:
+            raise AbortRequest(" ".join(dict.fromkeys(refused.values())))
+        for field in PROTECTED_PROCEDURE_FIELDS:
+            if field in RELATION_PROTECTED_FIELDS:
+                continue
+            if self.cleaned_data.get(field) is None:
+                # Django keeps the instance's value for an omitted field with a default,
+                # and that copy can be stale; write the locked row's value instead.
+                setattr(self.instance, field, getattr(stored, field))
+        # The procedures the editor may approve now, before the write; see save().
+        return approvable_procedure_pks(user)
 
     class Meta:
         model = RPCProcedure

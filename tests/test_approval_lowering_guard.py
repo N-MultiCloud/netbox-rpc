@@ -90,36 +90,28 @@ def test_pin_entry_point_delegates_to_the_shared_rule() -> None:
                 )
 
 
-def test_form_and_transport_carry_the_same_approval_message() -> None:
-    # The form keeps its own constant because a static contract test reads forms.py.
-    # Compare the parsed literals, so implicit string concatenation is folded.
-    forms = ast.parse(_read("netbox_rpc/forms.py"))
-    form_message = next(
-        ast.literal_eval(node.value)
-        for node in forms.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "APPROVAL_DENIED_MESSAGE"
-            for target in node.targets
-        )
-    )
+def test_form_and_serializer_take_the_approval_message_from_the_shared_table() -> None:
+    # The message is defined once, in transport.py, next to the rule that uses it.
+    namespace = _transport_namespace()
+    rule, message = namespace["PROTECTED_PROCEDURE_FIELD_RULES"]["approval_required"]
 
-    assert form_message == _transport_namespace()["APPROVAL_DENIED_MESSAGE"]
+    assert message == namespace["APPROVAL_DENIED_MESSAGE"]
+    assert rule(True, False, False) is True
+    assert "APPROVAL_DENIED_MESSAGE" not in _read("netbox_rpc/forms.py")
 
 
 def test_serializer_imports_and_checks_the_approval_rule() -> None:
     serializers = _read("netbox_rpc/api/serializers.py")
     block = _serializer_block()
 
-    assert (
-        "from ..transport import APPROVAL_DENIED_MESSAGE, lowering_is_refused"
-        in serializers
-    )
-    assert 'previously_required = getattr(self.instance, "approval_required", None)' in block
-    assert 'requested=attrs.get("approval_required")' in block
-    assert 'refused["approval_required"] = APPROVAL_DENIED_MESSAGE' in block
-    assert "requested=requested_required" in block
-    assert "instance.approval_required = stored.approval_required" in block
+    assert "protected_field_refusals," in serializers
+    assert "protected_field_snapshot," in serializers
+    assert "stored_flags = protected_field_snapshot(self.instance)" in block
+    assert "_requested_protected_values(stored_flags, attrs), may_approve" in block
+    assert "stored_flags = protected_field_snapshot(stored)" in block
+    assert "for field in PROTECTED_PROCEDURE_FIELDS:" in block
+    assert "setattr(instance, field, getattr(stored, field))" in block
+    assert "approval_required" in _transport_namespace()["PROTECTED_PROCEDURE_FIELDS"]
 
 
 def _is_parent_validate_call(node: ast.AST) -> bool:
@@ -151,7 +143,7 @@ def test_serializer_reads_the_stored_approval_before_the_parent_validator_runs()
     parent_call = min(
         node.lineno for node in ast.walk(validate) if _is_parent_validate_call(node)
     )
-    for name in ("previously_pinned", "previously_required", "may_approve"):
+    for name in ("stored_flags", "may_approve"):
         assert _assigned_line(validate, name) < parent_call, name
 
 
@@ -161,17 +153,21 @@ def test_update_checks_the_approval_rule_after_taking_the_row_lock() -> None:
     update = _serializer_block().split("    def update(self, instance, validated_data):", 1)[1]
 
     lock = update.index("select_for_update()")
-    assert lock < update.index("if lowering_is_refused(")
+    assert lock < update.index("protected_field_refusals(")
 
 
 def test_form_lock_path_uses_the_shared_rule() -> None:
     forms = _read("netbox_rpc/forms.py")
-    lock_block = forms.split("    def _refuse_unpin_under_lock(self) -> None:", 1)[1].split(
-        "    def _refuse_transport_unpin", 1
+    lock_block = forms.split("    def _refuse_unpin_under_lock(self) -> frozenset[object]:", 1)[1].split(
+        "    class Meta:", 1
     )[0]
 
-    assert "from .transport import lowering_is_refused" in forms
-    assert "if lowering_is_refused(" in lock_block
-    assert "previously_set=stored.approval_required" in lock_block
-    assert 'requested=self.cleaned_data.get("approval_required")' in lock_block
-    assert "raise AbortRequest(APPROVAL_DENIED_MESSAGE)" in lock_block
+    assert "protected_field_refusals," in forms
+    assert lock_block.index("select_for_update()") < lock_block.index(
+        "protected_field_refusals("
+    )
+    assert "protected_field_snapshot(stored)," in lock_block
+    assert "requested = dict(self.cleaned_data)" in lock_block
+    assert "raise AbortRequest(" in lock_block
+
+
