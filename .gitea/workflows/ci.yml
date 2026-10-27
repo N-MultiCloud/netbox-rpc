@@ -1,18 +1,22 @@
 name: CI
 
-# Run the netbox-rpc test suite on every push and pull request.
+# Run the netbox-rpc test suite on main/tag pushes and every pull request.
 # Tests mock out Django and NetBox imports so no live NetBox instance is required.
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - '**'
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:

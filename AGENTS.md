@@ -2305,6 +2305,22 @@ pending approval or distinct-actor check.
 
 ## CI / Testing
 
+Both quality workflow definitions validate every pull request and main/tag
+pushes. Feature pushes do not duplicate the complete PR checks. Manual public
+dispatch remains available. Concurrency cancels only obsolete runs of the same
+pull request; main, tag, and manual runs remain independent. Keep every
+executable job, certified NetBox version, dependency lock, and integration
+trust boundary unchanged when editing scheduling. Main requires the verified
+`CI / Syntax check and tests (pull_request)` status before merge.
+
+The repository-owned `.nms-git-workflow.json` declares complete syntax checks,
+the existing Ruff configuration, and the entire mocked `tests` suite for normal
+local commit and push verification. It does not replace real NetBox-backed
+integration CI or authorize a skip-check override.
+Give large adversarial parametrized inputs compact, descriptive case IDs so
+JUnit evidence stays bounded. Preserve every payload, assertion, and timing
+limit; never reduce security coverage to fit an artifact limit.
+
 - **Lint gate.** The GitHub unit job runs `ruff check --config ruff.toml netbox_rpc tests`
   with ruff pinned to 0.16.2. The rule set is ruff's default set for that release plus
   the whole classic gate and pylint error checks (`E4`, `E7`, `E9`, `F`, `PLE`), minus the

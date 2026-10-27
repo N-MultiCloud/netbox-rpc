@@ -502,11 +502,14 @@ def _assert_ci_contract(workflow: str) -> None:
     loaded = _load_ci_workflow(workflow)
     assert set(loaded) == {"name", "on", "permissions", "concurrency", "jobs"}
     assert loaded["name"] == "CI"
-    assert loaded["on"] == {"push": "", "pull_request": ""}
+    assert loaded["on"] == {
+        "push": {"branches": ["main"], "tags": ["**"]},
+        "pull_request": "",
+    }
     assert loaded["permissions"] == {"contents": "read"}
     assert loaded["concurrency"] == {
-        "group": "ci-${{ github.ref }}",
-        "cancel-in-progress": "true",
+        "group": "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     assert set(loaded["jobs"]) == {"test"}
 

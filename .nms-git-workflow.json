@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "syntax": [
+    {"kind": "python-compileall", "paths": ["netbox_rpc", "tests"]}
+  ],
+  "lint": [
+    {"kind": "ruff-check", "paths": ["netbox_rpc", "tests"]}
+  ],
+  "test": [
+    {"kind": "pytest-suite", "paths": ["tests"], "profile": "plain"}
+  ]
+}
