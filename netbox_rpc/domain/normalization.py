@@ -22,6 +22,7 @@ from .. import (
     gitea_org_ci_runner_contract,
     gitea_org_docker_runner_recovery_contract,
     gitea_protected_publication_pair_contract,
+    gitea_user_runner_cache_contract,
     iam_ui_contract,
     samba_ad_dc_contract,
 )
@@ -55,6 +56,7 @@ from ..constants import (
     GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
     GITEA_RUNNER_REGISTER,
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
+    GITEA_USER_RUNNER_CACHE_INSPECT,
     HUAWEI_MA5800_R024_START_ONT,
     HUAWEI_NE8000_F1A_SHOW_BGP_PEER,
     INFLUXDB3_DEBIAN13_INSTALL,
@@ -236,6 +238,9 @@ _GITEA_RUNNER_REGISTER_AVAILABLE = False
 # catalog dispatchable without the paired backend implementation and capability
 # contract. Flip to True only in the same additive rollout that enables the row.
 _GITEA_ORG_CI_RUNNER_AVAILABLE = False
+# The user runner inspection catalog is seeded disabled. Keep an independent
+# code gate closed until the paired backend handler and capability are deployed.
+_GITEA_USER_RUNNER_CACHE_AVAILABLE = False
 # The protected publication pair remains unavailable until the reviewed host
 # generation, both content-addressed helpers, and the paired backend semantic
 # capability are deployed and pinned together. Mutable catalog enablement must
@@ -249,6 +254,14 @@ _AKVORADO_BOOTSTRAP_DEBIAN13_AVAILABLE = False
 
 
 def _gitea_runner_code_gate_unavailable_reason(procedure_name: str) -> str | None:
+    if (
+        procedure_name == GITEA_USER_RUNNER_CACHE_INSPECT
+        and not _GITEA_USER_RUNNER_CACHE_AVAILABLE
+    ):
+        return (
+            "The fixed user Python runner inspection is unavailable until its "
+            "backend handler and exact capability contract are deployed."
+        )
     if (
         procedure_name in GITEA_ORG_CI_RUNNER_PROCEDURE_NAMES
         and not _GITEA_ORG_CI_RUNNER_AVAILABLE
@@ -757,6 +770,7 @@ def normalize_execution_params(execution: RPCExecution) -> dict[str, Any]:
     elif execution.procedure.name in (
         GITEA_USER_CI_RUNNER_PROCEDURE_NAMES
         | GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES
+        | {GITEA_USER_RUNNER_CACHE_INSPECT}
     ):
         normalized = _normalize_gitea_docker_runner_execution(execution)
     else:
@@ -2745,6 +2759,31 @@ def validate_gitea_docker_runner_target(
     )
 
 
+def validate_gitea_user_runner_cache_target(
+    target: object,
+    *,
+    target_model_label: str,
+    assigned_object_id: object,
+    target_display: object | None = None,
+) -> str:
+    """Require the fixed active runner VM and its management IPv4 address."""
+
+    host = _validate_gitea_docker_runner_target(
+        target,
+        target_model_label=target_model_label,
+        assigned_object_id=assigned_object_id,
+        target_display=target_display,
+        contract=gitea_user_runner_cache_contract,
+        lane_label="user Python",
+    )
+    if host != gitea_user_runner_cache_contract.HOST_MANAGEMENT_IP:
+        raise RPCExecutionError(
+            "Gitea user Python runner target has an unexpected management IPv4 address.",
+            code="RPC_TARGET_INVALID",
+        )
+    return host
+
+
 def validate_gitea_org_docker_runner_recovery_target(
     target: object,
     *,
@@ -2821,7 +2860,11 @@ def _normalize_gitea_docker_runner_execution(
     """Validate the fixed target and preserve the backend's exact empty payload."""
 
     procedure_name = execution.procedure.name
-    if procedure_name in GITEA_USER_CI_RUNNER_PROCEDURE_NAMES:
+    if procedure_name == GITEA_USER_RUNNER_CACHE_INSPECT:
+        contract = gitea_user_runner_cache_contract
+        validator = validate_gitea_user_runner_cache_target
+        lane_label = "user Python"
+    elif procedure_name in GITEA_USER_CI_RUNNER_PROCEDURE_NAMES:
         contract = gitea_docker_runner_contract
         validator = validate_gitea_docker_runner_target
         lane_label = "user"

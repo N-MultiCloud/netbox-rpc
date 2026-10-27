@@ -159,6 +159,10 @@ EXEMPT_HANDLER_RATIONALE = {
         "Collects bounded structured Docker, runner, resolver, probe, log, and "
         "network evidence for one fixed lane through backend-owned fixed argv."
     ),
+    "service.gitea.actions_runner.inspect_user_cache": (
+        "Collects bounded, allowlisted cache and image evidence for the fixed "
+        "user-scoped Python runner lane through backend-owned fixed argv."
+    ),
     "service.gitea.actions_runner.recover_user_ci_runner": (
         "Fences the fixed runner, refuses active jobs, removes only proven stale "
         "unattached networks, reconciles reviewed DNS, and restarts one fixed unit."

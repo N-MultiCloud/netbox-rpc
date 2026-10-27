@@ -20,6 +20,7 @@ from .. import (
     gitea_org_ci_runner_contract,
     gitea_org_docker_runner_recovery_contract,
     gitea_runner_contract,
+    gitea_user_runner_cache_contract,
     iam_ui_contract,
     netbox_rq_worker_contract,
     openbao_import_contract,
@@ -45,6 +46,7 @@ from ..constants import (
     GITEA_USER_CI_RUNNER_DIAGNOSE,
     GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
     GITEA_USER_CI_RUNNER_RECOVER,
+    GITEA_USER_RUNNER_CACHE_INSPECT,
     INFLUXDB3_DEBIAN13_PROCEDURE_NAMES,
     LINUX_PROXMOX_OCI_REGISTRY_PULL,
     NETBOX_OPENBAO_IMPORT_APPLY,
@@ -70,6 +72,7 @@ from ..domain.normalization import (
     validate_gitea_org_docker_runner_recovery_target,
     validate_gitea_runner_target,
     validate_gitea_upgrade_target,
+    validate_gitea_user_runner_cache_target,
 )
 from ..event_store import mark_execution_failed
 from ..openbao_validation import (
@@ -116,6 +119,7 @@ _ASSIGNED_OBJECT_SCOPED_PROCEDURE_NAMES = frozenset(
         *GITEA_ORG_CI_RUNNER_RECOVERY_PROCEDURE_NAMES,
         *GITEA_PROTECTED_PUBLICATION_PAIR_PROCEDURE_NAMES,
         *GITEA_USER_CI_RUNNER_PROCEDURE_NAMES,
+        GITEA_USER_RUNNER_CACHE_INSPECT,
         *NETBOX_OPENBAO_IMPORT_PROCEDURE_NAMES,
         *NMULTICLOUD_DEPLOY_RELEASE_MARKER_PROCEDURE_NAMES,
         LINUX_PROXMOX_OCI_REGISTRY_PULL,
@@ -316,6 +320,12 @@ _GITEA_RUNNER_TARGET_POLICIES = {
             GITEA_USER_CI_RUNNER_DIAGNOSE,
             GITEA_USER_CI_RUNNER_RECOVER,
         )
+    },
+    GITEA_USER_RUNNER_CACHE_INSPECT: {
+        "content_type": gitea_user_runner_cache_contract.TARGET_OBJECT["content_type"],
+        "object_id": gitea_user_runner_cache_contract.TARGET_OBJECT_ID,
+        "validator": validate_gitea_user_runner_cache_target,
+        "required_message": "The exact user Python Gitea CI runner VM is required.",
     },
     **{
         procedure_name: {

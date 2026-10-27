@@ -172,6 +172,9 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     constants.GITEA_USER_CI_RUNNER_RECOVER = (
         "service.gitea.actions_runner.recover_user_ci_runner"
     )
+    constants.GITEA_USER_RUNNER_CACHE_INSPECT = (
+        "service.gitea.actions_runner.inspect_user_cache"
+    )
     constants.GITEA_ORG_CI_RUNNER_DIAGNOSE = (
         "service.gitea.actions_runner.diagnose_org_ci_runner"
     )
@@ -196,6 +199,7 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
             constants.GITEA_ORG_CI_RUNNER_PROVISION,
             constants.GITEA_USER_CI_RUNNER_DIAGNOSE,
             constants.GITEA_USER_CI_RUNNER_RECOVER,
+            constants.GITEA_USER_RUNNER_CACHE_INSPECT,
             constants.GITEA_ORG_CI_RUNNER_DIAGNOSE,
             constants.GITEA_ORG_CI_RUNNER_RECOVER,
             constants.LINUX_PROXMOX_OCI_REGISTRY_PULL,
@@ -234,6 +238,9 @@ def command_handlers_module(monkeypatch: pytest.MonkeyPatch):
     normalization.normalize_execution_params = lambda execution: {}
     normalization.validate_gitea_org_ci_runner_target = lambda *args, **kwargs: {}
     normalization.validate_gitea_docker_runner_target = lambda *args, **kwargs: None
+    normalization.validate_gitea_user_runner_cache_target = (
+        lambda *args, **kwargs: None
+    )
     normalization.validate_gitea_org_docker_runner_recovery_target = (
         lambda *args, **kwargs: None
     )

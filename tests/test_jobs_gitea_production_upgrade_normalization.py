@@ -284,6 +284,88 @@ def test_gitea_docker_runner_response_rejects_events_and_error_text(
     )
 
 
+def test_user_runner_cache_response_dispatch_and_http_status(jobs_module) -> None:
+    procedure_name = "service.gitea.actions_runner.inspect_user_cache"
+    execution = SimpleNamespace(
+        procedure=SimpleNamespace(name=procedure_name, timeout_seconds=120),
+        params={},
+        normalized_params={},
+        target_display="Gitea-Runner",
+    )
+    policy = jobs_module._resolve_backend_transport_policy(execution)
+    evidence = {
+        "target": "Gitea-Runner",
+        "target_object_id": 604,
+        "runner_name": "ci-untrusted-emersonfelipesp-241",
+        "config_path": "/opt/nmc-ci-untrusted-user-241/config.yaml",
+        "config_sha256": "a" * 64,
+        "compose_sha256": "b" * 64,
+        "trusted_fixed_paths": True,
+        "capacity": 1,
+        "host_label_matches": True,
+        "config_paths_match": True,
+        "compose_identity_matches": True,
+        "configured_image": "nmc/ci-untrusted-runner:python312-241",
+        "running_image": "nmc/ci-untrusted-runner:python312-241",
+        "running_image_id": "sha256:" + "c" * 64,
+        "container_id": "d" * 64,
+        "observed_container_name": "nmc-ci-untrusted-user-241-runner-1",
+        "matches_source": True,
+        "installed_binary_version": "v0.6.1",
+        "exec_process_uid": 1000,
+        "container_config_user": "cirunner",
+        "runtime_identity_matches": True,
+        "state": "running",
+        "health": None,
+        "cap_drop_all": True,
+        "cap_add_count": 0,
+        "no_new_privileges": True,
+        "privileged": False,
+        "read_only_rootfs": False,
+        "mount_count": 3,
+        "bind_mount_count": 1,
+        "docker_socket_mounted": True,
+        "config_mount_read_only": True,
+        "registration_id": None,
+        "user_scope_verified": False,
+        "active_job": None,
+        "scheduling_drained": False,
+    }
+    result = {
+        "ok": True,
+        "procedure": procedure_name,
+        "stage": "complete",
+        "evidence": evidence,
+    }
+    envelope = {
+        "ok": True,
+        "result": result,
+        "events": [],
+        "error_code": "",
+        "error_message": "",
+    }
+    success_http = SimpleNamespace(status_code=200)
+    assert jobs_module._normalize_gitea_docker_runner_backend_response(
+        policy, success_http, envelope
+    ) == {"ok": True, "result": result}
+
+    contradictory = deepcopy(envelope)
+    contradictory["result"]["stage"] = "indeterminate"
+    fallback = jobs_module._gitea_docker_runner_transport_failure_response(policy)
+    assert (
+        jobs_module._normalize_gitea_docker_runner_backend_response(
+            policy, success_http, contradictory
+        )
+        == fallback
+    )
+    assert (
+        jobs_module._normalize_gitea_docker_runner_backend_response(
+            policy, SimpleNamespace(status_code=503), envelope
+        )
+        == fallback
+    )
+
+
 def test_protected_publication_pair_transport_is_secret_closed_and_semantic(
     jobs_module,
 ) -> None:

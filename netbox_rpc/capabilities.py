@@ -54,6 +54,7 @@ _SEMANTIC_CAPABILITY_HANDLER_IDS = frozenset(
         "service.gitea.actions_runner.recover_user_ci_runner",
         "service.gitea.actions_runner.diagnose_org_ci_runner",
         "service.gitea.actions_runner.recover_org_ci_runner",
+        "service.gitea.actions_runner.inspect_user_cache",
         "service.netbox.staging.deploy_dns_pair",
     }
 )
@@ -159,6 +160,9 @@ def derive_command_contract_hash(procedure: Any) -> str:
         from .gitea_upgrade_contract import (
             SEMANTIC_CAPABILITY_EXTENSION as upgrade_contract,
         )
+        from .gitea_user_runner_cache_contract import (
+            SEMANTIC_CONTRACT as user_cache_contract,
+        )
 
         payload["semantic_contract"] = {
             "service.gitea.production.upgrade_1_27_1": upgrade_contract,
@@ -186,6 +190,7 @@ def derive_command_contract_hash(procedure: Any) -> str:
                     "service.gitea.actions_runner.recover_org_ci_runner"
                 ]
             ),
+            "service.gitea.actions_runner.inspect_user_cache": user_cache_contract,
             "service.netbox.staging.deploy_dns_pair": dns_staging_contract,
             "service.gitea.actions_runner.protected_pair.prove": (
                 publication_pair_contracts[

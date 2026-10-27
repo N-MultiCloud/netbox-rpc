@@ -431,6 +431,9 @@ _PROCEDURE_TRANSPORT_KINDS = {
     "service.gitea.actions_runner.recover_org_ci_runner": (
         _BackendTransportKind.GITEA_DOCKER_RUNNER
     ),
+    "service.gitea.actions_runner.inspect_user_cache": (
+        _BackendTransportKind.GITEA_DOCKER_RUNNER
+    ),
     "service.netbox.staging.deploy_dns_pair": (
         _BackendTransportKind.DNS_STAGING_DEPLOY
     ),
@@ -1168,7 +1171,9 @@ def _normalize_akvorado_install_closed_response(
 
 def _gitea_docker_runner_contract(policy: _BackendTransportPolicy) -> Any:
     procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
-    if procedure_name.endswith("_org_ci_runner"):
+    if procedure_name == "service.gitea.actions_runner.inspect_user_cache":
+        from . import gitea_user_runner_cache_contract as contract
+    elif procedure_name.endswith("_org_ci_runner"):
         from . import gitea_org_docker_runner_recovery_contract as contract
     else:
         from . import gitea_docker_runner_contract as contract
@@ -1291,6 +1296,8 @@ def _gitea_docker_runner_transport_failure_response(
 
     contract = _gitea_docker_runner_contract(policy)
     procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    if procedure_name == "service.gitea.actions_runner.inspect_user_cache":
+        return {"ok": False, "result": contract.fallback_result()}
     snapshot = _gitea_docker_runner_snapshot(contract)
     if procedure_name == contract.DIAGNOSE_PROCEDURE_NAME:
         result = {
@@ -1366,7 +1373,13 @@ def _normalize_gitea_docker_runner_backend_response(
     response: requests.Response,
     data: object,
 ) -> dict[str, Any]:
-    normalized = _normalize_gitea_docker_runner_closed_response(policy, data)
+    procedure_name = str(getattr(policy.execution.procedure, "name", "") or "")
+    if procedure_name == "service.gitea.actions_runner.inspect_user_cache":
+        from . import gitea_user_runner_cache_contract as contract
+
+        normalized = contract.normalize_backend_response(data)
+    else:
+        normalized = _normalize_gitea_docker_runner_closed_response(policy, data)
     if normalized is None or not _closed_response_matches_http_status(
         response,
         normalized,

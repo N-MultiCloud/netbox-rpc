@@ -356,6 +356,18 @@ The procedure catalog is intentionally narrow:
   explicit capability gate rejects recovery at advertisement, admission, and
   worker claim. Both require exact capabilities and bounded closed responses; see
   [`docs/gitea-user-ci-runner-recovery.md`](docs/gitea-user-ci-runner-recovery.md).
+- `service.gitea.actions_runner.inspect_user_cache` — disabled-by-default,
+  read-only inspection of the separate user-scoped Python runner 44 on exact
+  `Gitea-Runner` VM PK 604. The caller supplies no paths, commands, image
+  references, labels, or credentials. The backend returns bounded hashes and
+  allowlisted source, image, container, and installed-binary evidence; it never
+  returns raw configuration, registration material, or command output. The
+  reported binary version and UID describe a new process launched for the
+  inspection, while the container configuration and state are reported
+  separately. A complete read can report a source or identity mismatch without
+  changing the host. The independent code gate remains closed until the paired
+  backend handler and exact capability contract are deployed. The procedure
+  and any later executions remain visible in the existing RPC catalogs.
 - `service.gitea.actions_runner.diagnose_org_ci_runner` and
   `service.gitea.actions_runner.recover_org_ci_runner` — disabled-by-default,
   empty-params diagnosis and approval-gated recovery for the fixed

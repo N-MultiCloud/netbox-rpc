@@ -243,6 +243,9 @@ GITEA_USER_CI_RUNNER_PROCEDURE_NAMES = frozenset(
     {GITEA_USER_CI_RUNNER_DIAGNOSE, GITEA_USER_CI_RUNNER_RECOVER}
 )
 
+# Fixed read-only inspection of the separate user-scoped Python runner lane.
+GITEA_USER_RUNNER_CACHE_INSPECT = "service.gitea.actions_runner.inspect_user_cache"
+
 # Fixed-contract Docker-network diagnosis and approval-gated reclamation for
 # the organization-scoped general Ubuntu lane on the same dedicated runner VM.
 GITEA_ORG_CI_RUNNER_DIAGNOSE = "service.gitea.actions_runner.diagnose_org_ci_runner"
@@ -523,6 +526,7 @@ EXPLICIT_BACKEND_CAPABILITY_PROCEDURE_NAMES = frozenset(
         GITEA_PROTECTED_PUBLICATION_PAIR_PROVISION,
         GITEA_USER_CI_RUNNER_DIAGNOSE,
         GITEA_USER_CI_RUNNER_RECOVER,
+        GITEA_USER_RUNNER_CACHE_INSPECT,
         GITEA_ORG_CI_RUNNER_DIAGNOSE,
         GITEA_ORG_CI_RUNNER_RECOVER,
         OPENBAO_1_PROVISION_NETBOX_APPROLE,

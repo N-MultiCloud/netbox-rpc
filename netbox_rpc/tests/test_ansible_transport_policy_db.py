@@ -72,6 +72,10 @@ CURRENT_PINNED_PROCEDURES = (
         "service.gitea.actions_runner.diagnose_user_ci_runner",
     ),
     (
+        "service.gitea.actions_runner.inspect_user_cache",
+        "service.gitea.actions_runner.inspect_user_cache",
+    ),
+    (
         "service.gitea.actions_runner.protected_pair.prove",
         "service.gitea.actions_runner.protected_pair.prove",
     ),
