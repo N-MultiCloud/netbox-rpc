@@ -1879,13 +1879,33 @@ migration/static path-and-digest maps to the exact archive. A migration added
 without renewing both the reviewed migration policy and generated manifest now
 fails ordinary CI before the production deploy gateway sees it.
 
+### Production deployment control
+
+The application repository no longer deploys production on a `main` push.
+`.gitea/workflows/deploy-production.yml` has no trigger or job. Do not dispatch
+or reactivate it: Gitea selects workflow bytes from the event ref, so a branch
+author can change the workflow before its own job-level checks run. The current
+organization runner scope still exposes privileged deployment labels to
+application branches.
+
+The future `nms-automation-control` lane must own a repository-scoped trusted
+runner and verify the exact accepted canonical-main SHA before it invokes one
+of two fixed gateway actions. Package mode must use a backend-resolved exact
+`netbox-rpc` version; an explicit main override must use the full canonical
+commit SHA. The controller must hardcode package and gateway identities and
+admit no caller-selected executable, path, index, SSH target, or shell text.
+Production activation remains unavailable until that control lane, the
+candidate staging gate, and package publication are proven. Source merge and
+package publication alone do not establish a production deployment.
+
 The workflow and its repository tests are defense in depth; they are not the
 runner authorization boundary because a candidate branch can modify its own
-workflow. Gitea's trusted repository/organization runner policy must make
-mirror and production-capable runners ineligible for pull-request jobs and
-permit ordinary CI to match only the isolated runner label. Until that external
-policy is provisioned and proven, this CI contract must remain blocked/queued
-rather than activated on a broader runner.
+workflow. Gitea's runner policy must make mirror and production-capable labels
+unavailable to every application-repository ref and event, not only pull
+requests, and permit ordinary CI to match only the isolated runner label. A
+passing ordinary CI run does not establish that privileged runner boundary.
+Production deployment remains blocked/queued until the locked controller and
+runner cutover prove it.
 
 Migration `0084` added the disabled
 `service.gitea.actions_runner.provision_org_ci_runner` skeleton on exact

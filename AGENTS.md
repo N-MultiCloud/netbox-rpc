@@ -2317,8 +2317,8 @@ pending approval or distinct-actor check.
 > here drive fake managers (plain dicts), so they enforce no column width, no NOT NULL,
 > no uniqueness, and no FK integrity. A seeded value that violates one passes locally
 > and fails only when a real database applies the migration — which means CI at best,
-> and the production deploy at worst, since the plugin auto-deploys on merge to `main`
-> and runs migrations via `ExecStartPre`. This is not theoretical: a 291-character
+> and a later controlled production activation at worst, because the service
+> runs migrations via `ExecStartPre`. This is not theoretical: a 291-character
 > seeded `description` shipped through a green pure-domain suite and failed the
 > DB-backed compatibility job with
 > `DataError: value too long for type character varying(255)`. When adding a seed,
@@ -2381,10 +2381,12 @@ Two tiers (see `docs/architecture.md` → Testing):
    Provisioning the dedicated runner is an
    external workspace prerequisite; an offline runner means ordinary CI remains
    queued, not rerouted. These candidate-side files are defense in depth, not
-   runner authority: the Gitea repository/organization runner policy must make
-   mirror and production-capable runners ineligible for pull-request jobs and
-   allow this workflow to match only the isolated label. Ordinary CI remains
-   blocked/queued until that trusted platform policy is proven. The portable
+   runner authority: the Gitea runner policy must make mirror and
+   production-capable labels unavailable to every application-repository ref
+   and event, not only pull requests, and allow ordinary CI to match only the
+   isolated label. A passing ordinary CI run does not establish that privileged
+   runner boundary. Production deployment remains blocked/queued until the
+   locked controller and runner cutover prove it. The portable
    `.github/workflows/test.yml` `unit` job mirrors the test scope. Cover the
    domain logic (projection fold/rebuild, typed events, aggregate invariants,
    value objects, queries, normalization). Add new domain/CQRS logic here. Use
@@ -3382,14 +3384,22 @@ preprovisioned, offline toolchain boundary.
 `.gitea/workflows/publish-pypi.yml` builds sdist+wheel and publishes to the
 internal registry (`git.nmulti.cloud/api/packages/N-MultiCloud/pypi`) on
 `v*` tag push, or via `workflow_dispatch` with a `version` input (used when a
-tag predates the workflow). Registry-only: production deploys stay with
-`deploy-production.yml`. Verify a published version with `nms git packages`
+tag predates the workflow). Registry-only: it must not deploy production. The
+application's `deploy-production.yml` is inert; a future locked controller
+must own activation. Verify a published version with `nms git packages`
 and confirm the wheel contains `templates/netbox_rpc/*.html` (package-data).
 
-## Production Deployment (source-aware)
+## Production Deployment (control-domain handoff pending)
 
-Pushes to `main` trigger `.gitea/workflows/deploy-production.yml`, which deploys
-the merged commit to the production NetBox instance.
+Merges and pushes to `main` do not deploy this plugin. The application
+repository's `.gitea/workflows/deploy-production.yml` is intentionally inert:
+it declares no event, permission, or job. Do not dispatch it, add a privileged
+runner job, or restore its push trigger. Gitea 1.26.2 selects workflow bytes
+from the event ref before job-level conditions run. An application branch can
+therefore replace its own workflow and request any organization-scoped runner
+label. Production deployment must move to the locked
+`nms-automation-control` repository with independent admission of the
+canonical main SHA and exact source choice.
 
 **This plugin is on the source-aware deploy contract — the generic plugin
 helper is deliberately refused for it.** `deploy-netbox-plugin` rejects both
@@ -3409,15 +3419,13 @@ The two accepted host-side actions are:
 
 `-main` takes a commit SHA, never a branch name.
 
-**Invocation is local-first.** The `prod-deploy` runner runs on the target host
-as root and invokes `/opt/nmulticloud/deploy/bin/python-package-deploy`
-directly; the SSH branch is only a fallback for a runner placed on another host.
-This mirrors `netbox-rpc-backend`'s workflows.
-
-**Deploy source.** A `main` push deploys `main_branch` with `github.sha` — the
-merged commit is by definition not yet published as a package. A manual
-`workflow_dispatch` offers the estate-standard choice, defaulting to the
-immutable `latest_package` (which requires an exact `package_version`).
+**Future deployment source.** The locked controller must accept only
+`latest_package` with an exact backend-resolved canonical package version, or
+an explicit `main_branch` override bound to the full canonical-main commit
+SHA. It must hardcode the `netbox-rpc` package identity and invoke only the
+corresponding fixed gateway action. The current application workflow does not
+provide either deployment path. Do not use the legacy repository variables or
+SSH fallback to recreate them in this repository.
 
 **Source build lock (required for `main_branch`).** The `git <sha>` path builds
 the wheel inside an isolated, pristine snapshot of the commit and installs the
@@ -3505,37 +3513,16 @@ data-destroying `RunPython`/`RunSQL`. Dropping a stale constraint (as `0034`
 does) and adding a nullable column with a backfill (as `0031` does) are both
 expand-only; removing a column an older plugin version still reads is not.
 
-**Repository variables** (Settings → Actions → Variables), all optional:
+**Release status.** Package publication and production activation remain
+separate gates. The source-only change that disables automatic deployment does
+not prove the locked controller, runner-scope cutover, published package, staged
+candidate, or production health. Keep feature pull requests unmerged until the
+staging lane and package-first release controls can be validated. Once the
+locked controller is live, use its approved NMS interface and verify the
+installed package/source identity and the `netbox` service health through
+`nms`/`nbx`; do not issue an application-repository workflow dispatch.
 
-| Variable | Default |
-|---|---|
-| `DEPLOY_PACKAGE_BIN` | `/opt/nmulticloud/deploy/bin/python-package-deploy` |
-| `DEPLOY_STATUS_BIN` | `/opt/nmulticloud/deploy/bin/status-app` |
-| `DEPLOY_SSH_HOST` | `nmc-prod-207` |
-
-> The legacy `DEPLOY_PLUGIN_BIN` variable is **no longer used** by this
-> workflow. It points at `deploy-netbox-plugin`, which refuses this plugin.
-
-**Status reporting** queries the `netbox` app, not `netbox-rpc` — the host-side
-validator accepts only its known app names and `netbox-rpc` is not one, and the
-service whose health matters after a plugin deploy is NetBox itself.
-
-**Manual dispatch:**
-
-```bash
-# Deploy the current main commit
-nms git api POST /repos/N-MultiCloud/netbox-rpc/actions/workflows/deploy-production.yml/dispatches \
-  --body-json '{"ref":"main","inputs":{"deploy_source":"main_branch","package_version":""}}'
-
-# Deploy a published package version
-nms git api POST /repos/N-MultiCloud/netbox-rpc/actions/workflows/deploy-production.yml/dispatches \
-  --body-json '{"ref":"main","inputs":{"deploy_source":"latest_package","package_version":"0.1.6"}}'
-```
-
-**Monitoring:** watch the run in Gitea Actions; the final step prints the
-deploy-target status.
-
-For comprehensive deploy infrastructure documentation, see `/root/personal-context/nmulticloud-context/CLAUDE.md` section "Automatic Plugin Deployment to Production".
+For the host gateway contract, see `/root/personal-context/nmulticloud-context/CLAUDE.md`. The new controller must own its own operator runbook before activation.
 
 ## Fixed IAM UI control
 

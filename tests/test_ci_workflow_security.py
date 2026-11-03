@@ -22,6 +22,7 @@ from yaml.tokens import (
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "ci.yml"
 INTEGRATION_WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "integration.yml"
+PRODUCTION_WORKFLOW_PATH = ROOT / ".gitea" / "workflows" / "deploy-production.yml"
 GITHUB_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "test.yml"
 LOCK_PATH = ROOT / ".gitea" / "ci-requirements.lock"
 PYTEST_CONFIG_PATH = ROOT / ".gitea" / "pytest-ci.ini"
@@ -80,18 +81,22 @@ EXPECTED_SOURCE_BUILD_LOCK = (
     "    --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3\n"
 )
 EXPECTED_GITHUB_INSTALL_COMMANDS = (
-    ("python -m pip install \\\n"
-    "  --require-hashes \\\n"
-    "  --only-binary=:all: \\\n"
-    "  --no-cache-dir \\\n"
-    "  --disable-pip-version-check \\\n"
-    "  -r plugin/.gitea/deploy/netbox-source-build.lock"),
-    ("python -m pip install \\\n"
-    "  --require-hashes \\\n"
-    "  --no-build-isolation \\\n"
-    "  --no-cache-dir \\\n"
-    "  --disable-pip-version-check \\\n"
-    '  -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"'),
+    (
+        "python -m pip install \\\n"
+        "  --require-hashes \\\n"
+        "  --only-binary=:all: \\\n"
+        "  --no-cache-dir \\\n"
+        "  --disable-pip-version-check \\\n"
+        "  -r plugin/.gitea/deploy/netbox-source-build.lock"
+    ),
+    (
+        "python -m pip install \\\n"
+        "  --require-hashes \\\n"
+        "  --no-build-isolation \\\n"
+        "  --no-cache-dir \\\n"
+        "  --disable-pip-version-check \\\n"
+        '  -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"'
+    ),
     "python -m pip install --no-deps --no-build-isolation -e ./plugin",
 )
 STEP_RUN_SHA256 = {
@@ -198,6 +203,15 @@ def _load_unique_yaml(workflow: str) -> dict:
     loaded = yaml.load(workflow, Loader=_UniqueNoAliasLoader)
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _assert_production_workflow_inert(workflow: str) -> None:
+    assert _load_unique_yaml(workflow) == {
+        "name": "Production deployment disabled in application repository",
+        "on": {},
+        "permissions": {},
+        "jobs": {},
+    }
 
 
 def _assert_optional_integration_preflight(job: dict) -> None:
@@ -817,6 +831,43 @@ def test_privileged_integration_is_manual_main_only_and_non_gating() -> None:
     _assert_compatibility_job_is_pinned(workflow)
     assert "Manual, non-gating diagnostics only" in workflow
     assert "never required pull-request evidence" in workflow
+
+
+def test_application_production_workflow_has_no_event_or_job() -> None:
+    _assert_production_workflow_inert(_read(PRODUCTION_WORKFLOW_PATH))
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    (
+        ("on: {}", "on:\n  push:\n    branches: [main]"),
+        ("on: {}", "on:\n  workflow_dispatch:"),
+        ("permissions: {}", "permissions:\n  contents: write"),
+        ("jobs: {}", "jobs:\n  deploy:\n    runs-on: prod-deploy"),
+    ),
+)
+def test_application_production_workflow_rejects_reactivation(
+    needle: str, replacement: str
+) -> None:
+    workflow = _read(PRODUCTION_WORKFLOW_PATH)
+    assert needle in workflow
+    with pytest.raises(AssertionError):
+        _assert_production_workflow_inert(workflow.replace(needle, replacement, 1))
+
+
+def test_application_production_workflow_rejects_duplicate_keys() -> None:
+    workflow = _read(PRODUCTION_WORKFLOW_PATH)
+    with pytest.raises(AssertionError, match="duplicate YAML key: on"):
+        _assert_production_workflow_inert(workflow + "on: {}\n")
+
+
+def test_application_production_workflow_rejects_aliases() -> None:
+    workflow = _read(PRODUCTION_WORKFLOW_PATH)
+    needle = "on: {}\npermissions: {}"
+    assert needle in workflow
+    mutated = workflow.replace(needle, "on: &shared {}\npermissions: *shared", 1)
+    with pytest.raises(AssertionError, match="YAML aliases are forbidden"):
+        _assert_production_workflow_inert(mutated)
 
 
 def test_github_compatibility_matrix_and_install_are_pinned() -> None:
@@ -1722,14 +1773,16 @@ def test_exact_toolchain_accepts_and_prints_exact_identities(tmp_path: Path) -> 
     (
         (
             "jobs:\n  test:",
-            ("jobs:\n"
-            "  bypass:\n"
-            "    name: Bypass\n"
-            "    runs-on: ci-untrusted-python312\n"
-            "    steps:\n"
-            "      - name: Bypass\n"
-            "        run: 'true'\n"
-            "  test:"),
+            (
+                "jobs:\n"
+                "  bypass:\n"
+                "    name: Bypass\n"
+                "    runs-on: ci-untrusted-python312\n"
+                "    steps:\n"
+                "      - name: Bypass\n"
+                "        run: 'true'\n"
+                "  test:"
+            ),
         ),
         (
             "runs-on: ci-untrusted-python312",
