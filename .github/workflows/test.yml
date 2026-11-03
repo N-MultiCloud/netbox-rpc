@@ -110,10 +110,13 @@ jobs:
             -r "plugin/.gitea/deploy/netbox-${NETBOX_VERSION}-ci.lock"
           python -m pip install --no-deps --no-build-isolation -e ./plugin
 
-      - name: Run the integration suite
+      - name: Run the rollback gate and integration suite
         run: |
           set -eo pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}/plugin/tests/ci:${GITHUB_WORKSPACE}/netbox/netbox"
           export NETBOX_CONFIGURATION=netbox_configuration
           export DJANGO_SETTINGS_MODULE=netbox.settings
+          python netbox/netbox/manage.py check
+          python netbox/netbox/manage.py migrate --no-input
+          python plugin/.gitea/scripts/check_migration_rollback.py
           python netbox/netbox/manage.py test netbox_rpc --verbosity 2

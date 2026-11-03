@@ -3488,10 +3488,35 @@ silently absent from the wheel.
 rollback review for every migration path. The generator joins those reviewed
 decisions to the current migration content, and `DeploymentContent.from_mapping()`
 rejects any decision other than `true`, so the manifest can only be built after
-the whole migration graph is attested as expand-only. The policy also pins the
-count and a canonical digest of the reviewed rows; adding or changing a
-migration makes the generator fail with "migration compatibility policy is
-stale" until a human reviews the migration and renews the file:
+the whole migration graph is attested as expand-only.
+
+`rollback_compatible` is a reviewed expand-only policy declaration: older
+plugin code is expected to run while the expanded schema remains applied. The
+generator validates explicit booleans and the migration-content digest; it
+does not execute older plugin code. The declaration does not assert that every
+migration can be unapplied. Published 0073, 0077, 0078, 0080, 0081, 0085,
+0087, and 0089 have intentional reverse barriers to protect mutable catalog
+and audit rows.
+
+The compatibility matrix executes `.gitea/scripts/check_migration_rollback.py`
+after a full forward migration. It downgrades the current reversible suffix to
+`0103_seed_ubuntu_26_samba_ad_dc_procedures` and reapplies it with the 0110,
+0111, and 0112 seed rows and inbound commands present. It also executes 0068's
+actual reverse callable against its historical app state with an inbound
+command FK. The gate requires the expected 0112 leaf and exact 14-node plan;
+it fails if the downgrade or assertions fail.
+Migrations 0091 and 0103 Samba cannot be round-tripped because their forward
+seeds refuse rows retained by their non-destructive reverses; 0096 has the
+same issue and is tracked separately in issue #331. They are outside this
+measured suffix. This suffix and the 0068 probe do not certify full-graph
+database reversibility or old-code compatibility. A changed leaf or plan
+requires an explicit review of the rollback target, seed assertions, and gate
+scope before the matrix can pass.
+
+The policy also pins the count and a canonical digest of the reviewed rows;
+adding or changing a migration makes the generator fail with
+"migration compatibility policy is stale" until a human reviews the migration
+and renews the file:
 
 ```bash
 .gitea/scripts/generate_deploy_manifest.py --show-migration-attestation > \

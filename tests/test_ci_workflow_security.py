@@ -36,7 +36,7 @@ PYTEST_CONFIG_SHA256 = (
     "7f0a35baee4c8d0d2b3fce080490ec0a53f352d784a444ee91930f1728e9fc12"
 )
 INTEGRATION_WORKFLOW_SHA256 = (
-    "0bab9f5902d0c6e99f9ffabdd831e88f519467951bdcba273754c6a156a354da"
+    "1ffcc1c7a4daea13ad86bd59789ce14091f5e04b975783c49442b90fc9c2a9b2"
 )
 EXPECTED_COMPATIBILITY_MATRIX = [
     {
@@ -669,11 +669,44 @@ def _assert_manual_privileged_integration_contract(workflow: str) -> None:
 
 def _assert_compatibility_job_is_pinned(workflow: str) -> None:
     loaded = _load_ci_workflow(workflow)
-    matrix = loaded["jobs"]["compatibility"]["strategy"]["matrix"]["include"]
+    job = loaded["jobs"]["compatibility"]
+    matrix = job["strategy"]["matrix"]["include"]
     assert matrix == EXPECTED_COMPATIBILITY_MATRIX
     _assert_compatibility_source_identity(workflow)
     _assert_compatibility_install_lockdown(workflow)
     _assert_compatibility_cleanup_order(workflow)
+    _assert_rollback_gate_order(
+        _named_step_run(job, "Run compatibility checks (fresh database)")
+    )
+
+
+def _assert_rollback_gate_order(script: str) -> None:
+    executable_lines = [
+        line.strip()
+        for line in script.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    migrate = "python netbox/netbox/manage.py migrate --no-input"
+    rollback = "python plugin/.gitea/scripts/check_migration_rollback.py"
+    test_commands = {
+        "python netbox/netbox/manage.py test netbox_rpc --no-input",
+        "python netbox/netbox/manage.py test netbox_rpc --verbosity 2",
+    }
+    assert executable_lines.count(migrate) == 1
+    assert executable_lines.count(rollback) == 1
+    tests = [index for index, line in enumerate(executable_lines) if line in test_commands]
+    assert len(tests) == 1
+    assert executable_lines.index(migrate) < executable_lines.index(rollback) < tests[0]
+
+
+def test_rollback_gate_command_cannot_be_commented_out() -> None:
+    script = (
+        "python netbox/netbox/manage.py migrate --no-input\n"
+        "# python plugin/.gitea/scripts/check_migration_rollback.py\n"
+        "python netbox/netbox/manage.py test netbox_rpc --verbosity 2"
+    )
+    with pytest.raises(AssertionError):
+        _assert_rollback_gate_order(script)
 
 
 def _assert_compatibility_source_identity(workflow: str) -> None:
@@ -725,6 +758,9 @@ def _assert_github_compatibility_contract(workflow: str) -> None:
     assert job["strategy"]["matrix"]["include"] == EXPECTED_GITHUB_MATRIX
     install = _named_step_run(job, "Install NetBox + plugin")
     assert _pip_install_commands(install) == EXPECTED_GITHUB_INSTALL_COMMANDS
+    _assert_rollback_gate_order(
+        _named_step_run(job, "Run the rollback gate and integration suite")
+    )
 
 
 def _assert_source_build_lock(lock: str) -> None:

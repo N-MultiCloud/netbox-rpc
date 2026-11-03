@@ -1844,6 +1844,8 @@ The suite is two tiers (see `docs/architecture.md` → Testing):
 python -m pytest tests
 
 # Tier 2 — DB-backed integration tests against a NetBox checkout + Postgres
+python netbox/manage.py migrate --no-input
+python .gitea/scripts/check_migration_rollback.py
 python netbox/manage.py test netbox_rpc
 ```
 
@@ -1913,16 +1915,43 @@ evidence and is never a PR/push trigger, branch-protection requirement, or
 substitute for the isolated runner policy. Candidate-side ref checks remain
 defense in depth; trusted Gitea runner/ref eligibility is authoritative.
 
+The compatibility matrix runs the rollback gate on disposable databases for
+NetBox 4.5.8, 4.6.5, and 4.7.0. It checks the exact 0112 leaf, confirms the
+0110, 0111, and 0112 seed procedures and inbound command rows exist, migrates
+the reversible suffix back to `0103_seed_ubuntu_26_samba_ad_dc_procedures`,
+then reapplies the suffix and verifies the rows survive. It also calls 0068's
+real reverse code against its historical app state with an inbound
+command FK; the row must remain present and disabled. A missing seed, changed
+leaf or 14-node plan, failed downgrade, or failed reapplication fails the gate.
+This measures database reversal only for the suffix after the 0103 Samba seed
+plus the 0068 reverse probe. The deployment manifest's
+`rollback_compatible` flag is a reviewed declaration that the schema is
+expand-only and older plugin code is
+expected to run while that schema stays applied. The generator validates the
+declared booleans and migration-content digest; this gate does not execute
+older plugin code. Published 0073, 0077, 0078, 0080, 0081, 0085, 0087, and
+0089 retain intentional reverse barriers for audited catalog data.
+Migrations 0091 and 0103 Samba are outside the tested suffix: their reverses
+retain rows, but their forward seeds refuse to adopt them during
+reapplication. The same 0096 pattern is tracked in issue #331.
+
+The Gitea rollback check remains a manual, canonical-`main` diagnostic. The
+supplemental GitHub matrix runs on pull requests after mirroring, but neither
+is a Gitea pre-merge DB gate. The isolated untrusted DB runner tracked by #451
+is required before candidate PRs can use this gate for admission. Until then,
+the disposable local three-version matrix is the candidate's DB evidence;
+candidate code must not run on the privileged Gitea compatibility runner.
+
 Migration behavior tests that execute an older `RunPython` callable against the
 current physical database use the current Django app registry for row creation
 and restoration. Historical project-state models omit fields added by later
 migrations; using one to insert into the current table can violate a later
 non-null column because Django normally removes the database-level default after
-an `AddField` migration. A test may use historical models only when it also owns
-an isolated physical database at that exact migration state and can restore the
-graph without crossing a deliberately irreversible migration. Tests for an
-older reverse callable invoke that callable directly rather than migrating the
-whole graph backward through unrelated irreversible boundaries.
+an `AddField` migration. A test may use a historical model for a read or
+table-level update in a disposable current-schema database, but must not use it
+for insertion or deletion. Tests for an older reverse callable invoke that
+callable directly rather than migrating the whole graph backward through
+unrelated irreversible boundaries.
 
 Its compatibility job installs exact uv 0.12.5 through a full-commit-pinned
 setup action with the exact release-archive SHA-256, then uses that frozen uv

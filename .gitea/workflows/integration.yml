@@ -427,11 +427,14 @@ jobs:
           export DJANGO_SETTINGS_MODULE=netbox.settings
           # The gate proves cross-version installability AND fresh-database
           # behavioral correctness: system checks, a complete migration run
-          # (including all seed migrations), then the full DB-backed behavioral
-          # suite on a freshly built database. The suite's pydantic/cryptography
+          # (including all seed migrations), a checked rollback/reapply of the
+          # fourteen-node suffix after 0103 plus the 0068 reverse probe, then the
+          # full DB-backed behavioral suite on a freshly built database.
+          # The suite's pydantic/cryptography
           # deps come from `.ci-venv`'s `plugin[test]` install above.
           python netbox/netbox/manage.py check
           python netbox/netbox/manage.py migrate --no-input
+          python plugin/.gitea/scripts/check_migration_rollback.py
           python netbox/netbox/manage.py test netbox_rpc --no-input
 
       - name: Stop isolated Redis
