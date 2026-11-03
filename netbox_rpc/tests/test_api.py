@@ -156,6 +156,145 @@ class ExecutionApiTests(TestCase):
         assert self.client.post(url, {}, format="json").status_code in (403, 405)
 
 
+class ExecutionListFilterTests(TestCase):
+    def setUp(self):
+        from django.contrib.contenttypes.models import ContentType
+
+        from netbox_rpc.tests._common import device_ct
+
+        self.user = make_user("execution-filter-admin", superuser=True)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.url = reverse("plugins-api:netbox_rpc-api:rpcexecution-list")
+        self.procedure_a = make_procedure("os.linux.filter.a")
+        self.procedure_b = make_procedure("os.linux.filter.b")
+        self.device_a = make_device("rpc-filter-device-a")
+        self.device_b = make_device("rpc-filter-device-b")
+        self.executions = {}
+        for procedure in (self.procedure_a, self.procedure_b):
+            for device in (self.device_a, self.device_b):
+                execution = RPCExecution.objects.create(
+                    procedure=procedure,
+                    assigned_object_type=device_ct(),
+                    assigned_object_id=device.pk,
+                    requested_by=self.user,
+                    backend=42 if procedure == self.procedure_a else 43,
+                    status=(
+                        RPCExecution.STATUS_FAILED
+                        if device == self.device_b
+                        else RPCExecution.STATUS_QUEUED
+                    ),
+                )
+                self.executions[(procedure.pk, device.pk)] = execution.pk
+        site = self.device_a.site
+        self.site_execution = RPCExecution.objects.create(
+            procedure=self.procedure_b,
+            assigned_object_type=ContentType.objects.get_for_model(site),
+            assigned_object_id=site.pk,
+            requested_by=self.user,
+        )
+        self.site_id = site.pk
+
+    def _ids(self, params):
+        response = self.client.get(self.url, params)
+        assert response.status_code == 200, response.content
+        return {row["id"] for row in response.data["results"]}
+
+    def test_procedure_alias_and_existing_id_filter_narrow_independently(self):
+        expected = {
+            self.executions[(self.procedure_a.pk, self.device_a.pk)],
+            self.executions[(self.procedure_a.pk, self.device_b.pk)],
+        }
+        assert self._ids({"procedure": self.procedure_a.pk}) == expected
+        assert self._ids({"procedure_id": self.procedure_a.pk}) == expected
+        assert self._ids({"procedure": self.procedure_a.pk, "procedure_id": self.procedure_b.pk}) == set()
+
+    def test_target_filters_narrow_independently_and_together(self):
+        assert self._ids({"assigned_object_type": "dcim.device"}) == set(
+            self.executions.values()
+        )
+        assert self._ids({"assigned_object_type": "dcim.site"}) == {
+            self.site_execution.pk
+        }
+        expected_device = {
+            self.executions[(self.procedure_a.pk, self.device_b.pk)],
+            self.executions[(self.procedure_b.pk, self.device_b.pk)],
+        }
+        if self.site_id == self.device_b.pk:
+            expected_device.add(self.site_execution.pk)
+        assert self._ids({"assigned_object_id": self.device_b.pk}) == expected_device
+        assert self._ids(
+            {
+                "procedure": self.procedure_a.pk,
+                "assigned_object_type": "dcim.device",
+                "assigned_object_id": self.device_b.pk,
+            }
+        ) == {self.executions[(self.procedure_a.pk, self.device_b.pk)]}
+
+    def test_invalid_type_and_unknown_procedure_do_not_broaden(self):
+        for label in (
+            "dcim",
+            "dcim.device.extra",
+            "dcim.invalidmodel",
+            "DCIM.device",
+            " dcim.device ",
+            "",
+            "  ",
+        ):
+            assert self._ids({"assigned_object_type": label}) == set()
+        assert self._ids({"procedure": ""}) == set()
+        assert self._ids({"assigned_object_id": ""}) == set()
+        response = self.client.get(self.url, {"procedure": 999_999_999})
+        assert response.status_code == 400, response.content
+        response = self.client.get(self.url, {"assigned_object_id": "not-a-number"})
+        assert response.status_code == 400, response.content
+
+    def test_whitespace_only_selectors_never_return_unfiltered_results(self):
+        for key in (
+            "procedure",
+            "procedure_id",
+            "assigned_object_type",
+            "assigned_object_id",
+        ):
+            response = self.client.get(self.url, {key: "  "})
+            if response.status_code == 200:
+                assert response.data["count"] == 0, (key, response.data)
+            else:
+                assert response.status_code == 400, (key, response.content)
+
+    def test_target_id_requires_canonical_positive_integer_syntax(self):
+        for invalid_id in ("2.5", "2e0", "02", "0", "-1", " 2 ", "9999999999999999999"):
+            assert self._ids({"assigned_object_id": invalid_id}) == set()
+
+    def test_status_backend_and_pagination_remain_effective(self):
+        expected = self.executions[(self.procedure_a.pk, self.device_b.pk)]
+        assert self._ids(
+            {
+                "procedure": self.procedure_a.pk,
+                "status": RPCExecution.STATUS_FAILED,
+                "backend_id": 42,
+            }
+        ) == {expected}
+        params = {"procedure": self.procedure_a.pk, "limit": 1}
+        first = self.client.get(self.url, params)
+        second = self.client.get(self.url, {**params, "offset": 1})
+        assert first.status_code == second.status_code == 200
+        assert first.data["count"] == second.data["count"] == 2
+        assert len(first.data["results"]) == len(second.data["results"]) == 1
+        assert first.data["results"][0]["id"] != second.data["results"][0]["id"]
+
+    def test_view_permission_still_restricts_filtered_results(self):
+        from django.contrib.auth import get_user_model
+
+        visible_id = self.executions[(self.procedure_a.pk, self.device_a.pk)]
+        viewer = make_user("execution-filter-viewer", superuser=False)
+        _grant(viewer, model=RPCExecution, actions=("view",), constraints={"id": visible_id})
+        viewer = get_user_model().objects.get(pk=viewer.pk)
+        self.client.force_authenticate(user=viewer)
+        assert self._ids({"procedure": self.procedure_a.pk}) == {visible_id}
+        assert self._ids({"procedure": self.procedure_b.pk}) == set()
+
+
 class AkvoradoCreationSecurityTests(TestCase):
     def setUp(self):
         enable_rpc_integration()

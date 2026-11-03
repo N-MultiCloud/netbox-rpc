@@ -699,6 +699,27 @@ is treated as a read projection for NetBox API compatibility.
   same transactional helper. Job and API code must call command handlers or
   event-store helpers instead of mutating status/result fields inline.
 
+### Execution list filters
+
+`GET /api/plugins/rpc/executions/` filters the database queryset before
+pagination. `procedure` and `procedure_id` both accept a procedure's numeric ID;
+`procedure_id` remains available for existing API clients. `assigned_object_type`
+accepts a lowercase `app_label.model` content type such as `dcim.device`, and
+`assigned_object_id` accepts a positive target ID in canonical decimal digits
+(no sign, fraction, exponent, or leading zero). These filters can be combined
+with each other and with the existing `status` and `backend_id` filters. An
+unknown procedure or a nonnumeric target ID returns HTTP 400. A malformed,
+unknown, or empty target type returns no executions. A numeric target ID with
+noncanonical syntax returns no executions. Empty or whitespace-only selectors
+never return the unfiltered execution list.
+
+The installed CLI uses the same query keys, so it can narrow server-side results
+without fetching unrelated pages:
+
+```bash
+nms rpc executions list --procedure 123 --assigned-object-type dcim.device --assigned-object-id 456
+```
+
 Durable events include `ExecutionQueued`, `JobEnqueued`, `ExecutionStarted`,
 `ParametersNormalized`, backend progress events, `ExecutionSucceeded`,
 `ExecutionFailed`, `ExecutionEnqueueFailed`, and `ExecutionCancelled`.
